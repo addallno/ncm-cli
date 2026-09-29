@@ -78,6 +78,31 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// 每日推荐歌曲（需登录），表格 + -d 选择下载
+    Daily {
+        /// 只列出前 N 首（0 = 全部）
+        #[arg(short = 'n', long, default_value_t = 0)]
+        limit: u32,
+        #[command(flatten)]
+        opts: DownloadArgs,
+    },
+    /// 播放歌曲（喂 URL 给 $NCM_PLAYER/mpv/ffplay；都没有则打印 URL）
+    Play {
+        /// 歌曲 ID / 链接 / 关键词；daily = 每日推荐
+        target: String,
+        /// 列表场景随机选一首（daily / 歌单）
+        #[arg(long)]
+        shuffle: bool,
+        /// 指定播放器程序（默认探测 $NCM_PLAYER → mpv → ffplay）
+        #[arg(long, value_name = "CMD")]
+        player: Option<String>,
+        /// 音质
+        #[arg(long, default_value = "exhigh", value_parser = ["lossless", "standard", "exhigh", "hires"])]
+        quality: String,
+        /// 只输出 JSON（不调用播放器）
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -470,6 +495,78 @@ async fn download_one(
 }
 
 /// 批量下载编排 + 汇总
+/// 列表格 →（TTY 且未给 -d：交互询问编号）→ 有选择则下载，否则仅展示
+async fn browse(ncm: &Ncm, songs: Vec<Value>, desc: &str, opts: DownloadArgs) -> Result<i32> {
+    let mut printed = false;
+    let mut sel = opts.download.clone();
+    if sel.is_none() && !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        print_search_table(&songs);
+        printed = true;
+        use std::io::Write;
+        eprint!("输入要下载的编号 (如 1,3,5-8/all，回车仅列出): ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? > 0 {
+            let t = line.trim().to_string();
+            if !t.is_empty() {
+                sel = Some(t);
+            }
+        }
+    }
+    match sel {
+        Some(s) => {
+            let picked = pick_items(&songs, &s)?;
+            download_songs(ncm, picked, vec![format!("{desc} 选择 {s}")], opts).await
+        }
+        None => {
+            if opts.json {
+                print_search_json(&songs)?;
+            } else if !printed {
+                print_search_table(&songs);
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// 探测播放器：--player → $NCM_PLAYER → mpv → ffplay；返回 (程序, 额外参数)
+fn find_player(spec: Option<&str>) -> Option<(String, Vec<String>)> {
+    // 显式指定（--player / $NCM_PLAYER）：直接按空白切分使用
+    if let Some(s) = spec {
+        let mut it = s.split_whitespace().map(String::from);
+        let prog = it.next()?;
+        return Some((prog, it.collect()));
+    }
+    if let Ok(v) = std::env::var("NCM_PLAYER") {
+        let v = v.trim();
+        if !v.is_empty() {
+            let mut it = v.split_whitespace().map(String::from);
+            let prog = it.next()?;
+            return Some((prog, it.collect()));
+        }
+    }
+    // 候选程序需真实存在（带 --version 探测）
+    let candidates: [(&str, &[&str]); 2] = [
+        ("mpv", &["--no-video", "--really-quiet"]),
+        ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "error"]),
+    ];
+    for (prog, args) in candidates {
+        let ok = std::process::Command::new(prog)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+        if ok {
+            return Some((
+                prog.to_string(),
+                args.iter().map(|s| s.to_string()).collect(),
+            ));
+        }
+    }
+    None
+}
+
 async fn run_batch(
     ncm: &Ncm,
     targets: Vec<String>,
@@ -825,7 +922,7 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
 
-const SUBCOMMANDS: [&str; 5] = ["search", "dl", "list", "playlists", "help"];
+const SUBCOMMANDS: [&str; 7] = ["search", "dl", "list", "playlists", "daily", "play", "help"];
 
 /// 快捷方式：首个参数不是子命令时自动补 `dl`（`ncm 259138` == `ncm dl 259138`）；
 /// 纯 flags（-h/-V）不改写，交给顶层解析
@@ -903,34 +1000,105 @@ async fn run(cli: Cli) -> Result<i32> {
             if limit > 0 {
                 songs.truncate(limit as usize);
             }
-            let mut printed = false;
-            let mut sel = opts.download.clone();
-            // TTY 且未给 -d：列出表格后交互询问要下载的编号
-            if sel.is_none() && !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                print_search_table(&songs);
-                printed = true;
-                use std::io::Write;
-                eprint!("输入要下载的编号 (如 1,3,5-8/all，回车仅列出): ");
-                std::io::stderr().flush().ok();
-                let mut line = String::new();
-                if std::io::stdin().read_line(&mut line)? > 0 {
-                    let t = line.trim().to_string();
-                    if !t.is_empty() {
-                        sel = Some(t);
-                    }
-                }
+            browse(&ncm, songs, &desc, opts).await
+        }
+        Some(Commands::Daily { limit, opts }) => {
+            ui::set_json(opts.json);
+            ui::set_quiet(opts.quiet);
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let mut songs = ncm.daily_songs().await?;
+            if songs.is_empty() {
+                bail!("每日推荐为空（该接口需登录：--session/--cookie 或 NCM_SESSION/NCM_COOKIE）");
             }
-            match sel {
-                Some(s) => {
-                    let picked = pick_items(&songs, &s)?;
-                    download_songs(&ncm, picked, vec![format!("{desc} 选择 {s}")], opts).await
+            if limit > 0 {
+                songs.truncate(limit as usize);
+            }
+            let desc = format!("每日推荐（{} 首）", songs.len());
+            browse(&ncm, songs, &desc, opts).await
+        }
+        Some(Commands::Play {
+            target,
+            shuffle,
+            player,
+            quality,
+            json,
+        }) => {
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let songs = if target.eq_ignore_ascii_case("daily") {
+                let s = ncm.daily_songs().await?;
+                if s.is_empty() {
+                    bail!("每日推荐为空（该接口需登录）");
+                }
+                s
+            } else if is_target_like(&target) {
+                let (found, _) = resolve_target(&ncm, &target, false).await?;
+                if found.is_empty() {
+                    bail!("目标没有可播放的曲目");
+                }
+                found
+            } else {
+                let found = ncm.search(&target, 1).await?;
+                if found.is_empty() {
+                    bail!("未搜索到结果: {target}");
+                }
+                found
+            };
+            let song = if shuffle && songs.len() > 1 {
+                let idx = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .subsec_nanos() as usize)
+                    % songs.len();
+                &songs[idx]
+            } else {
+                &songs[0]
+            };
+            let track = Track::from_json(song);
+            let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
+            let spin = ui::Spinner::start(format!("取址 · {}", track.title));
+            let (row, source, reason, _) =
+                fetch_row(&ncm, track.id, &quality, true, wanted_flac).await;
+            spin.stop();
+            let row = row.context(reason)?;
+            let url = row["url"]
+                .as_str()
+                .filter(|u| !u.is_empty())
+                .context("没有可播放的地址")?;
+            let br = row["br"].as_u64().unwrap_or(0);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "id": track.id,
+                        "name": track.title,
+                        "artists": track.artists,
+                        "url": url,
+                        "br": br,
+                        "source": source,
+                    }))?
+                );
+                return Ok(0);
+            }
+            match find_player(player.as_deref()) {
+                Some((prog, args)) => {
+                    ui::step(&format!(
+                        "▶ {} - {} · {source} · {} kbps",
+                        track.title,
+                        track.artists,
+                        br / 1000
+                    ));
+                    let status = std::process::Command::new(&prog)
+                        .args(&args)
+                        .arg(url)
+                        .status()
+                        .with_context(|| format!("启动播放器失败: {prog}"))?;
+                    if !status.success() {
+                        bail!("播放器退出码 {status}");
+                    }
+                    Ok(0)
                 }
                 None => {
-                    if opts.json {
-                        print_search_json(&songs)?;
-                    } else if !printed {
-                        print_search_table(&songs);
-                    }
+                    ui::info("未找到播放器（可安装 mpv/ffplay 或用 --player/$NCM_PLAYER 指定），地址如下:");
+                    println!("{url}");
                     Ok(0)
                 }
             }

@@ -15,10 +15,6 @@ pub struct Ncm {
 }
 
 impl Ncm {
-    pub fn new() -> Result<Self> {
-        Self::with_cookie(None)
-    }
-
     /// 登录版：附加 MUSIC_U 等登录 cookie
     pub fn with_cookie(cookie: Option<&str>) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();

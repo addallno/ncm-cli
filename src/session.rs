@@ -81,7 +81,7 @@ fn parse_legacy(data: &[u8]) -> Result<String> {
         }
         let mut blk = aes::cipher::generic_array::GenericArray::clone_from_slice(block);
         cipher.decrypt_block(&mut blk);
-        plain.extend_from_slice(&blk.as_slice());
+        plain.extend_from_slice(blk.as_slice());
     }
     // 去 PKCS7 填充
     let pad = *plain.last().context("解密结果为空")? as usize;
@@ -99,7 +99,7 @@ fn parse_legacy(data: &[u8]) -> Result<String> {
         .context("明文缺少 pyncm 标记")?;
     let json_str = &text[start..];
     let end = json_str.find(&marker).context("明文缺少 pyncm 结束标记")?;
-    let value: Value = serde_json::from_slice(json_str[..end].as_bytes())
+    let value: Value = serde_json::from_slice(&json_str.as_bytes()[..end])
         .context("legacy session JSON 解析失败")?;
     cookies_to_header(&value)
 }
@@ -132,7 +132,6 @@ fn cookies_to_header(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     const LEGACY_HEX: &str = "14802A8DCECD7B925B20A546D635E05937F0751884E9161B6FC030C323CE2990D6860B82E4B68EE18D17F0994E7F63D00AD95BA9133C108B3891FA2510A9BE1D8ADB06F3BC20BBB454421065092409C6B2808C9A11EDED250A382CC2E0CE1D5AF75A270FE9131C61451372DADDED7AEA05ABE0FA365F10864614CB9C579732C1";
 
