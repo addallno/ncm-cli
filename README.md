@@ -7,6 +7,13 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
 
 - **搜索**：`ncm search 关键词 -n 10`，对齐表格输出，`--download 1|1,3|all` 直接下载
 - **下载**：单曲 / 歌单 / 专辑 / 歌手链接 / `list.123`，**默认 FLAC + 歌词 + 保留音频**
+- **浏览**：`ncm list <歌单/专辑/歌手>` 表格列出；统一选择器 `-d 1,3,5-8/all/1-` 对
+  search/list/daily 都生效；TTY 下没给 `-d` 会提示交互输入编号（回车仅列出）
+- **登录（可选）**：`--session <pyncm dump>`（兼容 PYNCM/legacy 双格式）或
+  `--cookie "MUSIC_U=...; __csrf=..."`（浏览器 F12 直接粘），环境变量 `NCM_SESSION`/`NCM_COOKIE` 同效；
+  登录后可用 `ncm playlists`（我的歌单）与 `ncm daily`（每日推荐）
+- **播放**：`ncm play <ID/链接/关键词|daily>`，探测 `--player` → `$NCM_PLAYER` → `mpv` → `ffplay`，
+  都没有则打印可播放 URL；`--json` 结构化输出
 - **歌词**：`--lrcs lrc,tlyric,romalrc,yrc,ass` 多类型（每类型独立文件，yrc 转 ASS），
   `--lrc-dir A --lrc-dir B` 多路径，`--only-lrc` 只下歌词（无版权歌照样可用）
 - **动画**：下载进度条（`████░░ 45.7% · 14.6/30.5 MB · 4.1 MB/s`）原地刷新、
@@ -21,7 +28,12 @@ ncm search 青花瓷 -n 5                 # 搜索列表
 ncm search 晴天 --download 1           # 搜索并下载第 1 条
 ncm 259138                             # 快捷下载（== ncm dl 259138）
 ncm dl <歌单链接> -o ~/music           # 歌单批量
-ncm 259138 --only-lrc --lrcs lrc,yrc,ass --lrc-dir A --lrc-dir B
+ncm list 24381616 -n 30                # 浏览歌单前 30 首（TTY 会提示选编号）
+ncm list 24381616 -d 1,3               # 只下载第 1、3 首
+ncm playlists -n 20                    # 我的歌单（需登录）
+ncm daily -d all                       # 每日推荐全部下载（需登录）
+ncm play daily --shuffle               # 随机播一首每日推荐
+ncm play 401722227 --quality lossless  # 播放指定歌曲
 ncm dl <关键词> -S --quality exhigh    # 搜索下载、指定音质
 ```
 
@@ -58,4 +70,5 @@ CI（GitHub Actions）：push 即 fmt/clippy/test，随后产出
 
 ## 依赖
 
-`clap` + `tokio` + `reqwest(rustls)` + `lofty` + `serde_json`，无 jq、无登录、无 Python。
+`clap` + `tokio` + `reqwest(rustls)` + `lofty` + `serde_json` + `aes/base64/flate2`（session 解析），
+无 jq、无 Python；登录可选（不登录也能搜索/下载/VIP 试听外全功能）。
