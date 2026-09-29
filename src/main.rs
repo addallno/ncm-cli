@@ -3,11 +3,12 @@ mod api;
 mod download;
 mod lrc;
 mod model;
+mod session;
 mod source;
 mod tags;
 mod ui;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -28,6 +29,12 @@ struct Cli {
     /// 禁用彩色输出（NO_COLOR 环境变量同样生效）
     #[arg(long, global = true)]
     no_color: bool,
+    /// pyncm session dump 文件（兼容 PYNCM/legacy 两种格式；NCM_SESSION 同效）
+    #[arg(long, global = true, value_name = "FILE")]
+    session: Option<PathBuf>,
+    /// 登录 Cookie，如 "MUSIC_U=xxx; __csrf=yyy"（NCM_COOKIE 同效）
+    #[arg(long, global = true, value_name = "STR")]
+    cookie: Option<String>,
     #[command(subcommand)]
     cmd: Option<Commands>,
 }
@@ -61,6 +68,15 @@ enum Commands {
         limit: u32,
         #[command(flatten)]
         opts: DownloadArgs,
+    },
+    /// 列出我创建/收藏的歌单（需登录）
+    Playlists {
+        /// 最多显示数量（0 = 全部）
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: u32,
+        /// 机器可读的 JSON 输出
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -809,7 +825,7 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
 
-const SUBCOMMANDS: [&str; 4] = ["search", "dl", "list", "help"];
+const SUBCOMMANDS: [&str; 5] = ["search", "dl", "list", "playlists", "help"];
 
 /// 快捷方式：首个参数不是子命令时自动补 `dl`（`ncm 259138` == `ncm dl 259138`）；
 /// 纯 flags（-h/-V）不改写，交给顶层解析
@@ -839,6 +855,16 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<i32> {
     ui::set_color(!cli.no_color && std::env::var_os("NO_COLOR").is_none());
+    // 登录凭据：--session/--cookie 优先，回退 NCM_SESSION/NCM_COOKIE 环境变量
+    let session = cli
+        .session
+        .clone()
+        .or_else(|| std::env::var_os("NCM_SESSION").map(std::path::PathBuf::from));
+    let cookie = cli
+        .cookie
+        .clone()
+        .or_else(|| std::env::var("NCM_COOKIE").ok());
+    let auth = session::resolve_auth(session.as_deref(), cookie.as_deref())?;
     match cli.cmd {
         Some(Commands::Search {
             keyword,
@@ -848,7 +874,7 @@ async fn run(cli: Cli) -> Result<i32> {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let kw = keyword.join(" ");
-            let ncm = Ncm::new()?;
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
             if opts.json && opts.download.is_none() {
                 let found = ncm.search(&kw, limit).await?;
                 print_search_json(&found)?;
@@ -862,7 +888,7 @@ async fn run(cli: Cli) -> Result<i32> {
             if targets.is_empty() {
                 bail!("请提供歌曲 ID / 歌单·专辑链接 / 关键词（ncm help dl 查看用法）");
             }
-            let ncm = Ncm::new()?;
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
             run_batch(&ncm, targets, None, 10, opts).await
         }
         Some(Commands::List {
@@ -872,7 +898,7 @@ async fn run(cli: Cli) -> Result<i32> {
         }) => {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
-            let ncm = Ncm::new()?;
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
             let (mut songs, desc) = resolve_list(&ncm, &target).await?;
             if limit > 0 {
                 songs.truncate(limit as usize);
@@ -908,6 +934,49 @@ async fn run(cli: Cli) -> Result<i32> {
                     Ok(0)
                 }
             }
+        }
+        Some(Commands::Playlists { limit, json }) => {
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let uid = ncm.whoami().await?.context(
+                "登录态无效：请用 --session/--cookie 或 NCM_SESSION/NCM_COOKIE 提供凭据",
+            )?;
+            let mut lists = ncm.user_playlists(uid).await?;
+            if limit > 0 {
+                lists.truncate(limit as usize);
+            }
+            if json {
+                let arr: Vec<Value> = lists
+                    .iter()
+                    .map(|p| {
+                        json!({
+                            "id": p["id"],
+                            "name": p["name"],
+                            "track_count": p["trackCount"],
+                            "subscribed": p["subscribed"],
+                            "creator": p["creator"]["nickname"],
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&Value::Array(arr))?);
+                return Ok(0);
+            }
+            let rows: Vec<Vec<String>> = lists
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let mine = p["subscribed"].as_bool() == Some(false);
+                    vec![
+                        (i + 1).to_string(),
+                        p["name"].as_str().unwrap_or("").to_string(),
+                        p["trackCount"].as_u64().unwrap_or(0).to_string(),
+                        if mine { "创建" } else { "收藏" }.to_string(),
+                        p["id"].as_u64().unwrap_or(0).to_string(),
+                    ]
+                })
+                .collect();
+            ui::table(&["#", "歌单名", "曲数", "来源", "ID"], &rows);
+            ui::info("下载: ncm dl list.<ID> -d 1,3  ·  浏览: ncm list <ID>");
+            Ok(0)
         }
         // 无子命令（纯 flags 或空参数）：inject 已把裸参数注入 dl，走到这里只可能是空输入
         None => {

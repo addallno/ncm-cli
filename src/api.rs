@@ -16,14 +16,23 @@ pub struct Ncm {
 
 impl Ncm {
     pub fn new() -> Result<Self> {
+        Self::with_cookie(None)
+    }
+
+    /// 登录版：附加 MUSIC_U 等登录 cookie
+    pub fn with_cookie(cookie: Option<&str>) -> Result<Self> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::REFERER,
             reqwest::header::HeaderValue::from_static(BASE),
         );
+        let cookie_val = match cookie {
+            Some(c) => format!("os=pc; appver=2.9.7; {c}"),
+            None => "os=pc; appver=2.9.7;".to_string(),
+        };
         headers.insert(
             reqwest::header::COOKIE,
-            reqwest::header::HeaderValue::from_static("os=pc; appver=2.9.7;"),
+            reqwest::header::HeaderValue::from_str(&cookie_val)?,
         );
         let client = Client::builder()
             .user_agent(UA)
@@ -165,5 +174,39 @@ impl Ncm {
             ],
         )
         .await
+    }
+
+    /// 当前登录用户 uid（未登录返回 None）
+    pub async fn whoami(&self) -> Result<Option<u64>> {
+        let data = self.get_json("/api/nuser/account/get", &[]).await?;
+        Ok(data["profile"]["userId"]
+            .as_u64()
+            .or_else(|| data["account"]["id"].as_u64()))
+    }
+
+    /// 我的歌单列表（含"我喜欢的音乐"红心歌单，通常为首项）
+    pub async fn user_playlists(&self, uid: u64) -> Result<Vec<Value>> {
+        let data = self
+            .get_json(
+                "/api/v1/user/playlist",
+                &[
+                    ("uid", uid.to_string()),
+                    ("limit", "1000".into()),
+                    ("offset", "0".into()),
+                ],
+            )
+            .await?;
+        Ok(data["playlist"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// 每日推荐歌曲（需登录）
+    pub async fn daily_songs(&self) -> Result<Vec<Value>> {
+        let data = self
+            .get_json("/api/v1/discovery/recommend/songs", &[])
+            .await?;
+        Ok(data["data"]["dailySongs"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
     }
 }

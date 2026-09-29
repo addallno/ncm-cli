@@ -17,6 +17,9 @@ indicatif = "0.17"
 regex = "1"
 anyhow = "1"
 thiserror = "2"
+aes = "0.8"
+base64 = "0.22"
+flate2 = "1"
 
 [profile.release]
 lto = "thin"
