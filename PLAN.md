@@ -78,6 +78,8 @@
 | 6 | D3 daily / play | 列表可下；play 能喂 URL 给播放器或打印 |
 | 7 | 收尾：README/Description 更新、全量手测、push | CI 绿 |
 
+> 状态（2026-09-29）：Step 0-7 全部完成，CI success，clippy 0 warning，单测 3 passed。
+
 ## F. 明确不做
 
 - weapi/eapi 请求加密（明文 `/api` 已够用；登录只靠 cookie）
