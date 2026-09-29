@@ -32,7 +32,8 @@ jobs:
       matrix:
         include:
           - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, name: linux-x86_64 }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, name: linux-aarch64 }
+          # aarch64 用 musl + rust-lld 产出纯静态 ELF（无 ld-*.so interpreter）
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, name: linux-aarch64 }
           - { target: x86_64-pc-windows-msvc, os: windows-latest, name: windows-x86_64 }
           - { target: aarch64-apple-darwin, os: macos-latest, name: macos-aarch64 }
     runs-on: ${{ matrix.os }}
@@ -45,15 +46,13 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: 安装 musl 工具链
-        if: endsWith(matrix.target, 'musl')
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: 安装 aarch64 交叉链接器
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
       - run: cargo build --release --target ${{ matrix.target }}
         env:
-          # 交叉链接必须用 aarch64 gcc，否则 host cc 收到 --fix-cortex-a53 报错
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          # aarch64-musl 无系统交叉 gcc：ring 的 C 部分用 clang 交叉编译，链接走 rust-lld
+          CC_aarch64_unknown_linux_musl: clang
+          CFLAGS_aarch64_unknown_linux_musl: --target=aarch64-linux-musl
       - uses: actions/upload-artifact@v4
         with:
           name: ncm-${{ matrix.name }}
