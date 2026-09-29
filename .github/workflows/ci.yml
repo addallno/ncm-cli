@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 快速反馈：类型检查 + lint
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
+
+  # 多平台产物：Linux 静态 musl / Windows / macOS，外加 aarch64（远端 Termux 用）
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, name: linux-x86_64 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, name: linux-aarch64 }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, name: windows-x86_64 }
+          - { target: aarch64-apple-darwin, os: macos-latest, name: macos-aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: 安装 musl 工具链
+        if: endsWith(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: 安装 aarch64 交叉链接器
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - run: cargo build --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ncm-${{ matrix.name }}
+          path: |
+            target/${{ matrix.target }}/release/ncm
+            target/${{ matrix.target }}/release/ncm.exe
+
+  # 打 tag 时创建 Release 并附带产物
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: |
+          mkdir -p dist
+          find . -maxdepth 2 -type f -name 'ncm*' -exec cp {} dist/ \;
+          cd dist && for f in *; do case "$f" in *.exe) ;; *) gzip -kf "$f";; esac; done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
