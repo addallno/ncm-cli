@@ -24,7 +24,7 @@
 | 现状 | 改为 | 依据 |
 |------|------|------|
 | `-q, --quality` | `--quality`（无短），新增 `-q, --quiet` | `-q`=quiet 是 curl/git/yt-dlp 通例 |
-| `--skip-existing` | 加 `-n` 短选项 + 别名 `--no-overwrites` | yt-dlp `-n, --no-overwrites` |
+| `--skip-existing` | 仅别名 `--no-overwrites`（**不加 `-n`**：与 `search -n/--limit` 的全局短选项冲突，clap debug_assert 会 panic） | yt-dlp `-n, --no-overwrites` |
 | search `--download` | 加 `-d` 短选项 | 直觉惯例 |
 | `dl -S/--search` + `dl --limit` | **删除**，targets 传非数字非 URL 时自动当关键词搜索 | 消除与 `search` 子命令的重复入口，且 `ncm 关键词` 直接可用 |
 | `disable_help_subcommand = true` | 启用 `ncm help <cmd>` | git/curl 通例 |

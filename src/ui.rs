@@ -19,8 +19,30 @@ pub fn json_mode() -> bool {
     JSON_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 静默模式（-q/--quiet）：隐藏进度动画与过程行，保留结果/错误
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+pub fn set_quiet(v: bool) {
+    QUIET.store(v, Ordering::Relaxed);
+}
+
+pub fn quiet() -> bool {
+    QUIET.load(Ordering::Relaxed)
+}
+
+/// 颜色开关（--no-color / NO_COLOR）
+static COLOR: AtomicBool = AtomicBool::new(true);
+
+pub fn set_color(v: bool) {
+    COLOR.store(v, Ordering::Relaxed);
+}
+
+pub fn color_on() -> bool {
+    COLOR.load(Ordering::Relaxed)
+}
+
 pub fn paint(text: &str, code: &str) -> String {
-    if is_tty() {
+    if is_tty() && color_on() {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
         text.to_string()
@@ -44,7 +66,7 @@ pub fn dim(t: &str) -> String {
 }
 
 pub fn step(msg: &str) {
-    if json_mode() {
+    if json_mode() || quiet() {
         return;
     }
     println!("{} {}", accent("▸"), msg);
@@ -65,7 +87,7 @@ pub fn fail(msg: &str) {
     eprintln!("  {} {}", bad("✘"), msg);
 }
 pub fn info(msg: &str) {
-    if json_mode() {
+    if json_mode() || quiet() {
         return;
     }
     println!("  {}", dim(msg));
@@ -185,7 +207,7 @@ impl Live {
     }
 
     pub fn update(&mut self, text: &str, force: bool) {
-        if json_mode() {
+        if json_mode() || quiet() {
             return;
         }
         if self.tty {
@@ -199,7 +221,7 @@ impl Live {
     }
 
     pub fn finish(&mut self) {
-        if json_mode() {
+        if json_mode() || quiet() {
             self.shown = false;
             return;
         }
@@ -251,9 +273,9 @@ impl Spinner {
             label: label.into(),
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
-            tty: is_tty() && !json_mode(),
+            tty: is_tty() && !json_mode() && !quiet(),
         };
-        if json_mode() {
+        if json_mode() || quiet() {
             return s;
         }
         if s.tty {
@@ -263,8 +285,13 @@ impl Spinner {
                 let mut i = 0usize;
                 while !stop.load(Ordering::Relaxed) {
                     let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
+                    let painted = if color_on() {
+                        format!("\x1b[36m{frame}\x1b[0m")
+                    } else {
+                        frame.to_string()
+                    };
                     let mut out = std::io::stdout();
-                    let _ = write!(out, "\r\x1b[K  \x1b[36m{frame}\x1b[0m {label}");
+                    let _ = write!(out, "\r\x1b[K  {painted} {label}");
                     let _ = out.flush();
                     i += 1;
                     std::thread::sleep(std::time::Duration::from_millis(90));

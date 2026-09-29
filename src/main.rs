@@ -22,10 +22,12 @@ use model::{first_artist, hms, resolve_target, sanitize, Track};
     name = "ncm",
     version,
     about = "ncm — 网易云音乐搜索/下载/歌词工具",
-    long_about = None,
-    disable_help_subcommand = true
+    long_about = None
 )]
 struct Cli {
+    /// 禁用彩色输出（NO_COLOR 环境变量同样生效）
+    #[arg(long, global = true)]
+    no_color: bool,
     #[command(subcommand)]
     cmd: Option<Commands>,
 }
@@ -40,22 +42,16 @@ enum Commands {
         /// 结果数量
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
-        /// 下载指定项：1 / 1,3 / all（缺省仅列出）
-        #[arg(long)]
+        /// 下载指定项：1,3 / 5-8 / all（缺省仅列出）
+        #[arg(short = 'd', long)]
         download: Option<String>,
         #[command(flatten)]
         opts: DownloadArgs,
     },
-    /// 下载歌曲 / 歌单 / 专辑 / 歌手
+    /// 下载歌曲 / 歌单 / 专辑 / 歌手 / 关键词
     Dl {
-        /// 歌曲ID / 单曲·歌单·专辑·歌手链接 / list.123
+        /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / 关键词（自动搜索取最相关）
         targets: Vec<String>,
-        /// 按关键词搜索后下载
-        #[arg(short = 'S', long)]
-        search: Option<String>,
-        /// 配合 --search 的结果数
-        #[arg(long, default_value_t = 5)]
-        limit: u32,
         #[command(flatten)]
         opts: DownloadArgs,
     },
@@ -79,13 +75,20 @@ struct DownloadArgs {
     #[arg(long = "only-lrc", alias = "lyric-only")]
     only_lrc: bool,
     /// 音质：standard/exhigh/lossless/hires
-    #[arg(short = 'q', long, default_value = "lossless")]
+    #[arg(long, default_value = "lossless")]
     quality: String,
+    /// 静默：隐藏进度动画与过程输出，仅保留结果
+    #[arg(short = 'q', long)]
+    quiet: bool,
+    /// 预演：取址并报告将写入的文件，不实际下载
+    #[arg(long)]
+    dry_run: bool,
     /// 文件名模板
     #[arg(short = 't', long, default_value = "{artists} - {track}")]
     template: String,
     /// 跳过已存在的音频文件
-    #[arg(long = "skip-existing", alias = "no-overwrite")]
+    // 注：不加 -n 短选项——flatten 与 search -n (limit) 冲突（clap debug_assert 会 panic）
+    #[arg(long = "skip-existing", visible_alias = "no-overwrites")]
     skip_existing: bool,
     /// 允许下载 30 秒试听片段（默认跳过）
     #[arg(long = "allow-trial")]
@@ -267,6 +270,18 @@ async fn download_one(
             return result;
         }
 
+        if opts.dry_run {
+            println!(
+                "[dry-run] {} - {} | 目标: {} | 源: {} | 音质: {}",
+                track.title,
+                track.artists,
+                audio_base.display(),
+                source,
+                quality
+            );
+            return result;
+        }
+
         let url = row["url"].as_str().unwrap_or("").to_string();
         let mut spin = ui::Spinner::start("校验链接 · 准备下载");
         let spin_flag = spin.stop_flag();
@@ -440,6 +455,9 @@ async fn run_batch(
     if opts.only_lrc && opts.no_lrc {
         bail!("--only-lrc 与 --no-lrc 互斥，只能指定其一");
     }
+    if opts.dry_run && opts.json {
+        bail!("--dry-run 与 --json 互斥");
+    }
     let lrc_kinds: Vec<&'static str> = if opts.no_lrc {
         Vec::new()
     } else {
@@ -461,7 +479,7 @@ async fn run_batch(
         })
         .collect();
 
-    if !opts.only_lrc {
+    if !opts.only_lrc && !opts.dry_run {
         std::fs::create_dir_all(&output)?;
     }
 
@@ -489,9 +507,20 @@ async fn run_batch(
     }
 
     for target in &targets {
-        let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
-        scope.push(format!("{desc}({})", found.len()));
-        songs.extend(found);
+        if is_target_like(target) {
+            let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
+            scope.push(format!("{desc}({})", found.len()));
+            songs.extend(found);
+        } else {
+            // 非 ID/链接 → 视为关键词，取最相关 1 首（交互多选见 list 命令）
+            ui::step(&format!("搜索 “{target}”"));
+            let found = ncm.search(target, 1).await?;
+            if found.is_empty() {
+                bail!("未搜索到结果: {target}");
+            }
+            scope.push(format!("搜索 “{target}”(1)"));
+            songs.extend(found);
+        }
     }
 
     if songs.is_empty() {
@@ -520,6 +549,8 @@ async fn run_batch(
         .await;
         if json_flag {
             // JSON 模式逐条静默，最后统一输出
+        } else if opts.dry_run {
+            // dry-run 行已在 download_one 打印
         } else if let Some(s) = &r.skipped {
             ui::skip(&format!("{}/{} {} · {s}", i + 1, total, truncate(&r.title)));
         } else if let Some(e) = &r.error {
@@ -594,6 +625,17 @@ fn print_search_json(songs: &[Value]) -> Result<()> {
     Ok(())
 }
 
+/// 是否像 ID/链接目标（纯数字 / list.123 形式 / URL），否则按关键词处理
+fn is_target_like(t: &str) -> bool {
+    let t = t.trim();
+    t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty()
+        || t.starts_with("http")
+        || t.split_once('.').is_some_and(|(k, v)| {
+            matches!(k, "list" | "song" | "album" | "artist")
+                && v.chars().all(|c| c.is_ascii_digit())
+        })
+}
+
 fn pick_search(songs: &[Value], selector: &str) -> Result<Vec<Value>> {
     if selector.eq_ignore_ascii_case("all") {
         return Ok(songs.to_vec());
@@ -649,6 +691,7 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
             "version": env!("CARGO_PKG_VERSION"),
             "output": output.display().to_string(),
             "quality": opts.quality,
+            "dry_run": opts.dry_run,
             "items": json_items,
             "summary": {"audio": audio, "lrc": lrc, "bytes": bytes,
                         "skipped": skipped, "failed": failed},
@@ -659,7 +702,9 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
 
     println!();
     let mut parts: Vec<String> = Vec::new();
-    if opts.only_lrc {
+    if opts.dry_run {
+        parts.push(format!("dry-run 预演 {} 项 · 未写入文件", items.len()));
+    } else if opts.only_lrc {
         parts.push(format!("歌词文件 {lrc}"));
     } else {
         parts.push(format!("音频 {audio}"));
@@ -728,6 +773,7 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<i32> {
+    ui::set_color(!cli.no_color && std::env::var_os("NO_COLOR").is_none());
     match cli.cmd {
         Some(Commands::Search {
             keyword,
@@ -736,6 +782,7 @@ async fn run(cli: Cli) -> Result<i32> {
             opts,
         }) => {
             ui::set_json(opts.json);
+            ui::set_quiet(opts.quiet);
             let kw = keyword.join(" ");
             let ncm = Ncm::new()?;
             if opts.json && download.is_none() {
@@ -753,18 +800,14 @@ async fn run(cli: Cli) -> Result<i32> {
             )
             .await
         }
-        Some(Commands::Dl {
-            targets,
-            search,
-            limit,
-            opts,
-        }) => {
+        Some(Commands::Dl { targets, opts }) => {
             ui::set_json(opts.json);
-            if targets.is_empty() && search.is_none() {
-                bail!("请提供歌曲 ID / 链接，或用 --search 关键词");
+            ui::set_quiet(opts.quiet);
+            if targets.is_empty() {
+                bail!("请提供歌曲 ID / 歌单·专辑链接 / 关键词（ncm help dl 查看用法）");
             }
             let ncm = Ncm::new()?;
-            run_batch(&ncm, targets, search.as_deref(), limit, None, opts).await
+            run_batch(&ncm, targets, None, 10, None, opts).await
         }
         // 无子命令（纯 flags 或空参数）：inject 已把裸参数注入 dl，走到这里只可能是空输入
         None => {
