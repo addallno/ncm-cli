@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use api::Ncm;
 use lrc::LRC_DEFAULT;
-use model::{first_artist, hms, resolve_target, sanitize, Track};
+use model::{first_artist, hms, resolve_list, resolve_target, sanitize, Track};
 
 #[derive(Parser)]
 #[command(
@@ -42,9 +42,6 @@ enum Commands {
         /// 结果数量
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
-        /// 下载指定项：1,3 / 5-8 / all（缺省仅列出）
-        #[arg(short = 'd', long)]
-        download: Option<String>,
         #[command(flatten)]
         opts: DownloadArgs,
     },
@@ -52,6 +49,16 @@ enum Commands {
     Dl {
         /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / 关键词（自动搜索取最相关）
         targets: Vec<String>,
+        #[command(flatten)]
+        opts: DownloadArgs,
+    },
+    /// 浏览歌单/专辑/歌手的作品列表
+    List {
+        /// 歌单/专辑/歌手 ID 或链接
+        target: String,
+        /// 只列出前 N 首（0 = 全部）
+        #[arg(short = 'n', long, default_value_t = 0)]
+        limit: u32,
         #[command(flatten)]
         opts: DownloadArgs,
     },
@@ -99,6 +106,9 @@ struct DownloadArgs {
     /// 机器可读的 JSON 输出
     #[arg(long)]
     json: bool,
+    /// 下载指定项：1,3 / 5-8 / 1- / all（对 search/dl/list 的结果统一生效）
+    #[arg(short = 'd', long)]
+    download: Option<String>,
 }
 
 fn quality_br(q: &str) -> Result<u64> {
@@ -449,7 +459,62 @@ async fn run_batch(
     targets: Vec<String>,
     search_kw: Option<&str>,
     search_limit: u32,
-    download_sel: Option<&str>,
+    opts: DownloadArgs,
+) -> Result<i32> {
+    // 收集曲目
+    let mut songs: Vec<Value> = Vec::new();
+    let mut scope: Vec<String> = Vec::new();
+
+    if let Some(kw) = search_kw {
+        if !opts.json {
+            ui::step(&format!("搜索 “{kw}”"));
+        }
+        let found = ncm.search(kw, search_limit).await?;
+        if found.is_empty() {
+            bail!("未搜索到结果");
+        }
+        if opts.download.is_none() {
+            print_search_table(&found);
+            if opts.json {
+                print_search_json(&found)?;
+            }
+            return Ok(0);
+        }
+        scope.push(format!("搜索 “{kw}”({})", found.len()));
+        songs = found;
+    }
+
+    for target in &targets {
+        if is_target_like(target) {
+            let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
+            scope.push(format!("{desc}({})", found.len()));
+            songs.extend(found);
+        } else {
+            // 非 ID/链接 → 视为关键词，取最相关 1 首（交互多选见 list 命令）
+            ui::step(&format!("搜索 “{target}”"));
+            let found = ncm.search(target, 1).await?;
+            if found.is_empty() {
+                bail!("未搜索到结果: {target}");
+            }
+            scope.push(format!("搜索 “{target}”(1)"));
+            songs.extend(found);
+        }
+    }
+
+    if let Some(sel) = &opts.download {
+        let picked = pick_items(&songs, sel)?;
+        scope.push(format!("选择 {sel}({}/{})", picked.len(), songs.len()));
+        songs = picked;
+    }
+
+    download_songs(ncm, songs, scope, opts).await
+}
+
+/// 下载已收集的曲目：校验选项 → 逐首处理 → 汇总报告
+async fn download_songs(
+    ncm: &Ncm,
+    songs: Vec<Value>,
+    scope: Vec<String>,
     opts: DownloadArgs,
 ) -> Result<i32> {
     if opts.only_lrc && opts.no_lrc {
@@ -457,6 +522,10 @@ async fn run_batch(
     }
     if opts.dry_run && opts.json {
         bail!("--dry-run 与 --json 互斥");
+    }
+    if songs.is_empty() {
+        ui::fail("没有可处理的曲目");
+        return Ok(1);
     }
     let lrc_kinds: Vec<&'static str> = if opts.no_lrc {
         Vec::new()
@@ -483,50 +552,6 @@ async fn run_batch(
         std::fs::create_dir_all(&output)?;
     }
 
-    // 收集曲目
-    let mut songs: Vec<Value> = Vec::new();
-    let mut scope: Vec<String> = Vec::new();
-
-    if let Some(kw) = search_kw {
-        if !opts.json {
-            ui::step(&format!("搜索 “{kw}”"));
-        }
-        let found = ncm.search(kw, search_limit).await?;
-        if found.is_empty() {
-            bail!("未搜索到结果");
-        }
-        if download_sel.is_none() {
-            print_search_table(&found);
-            if opts.json {
-                print_search_json(&found)?;
-            }
-            return Ok(0);
-        }
-        songs = pick_search(&found, download_sel.unwrap())?;
-        scope.push(format!("搜索 “{kw}”({})", songs.len()));
-    }
-
-    for target in &targets {
-        if is_target_like(target) {
-            let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
-            scope.push(format!("{desc}({})", found.len()));
-            songs.extend(found);
-        } else {
-            // 非 ID/链接 → 视为关键词，取最相关 1 首（交互多选见 list 命令）
-            ui::step(&format!("搜索 “{target}”"));
-            let found = ncm.search(target, 1).await?;
-            if found.is_empty() {
-                bail!("未搜索到结果: {target}");
-            }
-            scope.push(format!("搜索 “{target}”(1)"));
-            songs.extend(found);
-        }
-    }
-
-    if songs.is_empty() {
-        ui::fail("没有可处理的曲目");
-        return Ok(1);
-    }
     if !opts.json {
         ui::step(&format!("共 {} 首 · {}", songs.len(), scope.join(" + ")));
     }
@@ -594,18 +619,26 @@ fn print_search_table(songs: &[Value]) {
         .iter()
         .enumerate()
         .map(|(i, s)| {
+            let album = s["album"]["name"]
+                .as_str()
+                .or_else(|| s["al"]["name"].as_str())
+                .unwrap_or("");
+            let dur = s["duration"]
+                .as_u64()
+                .or_else(|| s["dt"].as_u64())
+                .unwrap_or(0);
             vec![
                 (i + 1).to_string(),
                 s["name"].as_str().unwrap_or("").to_string(),
                 first_artist(s),
-                s["album"]["name"].as_str().unwrap_or("").to_string(),
-                hms(s["duration"].as_u64().unwrap_or(0)),
+                album.to_string(),
+                hms(dur),
                 s["id"].as_u64().unwrap_or(0).to_string(),
             ]
         })
         .collect();
     ui::table(&["#", "歌名", "歌手", "专辑", "时长", "ID"], &rows);
-    ui::info("下载指定项: ncm search 关键词 --download 1  （或 1,3 / all）");
+    ui::info("下载指定项: -d 1,3 / 5-8 / all  （ncm list <歌单ID> 可浏览）");
 }
 
 fn print_search_json(songs: &[Value]) -> Result<()> {
@@ -615,9 +648,10 @@ fn print_search_json(songs: &[Value]) -> Result<()> {
             json!({
                 "id": s["id"],
                 "name": s["name"],
-                "artists": s["artists"].as_array().map(|a| a.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>()),
-                "album": s["album"]["name"],
-                "duration_ms": s["duration"],
+                "artists": s["artists"].as_array().or_else(|| s["ar"].as_array())
+                    .map(|a| a.iter().filter_map(|x| x["name"].as_str()).collect::<Vec<_>>()),
+                "album": s["album"]["name"].as_str().or_else(|| s["al"]["name"].as_str()),
+                "duration_ms": s["duration"].as_u64().or_else(|| s["dt"].as_u64()),
             })
         })
         .collect();
@@ -636,19 +670,50 @@ fn is_target_like(t: &str) -> bool {
         })
 }
 
-fn pick_search(songs: &[Value], selector: &str) -> Result<Vec<Value>> {
+/// 选择器解析：`all` / 单号 `3` / 列表 `1,3` / 范围 `5-8`、`1-`（到末尾）、`-3`（开头到 3）
+fn pick_items(items: &[Value], selector: &str) -> Result<Vec<Value>> {
     if selector.eq_ignore_ascii_case("all") {
-        return Ok(songs.to_vec());
+        return Ok(items.to_vec());
     }
+    let n = items.len();
     let mut picked = Vec::new();
     for token in selector.split([',', ' ']) {
         let t = token.trim();
         if t.is_empty() {
             continue;
         }
-        match t.parse::<usize>() {
-            Ok(n) if n >= 1 && n <= songs.len() => picked.push(songs[n - 1].clone()),
-            _ => bail!("选择超出范围: {t}（共 {} 条）", songs.len()),
+        let (lo, hi) = match t.split_once('-') {
+            // 范围：`5-8` / `1-`（到末尾）/ `-3`（开头到 3）
+            Some((a, b)) => {
+                let lo = if a.is_empty() {
+                    1
+                } else {
+                    a.parse::<usize>()
+                        .map_err(|_| anyhow::anyhow!("无效编号: {a}"))?
+                };
+                let hi = if b.is_empty() {
+                    n
+                } else {
+                    b.parse::<usize>()
+                        .map_err(|_| anyhow::anyhow!("无效编号: {b}"))?
+                };
+                (lo, hi)
+            }
+            None => {
+                let v = t
+                    .parse::<usize>()
+                    .map_err(|_| anyhow::anyhow!("无效编号: {t}"))?;
+                (v, v)
+            }
+        };
+        if lo < 1 || hi > n || lo > hi {
+            bail!("选择超出范围: {t}（共 {n} 条）");
+        }
+        for idx in lo..=hi {
+            let item = &items[idx - 1];
+            if !picked.iter().any(|x: &Value| x["id"] == item["id"]) {
+                picked.push(item.clone());
+            }
         }
     }
     if picked.is_empty() {
@@ -744,7 +809,7 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
 
-const SUBCOMMANDS: [&str; 3] = ["search", "dl", "help"];
+const SUBCOMMANDS: [&str; 4] = ["search", "dl", "list", "help"];
 
 /// 快捷方式：首个参数不是子命令时自动补 `dl`（`ncm 259138` == `ncm dl 259138`）；
 /// 纯 flags（-h/-V）不改写，交给顶层解析
@@ -778,27 +843,18 @@ async fn run(cli: Cli) -> Result<i32> {
         Some(Commands::Search {
             keyword,
             limit,
-            download,
             opts,
         }) => {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let kw = keyword.join(" ");
             let ncm = Ncm::new()?;
-            if opts.json && download.is_none() {
+            if opts.json && opts.download.is_none() {
                 let found = ncm.search(&kw, limit).await?;
                 print_search_json(&found)?;
                 return Ok(0);
             }
-            run_batch(
-                &ncm,
-                Vec::new(),
-                Some(&kw),
-                limit,
-                download.as_deref(),
-                opts,
-            )
-            .await
+            run_batch(&ncm, Vec::new(), Some(&kw), limit, opts).await
         }
         Some(Commands::Dl { targets, opts }) => {
             ui::set_json(opts.json);
@@ -807,7 +863,51 @@ async fn run(cli: Cli) -> Result<i32> {
                 bail!("请提供歌曲 ID / 歌单·专辑链接 / 关键词（ncm help dl 查看用法）");
             }
             let ncm = Ncm::new()?;
-            run_batch(&ncm, targets, None, 10, None, opts).await
+            run_batch(&ncm, targets, None, 10, opts).await
+        }
+        Some(Commands::List {
+            target,
+            limit,
+            opts,
+        }) => {
+            ui::set_json(opts.json);
+            ui::set_quiet(opts.quiet);
+            let ncm = Ncm::new()?;
+            let (mut songs, desc) = resolve_list(&ncm, &target).await?;
+            if limit > 0 {
+                songs.truncate(limit as usize);
+            }
+            let mut printed = false;
+            let mut sel = opts.download.clone();
+            // TTY 且未给 -d：列出表格后交互询问要下载的编号
+            if sel.is_none() && !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                print_search_table(&songs);
+                printed = true;
+                use std::io::Write;
+                eprint!("输入要下载的编号 (如 1,3,5-8/all，回车仅列出): ");
+                std::io::stderr().flush().ok();
+                let mut line = String::new();
+                if std::io::stdin().read_line(&mut line)? > 0 {
+                    let t = line.trim().to_string();
+                    if !t.is_empty() {
+                        sel = Some(t);
+                    }
+                }
+            }
+            match sel {
+                Some(s) => {
+                    let picked = pick_items(&songs, &s)?;
+                    download_songs(&ncm, picked, vec![format!("{desc} 选择 {s}")], opts).await
+                }
+                None => {
+                    if opts.json {
+                        print_search_json(&songs)?;
+                    } else if !printed {
+                        print_search_table(&songs);
+                    }
+                    Ok(0)
+                }
+            }
         }
         // 无子命令（纯 flags 或空参数）：inject 已把裸参数注入 dl，走到这里只可能是空输入
         None => {

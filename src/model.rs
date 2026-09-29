@@ -43,7 +43,10 @@ impl Track {
             title: v["name"].as_str().unwrap_or("").to_string(),
             artists,
             album,
-            duration_ms: v["duration"].as_u64().unwrap_or(0),
+            duration_ms: v["duration"]
+                .as_u64()
+                .or_else(|| v["dt"].as_u64())
+                .unwrap_or(0),
             no: v["no"]
                 .as_u64()
                 .or_else(|| v["position"].as_u64())
@@ -122,14 +125,11 @@ pub fn hms(ms: u64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-/// 解析目标：ID / 链接 / list.123 → 曲目列表 + 描述
-pub async fn resolve_target(
-    ncm: &Ncm,
-    target: &str,
-    prefer_artist: bool,
-) -> Result<(Vec<Value>, String)> {
+/// 解析目标字符串：返回 (类别, id, 是否显式指定类别)。
+/// 显式 = 带 `list./album./artist.` 前缀或可识别的 URL；纯数字不算。
+fn parse_target(target: &str) -> Result<(&'static str, String, bool)> {
     let target = target.trim();
-    let (mut kind, mut id) = ("song", String::new());
+    let (mut kind, mut id, mut explicit) = ("song", String::new(), false);
 
     if target.chars().all(|c| c.is_ascii_digit()) && !target.is_empty() {
         id = target.to_string();
@@ -137,8 +137,14 @@ pub async fn resolve_target(
         if matches!(k, "list" | "song" | "album" | "artist")
             && v.chars().all(|c| c.is_ascii_digit())
         {
-            kind = if k == "list" { "playlist" } else { k };
+            kind = match k {
+                "list" => "playlist",
+                "album" => "album",
+                "artist" => "artist",
+                _ => "song",
+            };
             id = v.to_string();
+            explicit = true;
         }
     } else if target.starts_with("http") {
         kind = if target.contains("playlist") {
@@ -150,6 +156,7 @@ pub async fn resolve_target(
         } else {
             "song"
         };
+        explicit = kind != "song";
         if let Some(pos) = target.find("?id=") {
             id = target[pos + 4..]
                 .split(['&', '#'])
@@ -171,12 +178,43 @@ pub async fn resolve_target(
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
         bail!("无法识别的目标: {target}");
     }
-    let id: u64 = id.parse()?;
+    Ok((kind, id, explicit))
+}
 
-    if prefer_artist || kind == "artist" {
-        let (songs, name) = ncm.artist(id).await?;
-        return Ok((songs, format!("歌手 {name}（{id}）")));
+/// 解析目标：ID / 链接 / list.123 → 曲目列表 + 描述
+pub async fn resolve_target(
+    ncm: &Ncm,
+    target: &str,
+    prefer_artist: bool,
+) -> Result<(Vec<Value>, String)> {
+    let (kind, id, explicit) = parse_target(target)?;
+    let kind = if !explicit && prefer_artist {
+        "artist"
+    } else {
+        kind
+    };
+    resolve_kind(ncm, kind, &id).await
+}
+
+/// list 命令专用：显式类别按前缀/URL 解析；纯数字依次尝试 歌单 → 专辑 → 歌手
+pub async fn resolve_list(ncm: &Ncm, target: &str) -> Result<(Vec<Value>, String)> {
+    let (kind, id, explicit) = parse_target(target)?;
+    if explicit {
+        return resolve_kind(ncm, kind, &id).await;
     }
+    let mut last_err = anyhow::anyhow!("未找到内容");
+    for kind in ["playlist", "album", "artist"] {
+        match resolve_kind(ncm, kind, &id).await {
+            Ok((songs, desc)) if !songs.is_empty() => return Ok((songs, desc)),
+            Ok(_) => {}
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
+}
+
+async fn resolve_kind(ncm: &Ncm, kind: &str, id: &str) -> Result<(Vec<Value>, String)> {
+    let id: u64 = id.parse()?;
     match kind {
         "playlist" => {
             let (songs, name) = ncm.playlist(id).await?;
@@ -185,6 +223,10 @@ pub async fn resolve_target(
         "album" => {
             let (songs, name) = ncm.album(id).await?;
             Ok((songs, format!("专辑 {name}（{id}）")))
+        }
+        "artist" => {
+            let (songs, name) = ncm.artist(id).await?;
+            Ok((songs, format!("歌手 {name}（{id}）")))
         }
         _ => {
             let songs = ncm.song_detail(&[id]).await?;
