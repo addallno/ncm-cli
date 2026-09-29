@@ -69,13 +69,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 不 merge：按 artifact 目录保留平台名，避免同名 ncm 互相覆盖
       - uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
       - run: |
           mkdir -p dist
-          find . -maxdepth 2 -type f -name 'ncm*' -exec cp {} dist/ \;
+          for d in ncm-*/; do
+            plat=${d#ncm-}; plat=${plat%/}
+            for f in "$d"*; do
+              base=$(basename "$f")
+              case "$base" in
+                *.exe) cp "$f" "dist/ncm-${plat}.exe" ;;
+                *) cp "$f" "dist/ncm-${plat}" ;;
+              esac
+            done
+          done
           cd dist && for f in *; do case "$f" in *.exe) ;; *) gzip -kf "$f";; esac; done
+          ls -la
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
