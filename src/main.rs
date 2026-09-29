@@ -101,18 +101,15 @@ struct DownloadArgs {
 fn quality_br(q: &str) -> Result<u64> {
     match q {
         "standard" => Ok(128_000),
-        "exhigh" | "high" => Ok(320_000),
-        "lossless" | "super" | "auto" => Ok(999_000),
-        "hires" | "master" => Ok(1_920_000),
+        "exhigh" => Ok(320_000),
+        "lossless" => Ok(999_000),
+        "hires" => Ok(1_920_000),
         _ => bail!("未知音质 \"{q}\"，可用: standard/exhigh/lossless/hires"),
     }
 }
 
 fn normalize_quality(q: &str) -> &'static str {
     match q {
-        "high" => "exhigh",
-        "super" | "auto" => "lossless",
-        "master" => "hires",
         "lossless" => "lossless",
         "standard" => "standard",
         "exhigh" => "exhigh",
@@ -360,13 +357,13 @@ async fn download_one(
             }
         };
 
-        if let Err(e) = tags::write_tags(&path, &track.title, &track.artists, &track.album) {
-            ui::info(&format!("标签写入失败（不影响文件）: {e}"));
-        }
         result.bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         result.audio = Some(path.display().to_string());
         result.source = source.clone();
     }
+
+    let mut embed_lyrics: Option<String> = None;
+    let mut embed_cover: Option<Vec<u8>> = None;
 
     // 歌词
     if !lrc_kinds.is_empty() {
@@ -387,11 +384,44 @@ async fn download_one(
         };
         let written = lrc::write_lrcs(&got, &base, &dirs);
         result.lrc = written.len();
+        embed_lyrics = got
+            .get("lrc")
+            .cloned()
+            .or_else(|| got.values().next().cloned());
         if got.is_empty() && result.audio.is_none() && result.error.is_none() {
             result.error = Some("无可用歌词".into());
         }
         if result.source == "—" {
             result.source = source;
+        }
+    }
+
+    // 封面（仅音频存在时；下载失败不阻塞）
+    if result.audio.is_some() {
+        let pic = song["al"]["picUrl"]
+            .as_str()
+            .or_else(|| song["album"]["picUrl"].as_str())
+            .or_else(|| song["picUrl"].as_str())
+            .filter(|u| !u.is_empty());
+        if let Some(url) = pic {
+            match ncm.fetch_bytes(url, 8 * 1024 * 1024).await {
+                Ok(bytes) => embed_cover = Some(bytes),
+                Err(e) => ui::info(&format!("封面下载失败（不影响文件）: {e}")),
+            }
+        }
+    }
+
+    // 标签统一在歌词/封面就绪后写入
+    if let Some(p) = &result.audio {
+        if let Err(e) = tags::write_tags(
+            std::path::Path::new(p),
+            &track.title,
+            &track.artists,
+            &track.album,
+            embed_lyrics.as_deref(),
+            embed_cover.as_deref(),
+        ) {
+            ui::info(&format!("标签写入失败（不影响文件）: {e}"));
         }
     }
 
@@ -407,6 +437,9 @@ async fn run_batch(
     download_sel: Option<&str>,
     opts: DownloadArgs,
 ) -> Result<i32> {
+    if opts.only_lrc && opts.no_lrc {
+        bail!("--only-lrc 与 --no-lrc 互斥，只能指定其一");
+    }
     let lrc_kinds: Vec<&'static str> = if opts.no_lrc {
         Vec::new()
     } else {
@@ -666,7 +699,7 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
 
-const SUBCOMMANDS: [&str; 5] = ["search", "dl", "convert", "lyrics", "watch"];
+const SUBCOMMANDS: [&str; 3] = ["search", "dl", "help"];
 
 /// 快捷方式：首个参数不是子命令时自动补 `dl`（`ncm 259138` == `ncm dl 259138`）；
 /// 纯 flags（-h/-V）不改写，交给顶层解析
@@ -733,30 +766,10 @@ async fn run(cli: Cli) -> Result<i32> {
             let ncm = Ncm::new()?;
             run_batch(&ncm, targets, search.as_deref(), limit, None, opts).await
         }
-        // 快捷方式：`ncm 259138` == `ncm dl 259138`
+        // 无子命令（纯 flags 或空参数）：inject 已把裸参数注入 dl，走到这里只可能是空输入
         None => {
-            let raw: Vec<String> = std::env::args().skip(1).collect();
-            let positional = raw.iter().find(|a| !a.starts_with('-'));
-            if positional.is_none() {
-                Cli::command().print_help()?;
-                return Ok(0);
-            }
-            let mut args = vec!["dl".to_string()];
-            args.extend(raw);
-            let cli2 = Cli::parse_from(args);
-            match cli2.cmd {
-                Some(Commands::Dl {
-                    targets,
-                    search,
-                    limit,
-                    opts,
-                }) => {
-                    ui::set_json(opts.json);
-                    let ncm = Ncm::new()?;
-                    run_batch(&ncm, targets, search.as_deref(), limit, None, opts).await
-                }
-                _ => unreachable!(),
-            }
+            Cli::command().print_help()?;
+            Ok(0)
         }
     }
 }

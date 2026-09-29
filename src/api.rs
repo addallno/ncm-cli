@@ -135,6 +135,22 @@ impl Ncm {
             .unwrap_or(Value::Null))
     }
 
+    /// 下载图片等小资源字节（封面用），超限报错
+    pub async fn fetch_bytes(&self, url: &str, max: usize) -> Result<Vec<u8>> {
+        let resp = self.client.get(url).send().await?.error_for_status()?;
+        let mut out = Vec::new();
+        let mut stream = resp.bytes_stream();
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if out.len() + chunk.len() > max {
+                anyhow::bail!("资源超过 {max} 字节上限");
+            }
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out)
+    }
+
     /// 歌词（lv/kv/tv/yv/yrv 打开全部类型）
     pub async fn lyric(&self, id: u64) -> Result<Value> {
         self.get_json(
