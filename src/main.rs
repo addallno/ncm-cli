@@ -1,5 +1,6 @@
 //! ncm — 网易云音乐统一命令行工具（搜索 / 下载 / 歌词）
 mod api;
+mod dns;
 mod download;
 mod lrc;
 mod model;

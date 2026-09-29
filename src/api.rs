@@ -30,15 +30,18 @@ impl Ncm {
             reqwest::header::COOKIE,
             reqwest::header::HeaderValue::from_str(&cookie_val)?,
         );
+        // musl 静态二进制在 Termux 下缺 /etc/resolv.conf，挂自定义 resolver 提供 UDP 回退
         let client = Client::builder()
             .user_agent(UA)
             .default_headers(headers)
             .timeout(Duration::from_secs(30))
+            .dns_resolver(std::sync::Arc::new(crate::dns::FallbackDns::default()))
             .build()?;
         let insecure = Client::builder()
             .user_agent(UA)
             .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(15))
+            .dns_resolver(std::sync::Arc::new(crate::dns::FallbackDns::default()))
             .build()?;
         Ok(Self { client, insecure })
     }
