@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use serde_json::Value;
 
 /// 统一的曲目信息（兼容 artists/ar、album/al 两种接口命名）
+#[derive(Clone)]
 pub struct Track {
     pub id: u64,
     pub title: String,

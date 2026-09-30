@@ -17,8 +17,10 @@ const EAPI_KEY: &[u8; 16] = b"e82ckenh8dichen8";
 const LEGACY_MARK: &str = "36cd479b6b5";
 
 /// 解析登录凭据，返回可直接放进 Cookie 头的字符串（不含 os=pc 等固定项）
+///
+/// 优先级：`--session` > `--cookie` > `NCM_SESSION`/`NCM_COOKIE`（调用方已合并到参数）>
+/// 持久化文件（`ncm login` 写入）
 pub fn resolve_auth(session: Option<&Path>, cookie: Option<&str>) -> Result<Option<String>> {
-    // 优先级：session > cookie（与 PLAN 一致）
     if let Some(path) = session {
         let raw = std::fs::read(path)
             .with_context(|| format!("读取 session 文件失败: {}", path.display()))?;
@@ -33,7 +35,70 @@ pub fn resolve_auth(session: Option<&Path>, cookie: Option<&str>) -> Result<Opti
         }
         return Ok(Some(c.to_string()));
     }
-    Ok(None)
+    // 回退：ncm login 持久化的凭据
+    Ok(load_saved())
+}
+
+/// 配置目录：`$XDG_CONFIG_HOME/ncm` 或 `~/.config/ncm`
+pub fn config_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("XDG_CONFIG_HOME") {
+        if !d.is_empty() {
+            return std::path::PathBuf::from(d).join("ncm");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config").join("ncm")
+}
+
+/// 持久化凭据文件路径
+pub fn saved_cookie_path() -> std::path::PathBuf {
+    config_dir().join("cookie")
+}
+
+/// 读取持久化凭据（不存在或损坏返回 None）
+pub fn load_saved() -> Option<String> {
+    let txt = std::fs::read_to_string(saved_cookie_path()).ok()?;
+    let t = txt.trim();
+    if t.contains('=') {
+        Some(t.to_string())
+    } else {
+        None
+    }
+}
+
+/// 写入持久化凭据（目录 0700、文件 0600）
+pub fn save_cookie(cookie: &str) -> Result<std::path::PathBuf> {
+    let c = cookie.trim();
+    if !c.contains('=') {
+        bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
+    }
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("创建配置目录失败: {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = saved_cookie_path();
+    std::fs::write(&path, format!("{c}\n"))
+        .with_context(|| format!("写入凭据失败: {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
+}
+
+/// 删除持久化凭据；返回是否确实存在
+pub fn clear_saved() -> Result<bool> {
+    let path = saved_cookie_path();
+    if path.exists() {
+        std::fs::remove_file(&path).with_context(|| format!("删除凭据失败: {}", path.display()))?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// 解析 session dump 字节流 → cookie 字符串
@@ -161,5 +226,24 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(parse_session(b"not-a-session").is_err());
+    }
+}
+
+#[cfg(test)]
+mod persist_tests {
+    use super::*;
+
+    #[test]
+    fn saved_cookie_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("ncm-sess-test-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _ = clear_saved();
+        assert!(load_saved().is_none());
+        assert!(save_cookie("MUSIC_U=abc; __csrf=t").is_ok());
+        assert_eq!(load_saved().as_deref(), Some("MUSIC_U=abc; __csrf=t"));
+        assert!(save_cookie("bad").is_err());
+        assert!(clear_saved().unwrap());
+        assert!(!clear_saved().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -4,6 +4,7 @@ mod dns;
 mod download;
 mod lrc;
 mod model;
+mod player;
 mod session;
 mod source;
 mod tags;
@@ -42,7 +43,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 搜索歌曲并列出
+    /// 搜索歌曲并列出表格（下载用 ncm dl <关键词>）
     Search {
         /// 搜索关键词（可多个词，自动合并）
         #[arg(required = true)]
@@ -51,16 +52,16 @@ enum Commands {
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
         #[command(flatten)]
-        opts: DownloadArgs,
+        opts: ViewArgs,
     },
-    /// 下载歌曲 / 歌单 / 专辑 / 歌手 / 关键词
+    /// 下载（唯一下载入口）：歌曲ID / 歌单·专辑链接 / 关键词 / daily（每日推荐）
     Dl {
-        /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / 关键词（自动搜索取最相关）
+        /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / daily（每日推荐）/ 关键词
         targets: Vec<String>,
         #[command(flatten)]
         opts: DownloadArgs,
     },
-    /// 浏览歌单/专辑/歌手的作品列表
+    /// 浏览歌单/专辑/歌手的作品列表（下载用 ncm dl <链接>）
     List {
         /// 歌单/专辑/歌手 ID 或链接
         target: String,
@@ -68,30 +69,59 @@ enum Commands {
         #[arg(short = 'n', long, default_value_t = 0)]
         limit: u32,
         #[command(flatten)]
-        opts: DownloadArgs,
+        opts: ViewArgs,
     },
-    /// 列出我创建/收藏的歌单（需登录）
+    /// 列出我创建/收藏的歌单（需登录，下载用 ncm dl list.<ID>）
     Playlists {
         /// 最多显示数量（0 = 全部）
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: u32,
-        /// 机器可读的 JSON 输出
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        opts: ViewArgs,
     },
-    /// 每日推荐歌曲（需登录），表格 + -d 选择下载
+    /// 每日推荐歌曲（需登录；下载: ncm dl daily · 播放: ncm play daily）
     Daily {
         /// 只列出前 N 首（0 = 全部）
         #[arg(short = 'n', long, default_value_t = 0)]
         limit: u32,
         #[command(flatten)]
-        opts: DownloadArgs,
+        opts: ViewArgs,
     },
-    /// 播放歌曲（喂 URL 给 $NCM_PLAYER/mpv/ffplay；都没有则打印 URL）
+    /// 保存/查看/清除登录凭据（持久化到 ~/.config/ncm/，之后自动加载）
+    Login {
+        /// pyncm session dump 文件（与 --cookie 二选一）
+        #[arg(long, value_name = "FILE")]
+        session: Option<PathBuf>,
+        /// Cookie 字符串，如 "MUSIC_U=xxx; __csrf=yyy"
+        #[arg(long, value_name = "STR")]
+        cookie: Option<String>,
+        /// 登出：删除已保存的凭据
+        #[arg(long)]
+        logout: bool,
+    },
+    /// 查看当前登录状态
+    Whoami,
+    /// 查看歌曲详情（ID / 专辑 / 发行日期 / 音质 / 版权等）
+    Info {
+        /// 歌曲 ID / 链接 / 关键词
+        target: String,
+        /// 机器可读的 JSON 输出
+        #[arg(long)]
+        json: bool,
+    },
+    /// 生成 shell 自动补全脚本
+    Completions {
+        /// 目标 shell
+        shell: clap_complete::Shell,
+    },
+    /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 n/p 切曲、←/→ 快退进、歌词同步滚动）
     Play {
         /// 歌曲 ID / 链接 / 关键词；daily = 每日推荐
         target: String,
-        /// 列表场景随机选一首（daily / 歌单）
+        /// 最多播放 N 首（0 = 全部；关键词默认取最相关 1 首，-n 指定则取前 N 首连续播）
+        #[arg(short = 'n', long, default_value_t = 0)]
+        limit: u32,
+        /// 播放队列随机洗牌
         #[arg(long)]
         shuffle: bool,
         /// 指定播放器程序（默认探测 $NCM_PLAYER → mpv → ffplay）
@@ -100,14 +130,37 @@ enum Commands {
         /// 音质
         #[arg(long, default_value = "exhigh", value_parser = ["lossless", "standard", "exhigh", "hires"])]
         quality: String,
-        /// 只输出 JSON（不调用播放器）
+        /// 只输出播放队列 JSON（不调用播放器）
         #[arg(long)]
         json: bool,
+        /// 播放前先下载到本地并播放本地文件
+        #[arg(long)]
+        save: bool,
+        /// 下载目录（--save 时生效）
+        #[arg(short = 'o', long, default_value = ".")]
+        output: PathBuf,
+        /// 不显示滚动歌词
+        #[arg(long = "no-lyric")]
+        no_lyric: bool,
     },
+}
+
+/// 浏览类命令（search/list/daily/playlists）的通用输出选项
+#[derive(Args, Clone)]
+struct ViewArgs {
+    /// 机器可读的 JSON 输出
+    #[arg(long)]
+    json: bool,
+    /// 静默：隐藏过程输出，仅保留表格/JSON
+    #[arg(short = 'q', long)]
+    quiet: bool,
 }
 
 #[derive(Args, Clone)]
 struct DownloadArgs {
+    /// 关键词候选取前 N 首（仅 dl 关键词时生效；TTY 下可交互选择，非 TTY 无 -d 取 1 首）
+    #[arg(short = 'n', long, default_value_t = 10)]
+    limit: u32,
     /// 音频输出目录
     #[arg(short = 'o', long, default_value = ".")]
     output: PathBuf,
@@ -136,7 +189,6 @@ struct DownloadArgs {
     #[arg(short = 't', long, default_value = "{artists} - {track}")]
     template: String,
     /// 跳过已存在的音频文件
-    // 注：不加 -n 短选项——flatten 与 search -n (limit) 冲突（clap debug_assert 会 panic）
     #[arg(long = "skip-existing", visible_alias = "no-overwrites")]
     skip_existing: bool,
     /// 允许下载 30 秒试听片段（默认跳过）
@@ -148,7 +200,7 @@ struct DownloadArgs {
     /// 机器可读的 JSON 输出
     #[arg(long)]
     json: bool,
-    /// 下载指定项：1,3 / 5-8 / 1- / all（对 search/dl/list 的结果统一生效）
+    /// 按编号选择要下载的项：1,3 / 5-8 / 1- / all（dl 结果统一生效）
     #[arg(short = 'd', long)]
     download: Option<String>,
 }
@@ -495,41 +547,6 @@ async fn download_one(
     result
 }
 
-/// 批量下载编排 + 汇总
-/// 列表格 →（TTY 且未给 -d：交互询问编号）→ 有选择则下载，否则仅展示
-async fn browse(ncm: &Ncm, songs: Vec<Value>, desc: &str, opts: DownloadArgs) -> Result<i32> {
-    let mut printed = false;
-    let mut sel = opts.download.clone();
-    if sel.is_none() && !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        print_search_table(&songs);
-        printed = true;
-        use std::io::Write;
-        eprint!("输入要下载的编号 (如 1,3,5-8/all，回车仅列出): ");
-        std::io::stderr().flush().ok();
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line)? > 0 {
-            let t = line.trim().to_string();
-            if !t.is_empty() {
-                sel = Some(t);
-            }
-        }
-    }
-    match sel {
-        Some(s) => {
-            let picked = pick_items(&songs, &s)?;
-            download_songs(ncm, picked, vec![format!("{desc} 选择 {s}")], opts).await
-        }
-        None => {
-            if opts.json {
-                print_search_json(&songs)?;
-            } else if !printed {
-                print_search_table(&songs);
-            }
-            Ok(0)
-        }
-    }
-}
-
 /// 探测播放器：--player → $NCM_PLAYER → mpv → ffplay；返回 (程序, 额外参数)
 fn find_player(spec: Option<&str>) -> Option<(String, Vec<String>)> {
     // 显式指定（--player / $NCM_PLAYER）：直接按空白切分使用
@@ -548,7 +565,7 @@ fn find_player(spec: Option<&str>) -> Option<(String, Vec<String>)> {
     }
     // 候选程序需真实存在（带 --version 探测）
     let candidates: [(&str, &[&str]); 2] = [
-        ("mpv", &["--no-video", "--really-quiet"]),
+        ("mpv", &["--no-video"]),
         ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "error"]),
     ];
     for (prog, args) in candidates {
@@ -568,69 +585,92 @@ fn find_player(spec: Option<&str>) -> Option<(String, Vec<String>)> {
     None
 }
 
-async fn run_batch(
-    ncm: &Ncm,
-    targets: Vec<String>,
-    search_kw: Option<&str>,
-    search_limit: u32,
-    opts: DownloadArgs,
-) -> Result<i32> {
-    // 收集曲目
+/// dl 的批量编排：收集曲目（ID/链接/关键词/daily）→ TTY 交互选号 → 下载
+///
+/// 关键词取 `-n` 候选；非 TTY 且未给 `-d` 时取最相关 1 首（兼容旧用法），
+/// TTY 下列出候选表并交互选择（回车仅展示不下载）。
+async fn run_batch(ncm: &Ncm, targets: Vec<String>, opts: DownloadArgs) -> Result<i32> {
     let mut songs: Vec<Value> = Vec::new();
     let mut scope: Vec<String> = Vec::new();
-
-    if let Some(kw) = search_kw {
-        if !opts.json {
-            ui::step(&format!("搜索 “{kw}”"));
-        }
-        let found = ncm.search(kw, search_limit).await?;
-        if found.is_empty() {
-            bail!("未搜索到结果");
-        }
-        if opts.download.is_none() {
-            print_search_table(&found);
-            if opts.json {
-                print_search_json(&found)?;
-            }
-            return Ok(0);
-        }
-        scope.push(format!("搜索 “{kw}”({})", found.len()));
-        songs = found;
-    }
+    let tty = !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let interactive = tty && opts.download.is_none();
 
     for target in &targets {
-        if is_target_like(target) {
+        if target.eq_ignore_ascii_case("daily") || target.eq_ignore_ascii_case("today") {
+            let s = ncm.daily_songs().await?;
+            if s.is_empty() {
+                bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
+            }
+            scope.push(format!("每日推荐({})", s.len()));
+            songs.extend(s);
+        } else if is_target_like(target) {
             let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
             scope.push(format!("{desc}({})", found.len()));
             songs.extend(found);
         } else {
-            // 非 ID/链接 → 视为关键词，取最相关 1 首（交互多选见 list 命令）
-            ui::step(&format!("搜索 “{target}”"));
-            let found = ncm.search(target, 1).await?;
+            // 关键词：交互或显式 -d 时保留全部候选，否则只取最相关 1 首
+            let n = if interactive || opts.download.is_some() {
+                opts.limit
+            } else {
+                1
+            };
+            if !opts.json {
+                ui::step(&format!("搜索 “{target}”"));
+            }
+            let found = ncm.search(target, n).await?;
             if found.is_empty() {
                 bail!("未搜索到结果: {target}");
             }
-            scope.push(format!("搜索 “{target}”(1)"));
+            scope.push(format!("搜索 “{target}”({})", found.len()));
             songs.extend(found);
         }
     }
 
-    if let Some(sel) = &opts.download {
-        let picked = pick_items(&songs, sel)?;
-        scope.push(format!("选择 {sel}({}/{})", picked.len(), songs.len()));
+    if songs.is_empty() {
+        bail!("没有可下载的曲目");
+    }
+
+    // 已给 -d 直接选择；否则 TTY 交互询问（回车仅展示）
+    let mut sel = opts.download.clone();
+    if sel.is_none() && tty {
+        print_search_table(&songs);
+        use std::io::Write;
+        eprint!("输入要下载的编号 (如 1,3,5-8/all，回车仅列出): ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? > 0 {
+            let t = line.trim().to_string();
+            if !t.is_empty() {
+                sel = Some(t);
+            }
+        }
+        match sel {
+            Some(s) => {
+                let picked = pick_items(&songs, &s)?;
+                scope.push(format!("选择 {s}({}/{})", picked.len(), songs.len()));
+                songs = picked;
+            }
+            None => return Ok(0), // 仅展示，不下载
+        }
+    } else if let Some(s) = &sel {
+        let picked = pick_items(&songs, s)?;
+        scope.push(format!("选择 {s}({}/{})", picked.len(), songs.len()));
         songs = picked;
     }
 
-    download_songs(ncm, songs, scope, opts).await
+    download_songs(ncm, songs, scope, opts)
+        .await
+        .map(|(code, _)| code)
 }
 
 /// 下载已收集的曲目：校验选项 → 逐首处理 → 汇总报告
+/// 返回 (退出码, 每首结果——供 --save 播放取本地路径)
 async fn download_songs(
     ncm: &Ncm,
     songs: Vec<Value>,
     scope: Vec<String>,
     opts: DownloadArgs,
-) -> Result<i32> {
+) -> Result<(i32, Vec<ItemResult>)> {
     if opts.only_lrc && opts.no_lrc {
         bail!("--only-lrc 与 --no-lrc 互斥，只能指定其一");
     }
@@ -639,7 +679,7 @@ async fn download_songs(
     }
     if songs.is_empty() {
         ui::fail("没有可处理的曲目");
-        return Ok(1);
+        return Ok((1, Vec::new()));
     }
     let lrc_kinds: Vec<&'static str> = if opts.no_lrc {
         Vec::new()
@@ -721,7 +761,8 @@ async fn download_songs(
         items.push(r);
     }
 
-    report(&items, &opts, &output)
+    let code = report(&items, &opts, &output)?;
+    Ok((code, items))
 }
 
 fn truncate(s: &str) -> String {
@@ -923,7 +964,19 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
 
-const SUBCOMMANDS: [&str; 7] = ["search", "dl", "list", "playlists", "daily", "play", "help"];
+const SUBCOMMANDS: [&str; 11] = [
+    "search",
+    "dl",
+    "list",
+    "playlists",
+    "daily",
+    "play",
+    "login",
+    "whoami",
+    "info",
+    "completions",
+    "help",
+];
 
 /// 快捷方式：首个参数不是子命令时自动补 `dl`（`ncm 259138` == `ncm dl 259138`）；
 /// 纯 flags（-h/-V）不改写，交给顶层解析
@@ -973,21 +1026,25 @@ async fn run(cli: Cli) -> Result<i32> {
             ui::set_quiet(opts.quiet);
             let kw = keyword.join(" ");
             let ncm = Ncm::with_cookie(auth.as_deref())?;
-            if opts.json && opts.download.is_none() {
-                let found = ncm.search(&kw, limit).await?;
+            let found = ncm.search(&kw, limit).await?;
+            if opts.json {
                 print_search_json(&found)?;
-                return Ok(0);
+            } else if found.is_empty() {
+                ui::info(&format!("未搜索到结果: {kw}"));
+            } else {
+                print_search_table(&found);
+                ui::info(&format!("下载: ncm dl \"{kw}\" -d 编号"));
             }
-            run_batch(&ncm, Vec::new(), Some(&kw), limit, opts).await
+            Ok(0)
         }
         Some(Commands::Dl { targets, opts }) => {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             if targets.is_empty() {
-                bail!("请提供歌曲 ID / 歌单·专辑链接 / 关键词（ncm help dl 查看用法）");
+                bail!("请提供歌曲 ID / 歌单·专辑链接 / 关键词 / daily（ncm help dl 查看用法）");
             }
             let ncm = Ncm::with_cookie(auth.as_deref())?;
-            run_batch(&ncm, targets, None, 10, opts).await
+            run_batch(&ncm, targets, opts).await
         }
         Some(Commands::List {
             target,
@@ -1001,7 +1058,15 @@ async fn run(cli: Cli) -> Result<i32> {
             if limit > 0 {
                 songs.truncate(limit as usize);
             }
-            browse(&ncm, songs, &desc, opts).await
+            if opts.json {
+                print_search_json(&songs)?;
+            } else if songs.is_empty() {
+                ui::info(&format!("{desc} 没有可显示的曲目"));
+            } else {
+                print_search_table(&songs);
+                ui::info(&format!("下载: ncm dl \"{target}\" -d 编号"));
+            }
+            Ok(0)
         }
         Some(Commands::Daily { limit, opts }) => {
             ui::set_json(opts.json);
@@ -1009,111 +1074,438 @@ async fn run(cli: Cli) -> Result<i32> {
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             let mut songs = ncm.daily_songs().await?;
             if songs.is_empty() {
-                bail!("每日推荐为空（该接口需登录：--session/--cookie 或 NCM_SESSION/NCM_COOKIE）");
+                bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie 保存登录态）");
             }
             if limit > 0 {
                 songs.truncate(limit as usize);
             }
-            let desc = format!("每日推荐（{} 首）", songs.len());
-            browse(&ncm, songs, &desc, opts).await
+            if opts.json {
+                print_search_json(&songs)?;
+            } else {
+                print_search_table(&songs);
+                ui::info("下载: ncm dl daily -d 编号  ·  播放: ncm play daily");
+            }
+            Ok(0)
         }
         Some(Commands::Play {
             target,
+            limit,
             shuffle,
             player,
             quality,
             json,
+            save,
+            output,
+            no_lyric,
         }) => {
+            if json && save {
+                bail!("--json 与 --save 互斥");
+            }
+            let _ = quality_br(&quality)?;
             let ncm = Ncm::with_cookie(auth.as_deref())?;
-            let songs = if target.eq_ignore_ascii_case("daily") {
-                let s = ncm.daily_songs().await?;
-                if s.is_empty() {
-                    bail!("每日推荐为空（该接口需登录）");
-                }
-                s
-            } else if is_target_like(&target) {
-                let (found, _) = resolve_target(&ncm, &target, false).await?;
-                if found.is_empty() {
-                    bail!("目标没有可播放的曲目");
-                }
-                found
-            } else {
-                let found = ncm.search(&target, 1).await?;
-                if found.is_empty() {
-                    bail!("未搜索到结果: {target}");
-                }
-                found
-            };
-            let song = if shuffle && songs.len() > 1 {
-                let idx = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .subsec_nanos() as usize)
-                    % songs.len();
-                &songs[idx]
-            } else {
-                &songs[0]
-            };
-            let track = Track::from_json(song);
-            let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
-            let spin = ui::Spinner::start(format!("取址 · {}", track.title));
-            let (row, source, reason, _) =
-                fetch_row(&ncm, track.id, &quality, true, wanted_flac).await;
-            spin.stop();
-            let row = row.context(reason)?;
-            let url = row["url"]
-                .as_str()
-                .filter(|u| !u.is_empty())
-                .context("没有可播放的地址")?;
-            let br = row["br"].as_u64().unwrap_or(0);
+
+            // 1) 收集播放队列
+            let desc;
+            let mut songs: Vec<Value> =
+                if target.eq_ignore_ascii_case("daily") || target.eq_ignore_ascii_case("today") {
+                    desc = "每日推荐".to_string();
+                    let s = ncm.daily_songs().await?;
+                    if s.is_empty() {
+                        bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
+                    }
+                    s
+                } else if is_target_like(&target) {
+                    let (found, d) = resolve_target(&ncm, &target, false).await?;
+                    if found.is_empty() {
+                        bail!("目标没有可播放的曲目");
+                    }
+                    desc = d;
+                    found
+                } else {
+                    desc = format!("搜索 “{target}”");
+                    let n = if limit > 0 { limit } else { 1 };
+                    let found = ncm.search(&target, n).await?;
+                    if found.is_empty() {
+                        bail!("未搜索到结果: {target}");
+                    }
+                    found
+                };
+            if limit > 0 && songs.len() > limit as usize {
+                songs.truncate(limit as usize);
+            }
+            if songs.is_empty() {
+                bail!("没有可播放的曲目");
+            }
+            if shuffle && songs.len() > 1 {
+                shuffle_by_time(&mut songs);
+            }
+            let tracks: Vec<Track> = songs.iter().map(Track::from_json).collect();
+            let total = tracks.len();
+
+            // 2) JSON 模式：全量取址输出队列
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "id": track.id,
-                        "name": track.title,
-                        "artists": track.artists,
-                        "url": url,
-                        "br": br,
-                        "source": source,
-                    }))?
-                );
+                let results = fetch_urls(&ncm, &tracks, &quality).await;
+                let mut arr: Vec<Value> = Vec::with_capacity(total);
+                for (t, r) in tracks.iter().zip(results) {
+                    match r {
+                        Ok((url, br, source)) => arr.push(json!({
+                            "id": t.id,
+                            "name": t.title,
+                            "artists": t.artists,
+                            "album": t.album,
+                            "url": url,
+                            "br": br,
+                            "source": source,
+                        })),
+                        Err(reason) => arr.push(json!({
+                            "id": t.id,
+                            "name": t.title,
+                            "error": reason,
+                        })),
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&Value::Array(arr))?);
                 return Ok(0);
             }
-            match find_player(player.as_deref()) {
-                Some((prog, args)) => {
-                    ui::step(&format!(
-                        "▶ {} - {} · {source} · {} kbps",
-                        track.title,
-                        track.artists,
-                        br / 1000
-                    ));
-                    let status = std::process::Command::new(&prog)
+
+            // 3) 播放器探测（无播放器直接打印地址，省去下载/取歌词）
+            let Some((prog, base_args)) = find_player(player.as_deref()) else {
+                ui::info(
+                    "未找到播放器（可安装 mpv/ffplay 或用 --player/$NCM_PLAYER 指定），队列地址:",
+                );
+                let urls = fetch_urls(&ncm, &tracks, &quality).await;
+                for (t, r) in tracks.iter().zip(urls) {
+                    match r {
+                        Ok((url, _, _)) => println!("{} - {}\t{url}", t.title, t.artists),
+                        Err(reason) => println!("{} - {}\t[失败: {reason}]", t.title, t.artists),
+                    }
+                }
+                return Ok(0);
+            };
+            let is_mpv = std::path::Path::new(&prog)
+                .file_name()
+                .is_some_and(|f| f == "mpv");
+            let is_ffplay = std::path::Path::new(&prog)
+                .file_name()
+                .is_some_and(|f| f == "ffplay");
+
+            // 4) 播放来源：--save 先下载（失败回落在线地址）；否则在线取址
+            let mut slots: Vec<(String, Result<PlaySrc, String>)> = tracks
+                .iter()
+                .map(|t| (format!("{} - {}", t.title, t.artists), Err(String::new())))
+                .collect();
+            if save {
+                let dl_opts = DownloadArgs {
+                    limit: 0,
+                    output: output.clone(),
+                    lrc_dir: Vec::new(),
+                    lrcs: LRC_DEFAULT.to_string(),
+                    no_lrc: false,
+                    only_lrc: false,
+                    quality: quality.clone(),
+                    quiet: false,
+                    dry_run: false,
+                    template: "{artists} - {track}".to_string(),
+                    skip_existing: true,
+                    allow_trial: false,
+                    artist: false,
+                    json: false,
+                    download: None,
+                };
+                let (_code, items) = download_songs(
+                    &ncm,
+                    songs.clone(),
+                    vec![format!("{desc} 下载到 {}", output.display())],
+                    dl_opts,
+                )
+                .await?;
+                for (slot, item) in slots.iter_mut().zip(items.iter()) {
+                    if let Some(p) = &item.audio {
+                        slot.1 = Ok(PlaySrc::File(PathBuf::from(p)));
+                    }
+                }
+            }
+            let missing: Vec<usize> = slots
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.1.is_err())
+                .map(|(i, _)| i)
+                .collect();
+            if !missing.is_empty() {
+                let sub: Vec<Track> = missing.iter().map(|&i| tracks[i].clone()).collect();
+                if !save {
+                    ui::step(&format!("取址 · {desc}（{total} 首）"));
+                }
+                let got = fetch_urls(&ncm, &sub, &quality).await;
+                for (idx, r) in missing.iter().zip(got) {
+                    slots[*idx].1 = r.map(|(url, _, _)| PlaySrc::Url(url));
+                }
+            }
+
+            // 5) 汇总成功/失败
+            let mut entries: Vec<(String, PlaySrc)> = Vec::new();
+            let mut play_tracks: Vec<Track> = Vec::new();
+            let mut failed: Vec<String> = Vec::new();
+            for ((label, src), t) in slots.into_iter().zip(tracks) {
+                match src {
+                    Ok(s) => {
+                        entries.push((label, s));
+                        play_tracks.push(t);
+                    }
+                    Err(reason) if !reason.is_empty() => failed.push(format!("{label} · {reason}")),
+                    Err(_) => failed.push(format!("{label} · 无播放地址")),
+                }
+            }
+            for f in &failed {
+                ui::skip(f);
+            }
+            if entries.is_empty() {
+                bail!("全部曲目取址失败，无法播放");
+            }
+
+            // 6) 歌词预取（mpv 下滚动显示）
+            let lyric_tracks: Option<std::sync::Arc<Vec<player::LyricTrack>>> = if no_lyric {
+                None
+            } else {
+                let ids: Vec<u64> = play_tracks.iter().map(|t| t.id).collect();
+                let got = fetch_lyrics(&ncm, &ids).await;
+                let lts: Vec<player::LyricTrack> = play_tracks
+                    .iter()
+                    .zip(got)
+                    .map(|(t, lines)| player::LyricTrack {
+                        label: format!("{} - {}", t.title, t.artists),
+                        lines: lines.unwrap_or_default(),
+                    })
+                    .collect();
+                (!lts.iter().all(|l| l.lines.is_empty())).then_some(std::sync::Arc::new(lts))
+            };
+
+            // 7) 启动播放
+            let locations: Vec<String> = entries.iter().map(|(_, s)| s.loc()).collect();
+            let n_play = entries.len();
+            ui::step(&format!("▶ {desc} · 播放 {n_play} 首 · {prog}"));
+            if is_mpv {
+                ui::info("mpv 键位: 空格 暂停 · ←/→ 快退/快进 · n/p 上/下曲 · / 搜索 · q 退出");
+            }
+            let want_lyric = lyric_tracks.is_some() && is_mpv && !no_lyric;
+            if !no_lyric && lyric_tracks.is_some() && !is_mpv {
+                ui::info("歌词同步需要 mpv（当前播放器无 IPC 接口），已跳过");
+            }
+
+            let mut args: Vec<String> = base_args.clone();
+            let sock = player::socket_path();
+            let overlay = if want_lyric {
+                player::cleanup_socket(&sock);
+                args.push(format!("--input-ipc-server={}", sock.display()));
+                args.push("--term-status-msg=".to_string());
+                args.push("--term-playing-msg=".to_string());
+                // 抑制 mpv 的 info 级行（Playing:/加载信息），歌词行独占底行；error 仍显示
+                args.push("--msg-level=cplayer=warn,ipc=no".to_string());
+                Some(player::spawn_overlay(
+                    sock.clone(),
+                    lyric_tracks.expect("want_lyric 保证 Some"),
+                ))
+            } else {
+                None
+            };
+
+            let status = if is_ffplay {
+                // ffplay 不支持播放列表：逐首串行（首尾相接）
+                let mut last = None;
+                for loc in &locations {
+                    let r = std::process::Command::new(&prog)
                         .args(&args)
-                        .arg(url)
+                        .arg(loc)
                         .status()
                         .with_context(|| format!("启动播放器失败: {prog}"))?;
-                    if !status.success() {
-                        bail!("播放器退出码 {status}");
+                    last = Some(r);
+                    if !r.success() {
+                        break;
+                    }
+                }
+                last.context("ffplay 未启动")?
+            } else {
+                // mpv / 自定义播放器：一次性喂入全部地址（mpv 自动建播放列表）
+                let mut cmd = std::process::Command::new(&prog);
+                cmd.args(&args).args(&locations);
+                tokio::task::spawn_blocking(move || cmd.status())
+                    .await
+                    .context("等待播放器失败")?
+                    .with_context(|| format!("启动播放器失败: {prog}"))?
+            };
+            if overlay.is_some() {
+                eprint!("\r\x1b[2K");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+            }
+            player::cleanup_socket(&sock);
+            if !status.success() && status.code().is_some_and(|c| c != 0) {
+                ui::info(&format!("播放器退出码 {}", status.code().unwrap_or(0)));
+            }
+            if !failed.is_empty() {
+                ui::info(&format!("（{} 首未播放，见上方跳过提示）", failed.len()));
+            }
+            Ok(0)
+        }
+        Some(Commands::Login {
+            session,
+            cookie,
+            logout,
+        }) => {
+            if logout {
+                let had = session::clear_saved()?;
+                if had {
+                    ui::ok("已删除保存的登录凭据");
+                } else {
+                    ui::info("没有已保存的凭据");
+                }
+                return Ok(0);
+            }
+            // 显式输入 → 解析并保存；无输入 → 用已保存凭据检查状态
+            let given = session.is_some() || cookie.is_some();
+            let auth_str = if let Some(p) = &session {
+                let raw = std::fs::read(p)
+                    .with_context(|| format!("读取 session 文件失败: {}", p.display()))?;
+                session::parse_session(&raw)
+                    .with_context(|| format!("解析 session 文件失败: {}", p.display()))?
+            } else if let Some(c) = &cookie {
+                let c = c.trim();
+                if !c.contains('=') {
+                    bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
+                }
+                c.to_string()
+            } else if let Some(saved) = session::load_saved() {
+                saved
+            } else {
+                ui::info(&format!(
+                    "未保存凭据。用法:\n  ncm login --session <pyncm文件>\n  ncm login --cookie \"MUSIC_U=...; __csrf=...\"\n  ncm login --logout  登出\n凭据将保存到 {}",
+                    session::saved_cookie_path().display()
+                ));
+                return Ok(0);
+            };
+            let ncm = Ncm::with_cookie(Some(&auth_str))?;
+            match ncm.whoami().await? {
+                Some((uid, name)) => {
+                    if given {
+                        let path = session::save_cookie(&auth_str)?;
+                        ui::ok(&format!(
+                            "登录成功并已保存：{name} (uid {uid})\n  凭据: {}",
+                            path.display()
+                        ));
+                    } else {
+                        ui::ok(&format!(
+                            "已保存凭据有效：{name} (uid {uid})（ncm login --logout 可登出）"
+                        ));
                     }
                     Ok(0)
                 }
                 None => {
-                    ui::info("未找到播放器（可安装 mpv/ffplay 或用 --player/$NCM_PLAYER 指定），地址如下:");
-                    println!("{url}");
-                    Ok(0)
+                    if given {
+                        bail!("凭据无效或已过期，未保存");
+                    }
+                    bail!("已保存凭据已失效，请重新 ncm login --session/--cookie");
                 }
             }
         }
-        Some(Commands::Playlists { limit, json }) => {
+        Some(Commands::Whoami) => {
             let ncm = Ncm::with_cookie(auth.as_deref())?;
-            let uid = ncm.whoami().await?.context(
-                "登录态无效：请用 --session/--cookie 或 NCM_SESSION/NCM_COOKIE 提供凭据",
-            )?;
+            match ncm.whoami().await? {
+                Some((uid, name)) => {
+                    let via = if session::load_saved().is_some() {
+                        "（持久化凭据）"
+                    } else {
+                        "（本次会话凭据）"
+                    };
+                    ui::ok(&format!("{name} · uid {uid} {via}"));
+                    Ok(0)
+                }
+                None => {
+                    ui::info("未登录（ncm login --session/--cookie 保存登录态）");
+                    Ok(1)
+                }
+            }
+        }
+        Some(Commands::Info { target, json }) => {
+            ui::set_json(json);
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let id = if let Ok(id) = target.parse::<u64>() {
+                id
+            } else {
+                let found = if is_target_like(&target) {
+                    resolve_target(&ncm, &target, false).await?.0
+                } else {
+                    ncm.search(&target, 1).await?
+                };
+                match found.first() {
+                    Some(s) => s["id"].as_u64().context("搜索结果没有歌曲 ID")?,
+                    None => bail!("未找到: {target}"),
+                }
+            };
+            let details = ncm.song_detail(&[id]).await?;
+            let song = details.first().context("详情为空")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(song)?);
+                return Ok(0);
+            }
+            let t = Track::from_json(song);
+            let fee = match song["fee"].as_u64().unwrap_or(0) {
+                0 => "免费".into(),
+                1 => "VIP".into(),
+                4 => "专辑购买".into(),
+                8 => "低品免费".into(),
+                n => format!("fee={n}"),
+            };
+            let mv = song["mv"]
+                .as_u64()
+                .filter(|m| *m > 0)
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| "无".into());
+            let maxbr = song["privilege"]["maxbr"]
+                .as_u64()
+                .or_else(|| song["maxbr"].as_u64())
+                .map(|b| format!("{} kbps", b / 1000));
+            let copyright = match song["copyright"].as_u64() {
+                Some(0) => Some("翻唱/改编".to_string()),
+                Some(2) => Some("网易云独家".to_string()),
+                _ => None,
+            };
+            let mut rows: Vec<Vec<String>> = vec![
+                vec!["ID".into(), id.to_string()],
+                vec!["歌名".into(), t.title],
+                vec!["歌手".into(), t.artists],
+                vec!["专辑".into(), t.album],
+                vec!["时长".into(), hms(t.duration_ms)],
+                vec!["费用".into(), fee],
+                vec!["MV".into(), mv],
+            ];
+            if let Some(b) = maxbr {
+                rows.push(vec!["最高音质".into(), b]);
+            }
+            if let Some(c) = copyright {
+                rows.push(vec!["版权".into(), c]);
+            }
+            ui::table(&["字段", "值"], &rows);
+            Ok(0)
+        }
+        Some(Commands::Completions { shell }) => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "ncm", &mut std::io::stdout());
+            Ok(0)
+        }
+        Some(Commands::Playlists { limit, opts }) => {
+            ui::set_json(opts.json);
+            ui::set_quiet(opts.quiet);
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let uid = ncm
+                .whoami()
+                .await?
+                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?
+                .0;
             let mut lists = ncm.user_playlists(uid).await?;
             if limit > 0 {
                 lists.truncate(limit as usize);
             }
-            if json {
+            if opts.json {
                 let arr: Vec<Value> = lists
                     .iter()
                     .map(|p| {
@@ -1144,7 +1536,9 @@ async fn run(cli: Cli) -> Result<i32> {
                 })
                 .collect();
             ui::table(&["#", "歌单名", "曲数", "来源", "ID"], &rows);
-            ui::info("下载: ncm dl list.<ID> -d 1,3  ·  浏览: ncm list <ID>");
+            if !opts.quiet {
+                ui::info("浏览: ncm list <ID>  ·  下载: ncm dl list.<ID> -d 编号");
+            }
             Ok(0)
         }
         // 无子命令（纯 flags 或空参数）：inject 已把裸参数注入 dl，走到这里只可能是空输入
@@ -1156,3 +1550,67 @@ async fn run(cli: Cli) -> Result<i32> {
 }
 
 use clap::CommandFactory;
+
+/// 播放来源：本地文件（--save 下载所得）或在线地址
+enum PlaySrc {
+    File(PathBuf),
+    Url(String),
+}
+
+impl PlaySrc {
+    fn loc(&self) -> String {
+        match self {
+            PlaySrc::File(p) => p.display().to_string(),
+            PlaySrc::Url(u) => u.clone(),
+        }
+    }
+}
+
+/// 并发批量取播放地址；返回与输入等长的 Ok(url, br, source) / Err(原因)
+async fn fetch_urls(
+    ncm: &Ncm,
+    tracks: &[Track],
+    quality: &str,
+) -> Vec<Result<(String, u64, String), String>> {
+    use futures_util::future::join_all;
+    let wanted_flac = matches!(quality, "lossless" | "hires");
+    join_all(tracks.iter().map(|t| async move {
+        let (row, source, reason, _) = fetch_row(ncm, t.id, quality, true, wanted_flac).await;
+        let row = row.ok_or(reason)?;
+        let url = row["url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .map(String::from)
+            .ok_or_else(|| "没有可播放的地址".to_string())?;
+        Ok((url, row["br"].as_u64().unwrap_or(0), source))
+    }))
+    .await
+}
+
+/// 并发预取 LRC 歌词（data.lrc.lyric → 时间轴）；失败/空返回 None
+async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>> {
+    use futures_util::future::join_all;
+    join_all(ids.iter().map(|&id| async move {
+        let v = ncm.lyric(id).await.ok()?;
+        let text = v["lrc"]["lyric"].as_str()?;
+        let lines = lrc::parse_lrc_timeline(text);
+        (!lines.is_empty()).then_some(lines)
+    }))
+    .await
+}
+
+/// 时间种子洗牌（xorshift64*，满足播放随机即可，无外部 rand 依赖）
+fn shuffle_by_time(v: &mut [Value]) {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1;
+    for i in (1..v.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let j = (seed as usize) % (i + 1);
+        v.swap(i, j);
+    }
+}

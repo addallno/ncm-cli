@@ -237,3 +237,104 @@ fn ass_time(seconds: f64) -> String {
     let secs = seconds % 60.0;
     format!("{hours}:{minutes:02}:{secs:05.2}")
 }
+
+/// 解析 LRC 时间轴 → (秒, 文本) 列表（按时间升序，同一秒多行保持原序）
+///
+/// 支持 `[mm:ss.xx]` / `[mm:ss.xxx]` 多时间标签、`[mm:ss]`；
+/// 过滤 `[ar:]` 等元数据行与空文本行
+pub fn parse_lrc_timeline(text: &str) -> Vec<(f64, String)> {
+    let mut out: Vec<(f64, String)> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        if bytes.first() != Some(&b'[') {
+            continue;
+        }
+        // 收集行首连续的 [...] 时间标签；元数据（非时间）整体跳过
+        let mut times: Vec<f64> = Vec::new();
+        let mut rest = line;
+        while rest.starts_with('[') {
+            let Some(end) = rest.find(']') else { break };
+            let tag = &rest[1..end];
+            match parse_timestamp(tag) {
+                Some(t) => times.push(t),
+                None => {
+                    if !times.is_empty() {
+                        break; // 时间标签后跟 [ar:] 类元数据：以已收集的时间为准
+                    }
+                    times.clear();
+                    break;
+                }
+            }
+            rest = &rest[end + 1..];
+        }
+        if times.is_empty() {
+            continue; // 元数据行 [ti:..] / [offset:..]
+        }
+        let content = rest.trim();
+        if content.is_empty() {
+            continue;
+        }
+        for t in times {
+            out.push((t, content.to_string()));
+        }
+    }
+    out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// `[mm:ss]` / `[mm:ss.xx]` / `[mm:ss.xxx]` → 秒；非时间标签返回 None
+fn parse_timestamp(tag: &str) -> Option<f64> {
+    let (mm, ss) = tag.split_once(':')?;
+    let m: f64 = mm.trim().parse().ok()?;
+    let (sec, frac) = match ss.split_once('.') {
+        Some((s, f)) => (s, Some(f)),
+        None => (ss, None),
+    };
+    let s: f64 = sec.trim().parse().ok()?;
+    let frac_v = match frac {
+        Some(f) if !f.is_empty() => {
+            let digits: String = f.chars().take(3).collect();
+            let v: f64 = digits.parse().ok()?;
+            let scale = 10f64.powi(digits.len() as i32);
+            v / scale
+        }
+        _ => 0.0,
+    };
+    Some(m * 60.0 + s + frac_v)
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    #[test]
+    fn parse_basic_lrc() {
+        let lrc = "[ti:晴天]\n[ar:周杰伦]\n[00:00.00]前奏\n[00:12.50]故事的小黄花\n[00:17.300]从出生那年就飘着\n";
+        let v = parse_lrc_timeline(lrc);
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], (0.0, "前奏".into()));
+        assert_eq!(v[1], (12.5, "故事的小黄花".into()));
+        assert_eq!(v[2], (17.3, "从出生那年就飘着".into()));
+    }
+
+    #[test]
+    fn parse_multi_tag_and_sort() {
+        let lrc = "[00:05.00][00:20.10]重复段\n[01:02]C\n";
+        let v = parse_lrc_timeline(lrc);
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], (5.0, "重复段".into()));
+        assert_eq!(v[1], (20.1, "重复段".into()));
+        assert_eq!(v[2], (62.0, "C".into()));
+    }
+
+    #[test]
+    fn parse_offset_tag_ignored() {
+        let lrc = "[offset:500]\n[00:01]词\n";
+        let v = parse_lrc_timeline(lrc);
+        assert_eq!(v, vec![(1.0, "词".to_string())]);
+    }
+}

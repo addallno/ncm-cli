@@ -176,11 +176,22 @@ impl Ncm {
     }
 
     /// 当前登录用户 uid（未登录返回 None）
-    pub async fn whoami(&self) -> Result<Option<u64>> {
+    /// 当前登录用户（uid + 昵称），未登录返回 None
+    pub async fn whoami(&self) -> Result<Option<(u64, String)>> {
         let data = self.get_json("/api/nuser/account/get", &[]).await?;
-        Ok(data["profile"]["userId"]
+        let uid = match data["profile"]["userId"]
             .as_u64()
-            .or_else(|| data["account"]["id"].as_u64()))
+            .or_else(|| data["account"]["id"].as_u64())
+        {
+            Some(u) => u,
+            None => return Ok(None),
+        };
+        let name = data["profile"]["nickname"]
+            .as_str()
+            .or_else(|| data["account"]["userName"].as_str())
+            .unwrap_or("(未知)")
+            .to_string();
+        Ok(Some((uid, name)))
     }
 
     /// 我的歌单列表（含"我喜欢的音乐"红心歌单，通常为首项）
