@@ -85,3 +85,15 @@
 - weapi/eapi 请求加密（明文 `/api` 已够用；登录只靠 cookie）
 - 内置音频播放器（调用外部播放器）
 - TUI（留给后续独立评估）
+
+## G. v0.2.0 增强（2026-09-30）
+
+| Step | 内容 | 状态 |
+|------|------|------|
+| A | 去重合：search/list/daily/playlists 改纯浏览（ViewArgs），`-d`/TTY 交互归 `dl` 独占，`DownloadArgs` 加 `-n`，删 `browse()`，`run_batch` 统一 dl 流程（daily 字面量/关键词/目标） | ✅ |
+| B | 登录持久化：`ncm login/--logout/whoami`，`~/.config/ncm/cookie`(0600)，`resolve_auth` 自动回退；`whoami()` 返回 uid+昵称 | ✅ |
+| C | `play` 重写：整队列喂 mpv（n/p/←→ 键位）、`-n`/`--shuffle`/`--save -o`（先下载播本地）/`--json`/`--no-lyric`、mpv IPC 歌词同步滚动（player.rs）、`parse_lrc_timeline`；ffplay 降级逐首、无播放器打印地址 | ✅ |
+| D | `info <目标>` 详情、`completions <shell>`（clap_complete）、README/Description/PLAN 同步、v0.2.0 发布、远端二进制更新 | 🔄 |
+
+验收：`cargo fmt && cargo clippy --all-targets && cargo test` 全绿（13 tests），
+play 无头实测（--json / mpv --ao=null 双曲 / --save 回落 / 无播放器）通过。
