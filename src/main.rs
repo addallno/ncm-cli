@@ -1263,10 +1263,9 @@ async fn run(cli: Cli) -> Result<i32> {
                 bail!("全部曲目取址失败，无法播放");
             }
 
-            // 6) 歌词预取（mpv 下滚动显示）
-            let lyric_tracks: Option<std::sync::Arc<Vec<player::LyricTrack>>> = if no_lyric {
-                None
-            } else {
+            // 6) 歌词预取（mpv + unix 下滚动显示；Windows 无 unix socket IPC，静默跳过）
+            let want_lyric = !no_lyric && is_mpv && cfg!(unix);
+            let lyric_tracks: Option<std::sync::Arc<Vec<player::LyricTrack>>> = if want_lyric {
                 let ids: Vec<u64> = play_tracks.iter().map(|t| t.id).collect();
                 let got = fetch_lyrics(&ncm, &ids).await;
                 let lts: Vec<player::LyricTrack> = play_tracks
@@ -1278,7 +1277,10 @@ async fn run(cli: Cli) -> Result<i32> {
                     })
                     .collect();
                 (!lts.iter().all(|l| l.lines.is_empty())).then_some(std::sync::Arc::new(lts))
+            } else {
+                None
             };
+            let want_lyric = want_lyric && lyric_tracks.is_some();
 
             // 7) 启动播放
             let locations: Vec<String> = entries.iter().map(|(_, s)| s.loc()).collect();
@@ -1287,8 +1289,9 @@ async fn run(cli: Cli) -> Result<i32> {
             if is_mpv {
                 ui::info("mpv 键位: 空格 暂停 · ←/→ 快退/快进 · n/p 上/下曲 · / 搜索 · q 退出");
             }
-            let want_lyric = lyric_tracks.is_some() && is_mpv && !no_lyric;
-            if !no_lyric && lyric_tracks.is_some() && !is_mpv {
+            if !no_lyric && !cfg!(unix) && is_mpv {
+                ui::info("当前平台不支持 mpv IPC 歌词同步，已跳过");
+            } else if lyric_tracks.is_some() && !is_mpv {
                 ui::info("歌词同步需要 mpv（当前播放器无 IPC 接口），已跳过");
             }
 

@@ -3,11 +3,15 @@
 //! mpv 以 `--input-ipc-server=<sock>` 启动后，本模块连接 socket、
 //! observe `time-pos` / `playlist-pos`，在 stderr 底行滚动显示当前歌词。
 //! 右侧/seek 时 mpv 推送 time-pos 变化，歌词自然跟随。
+#[cfg(unix)]
 use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 /// 一首曲目的歌词集（按时间升序）
@@ -28,7 +32,9 @@ pub fn cleanup_socket(path: &Path) {
 
 /// 启动歌词同步任务；mpv 退出（socket EOF）后自动结束并换行收尾
 ///
-/// `tracks[i]` 对应 mpv 播放列表第 i 项；超出范围的 playlist-pos 显示歌名占位
+/// `tracks[i]` 对应 mpv 播放列表第 i 项；超出范围的 playlist-pos 显示歌名占位。
+/// Windows 无 unix domain socket，为空实现（调用方已用 `cfg!(unix)` 门控）。
+#[cfg(unix)]
 pub fn spawn_overlay(
     sock: std::path::PathBuf,
     tracks: Arc<Vec<LyricTrack>>,
@@ -45,6 +51,15 @@ pub fn spawn_overlay(
     })
 }
 
+#[cfg(not(unix))]
+pub fn spawn_overlay(
+    _sock: std::path::PathBuf,
+    _tracks: Arc<Vec<LyricTrack>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {})
+}
+
+#[cfg(unix)]
 async fn overlay_loop(sock: &Path, tracks: &[LyricTrack]) -> std::io::Result<()> {
     // mpv 启动后才创建 socket，重试等待（最多 ~5s）
     let stream = {
@@ -112,6 +127,7 @@ async fn overlay_loop(sock: &Path, tracks: &[LyricTrack]) -> std::io::Result<()>
 }
 
 /// 二分查找当前时间对应的歌词行；无命中返回 None
+#[cfg(unix)]
 fn current_line(tracks: &[LyricTrack], idx: usize, t: f64) -> Option<String> {
     let track = tracks.get(idx)?;
     if track.lines.is_empty() {
@@ -140,6 +156,7 @@ fn current_line(tracks: &[LyricTrack], idx: usize, t: f64) -> Option<String> {
 }
 
 /// 在 stderr 单行刷新歌词（覆盖行内旧内容）
+#[cfg(unix)]
 fn print_row(tracks: &[LyricTrack], idx: usize, text: Option<&str>) {
     let total = tracks.len();
     let name = tracks.get(idx).map(|t| t.label.as_str()).unwrap_or("");
