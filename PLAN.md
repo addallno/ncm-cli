@@ -99,3 +99,21 @@
 play 无头实测（--json / mpv --ao=null 双曲 / --save 回落 / 无播放器）通过；
 CI 四平台 success（Windows 构建修复：mpv IPC `cfg(unix)` 门控），
 `v0.2.0` Release 7 资产，远端 8.162.6.112 `~/ncm` 已更新为 0.2.0。
+
+## H. v0.2.1 修复与增强（2026-10-01）
+
+用户反馈：VIP 曲（daily 拉取的歌单）非会员播不完需走 mirror；匹配/搜索有问题；播放界面和提示简陋。
+
+| 项 | 内容 | 状态 |
+|----|------|------|
+| H1 | mirror 解锁音源（mirror.rs）：官方 `-110`/`404`/30s 试听时自动回退 UnblockNeteaseMusic-utils `GET /match?id=`；`--mirror <URL\|none>` + `NCM_MIRROR`（默认 `127.0.0.1:3000`，`none` 禁用，30s 超时，br=0 跳过体积校验，source 标 `mirror·xxx`） | ✅ |
+| H2 | 错误文案细分：需 VIP(-110) / 无版权或已下架(404) / mirror 未配置给部署提示 / 不存在 ID 明确报因 | ✅ |
+| H3 | 目标解析修复：`parse_target` 含 `.` 的 URL 曾误入 `list.xx` 分支（歌单链接报"无法识别"）；单曲描述带歌名 | ✅ |
+| H4 | 搜索相关度稳定重排（完全相等>前缀>包含>未命中，同档保接口原序）；search 表格双提示去除；dl 空结果带目标上下文 | ✅ |
+| H5 | 播放界面：队列卡片（歌名/来源/音质/⚠30s试听警告）、mpv 状态行抑制防刷屏、无歌词时底行歌名占位+`[i/N]` 切曲提示、结束「✔ 播放完毕」总结 | ✅ |
+
+验收：`cargo fmt && cargo clippy --all-targets && cargo test` 全绿（15 tests、clippy 0）；
+CI 四平台 success，`v0.2.1` Release（初版 tag 忘 bump 版本号已废弃重建）；
+远端 43.136.171.164（Termux）实测：`dl 186016 --mirror` 下载 12.1MB `周杰伦 - 晴天.mp3`（源 mirror·unm）、
+`play 29774171` VIP 曲走 mirror·byfuns 完整播放+歌词滚动、daily 队列卡片正常；
+解锁服务 `~/UnblockNeteaseMusic-utils`（PORT=3100，启动脚本 `~/start-unm.sh`）。
