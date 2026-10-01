@@ -13,8 +13,8 @@ use std::time::Duration;
 /// UnblockNeteaseMusic-utils 默认监听地址
 pub const DEFAULT: &str = "http://127.0.0.1:3000";
 
-/// 每次匹配请求的超时（跨平台搜索可能需要数秒，防止挂死拖垮批量取址）
-const MATCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// 每次匹配请求的超时（unm 跨平台搜索冷启动可达 20s+，需留足余量）
+const MATCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 static BASE: OnceLock<Option<String>> = OnceLock::new();
 static CLIENT: OnceLock<Client> = OnceLock::new();
