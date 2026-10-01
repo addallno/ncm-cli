@@ -23,6 +23,9 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
 - **信息 / 补全**：`ncm info <ID/链接/关键词>` 看详情（歌名/歌手/专辑/时长/费用/版权），
   `ncm completions bash|zsh|fish|powershell` 生成自动补全脚本
 - **登录后专属**：`ncm playlists`（我的歌单）、`ncm daily`（每日推荐）
+- **VIP / 无版权解锁**：官方取址失败（`-110` 需 VIP / 404 无版权）或仅给 30s 试听时，
+  自动回退本机解锁服务（UnblockNeteaseMusic-utils）拿完整直链，来源标 `mirror·xxx`；
+  `--mirror <URL|none>` / `NCM_MIRROR` 配置地址（默认 `http://127.0.0.1:3000`）
 
 ## 用法
 
@@ -80,6 +83,25 @@ ncm completions bash > ~/.local/share/bash-completion/completions/ncm
 官方接口匿名 `br=999000` 会被服务端降级成 320k mp3，因此走第三方源（按优先级，
 429/5xx 自动熔断）：`xuanluoge → kangqiovo → vincentzyu`，全失败回退官方（降级 mp3）。
 无版权歌（官方 404 + 第三方全挂）会明确报因，不误判为链接问题。
+
+## 解锁音源（mirror）
+
+官方渠道对 VIP 曲返回 `-110`（url 为空）或仅 30s 试听，非会员无法播完/下载。
+`fetch_row` 在官方失败或试听时自动请求本机解锁服务兜底：
+
+```bash
+# 部署（默认 3000 端口；Node ≥18）
+npx @neteasecloudmusicapienhanced/unblockmusic-utils
+# 或 git clone 后 npm install && npm run start
+
+ncm play 29774171                      # 默认打 http://127.0.0.1:3000
+ncm --mirror http://127.0.0.1:3100 dl 186016   # 显式指定
+NCM_MIRROR=none ncm dl 186016          # 禁用（仅官方源）
+```
+
+- 优先级：`--mirror` > 环境变量 `NCM_MIRROR` > 默认 `http://127.0.0.1:3000`；`none` 禁用
+- 单次匹配超时 10s；失败原因并入报错，未配置时给出部署提示
+- 成功时来源显示为 `mirror·<音源>`，下载校验按未知码率处理（不误判体积）
 
 ## 构建
 

@@ -134,19 +134,17 @@ fn parse_target(target: &str) -> Result<(&'static str, String, bool)> {
 
     if target.chars().all(|c| c.is_ascii_digit()) && !target.is_empty() {
         id = target.to_string();
-    } else if let Some((k, v)) = target.split_once('.') {
-        if matches!(k, "list" | "song" | "album" | "artist")
-            && v.chars().all(|c| c.is_ascii_digit())
-        {
-            kind = match k {
-                "list" => "playlist",
-                "album" => "album",
-                "artist" => "artist",
-                _ => "song",
-            };
-            id = v.to_string();
-            explicit = true;
-        }
+    } else if let Some((k, v)) = target.split_once('.').filter(|&(k, v)| {
+        matches!(k, "list" | "song" | "album" | "artist") && v.chars().all(|c| c.is_ascii_digit())
+    }) {
+        kind = match k {
+            "list" => "playlist",
+            "album" => "album",
+            "artist" => "artist",
+            _ => "song",
+        };
+        id = v.to_string();
+        explicit = true;
     } else if target.starts_with("http") {
         kind = if target.contains("playlist") {
             "playlist"
@@ -231,7 +229,14 @@ async fn resolve_kind(ncm: &Ncm, kind: &str, id: &str) -> Result<(Vec<Value>, St
         }
         _ => {
             let songs = ncm.song_detail(&[id]).await?;
-            Ok((songs, format!("单曲 {id}")))
+            if songs.is_empty() {
+                bail!("歌曲 {id} 不存在或无版权");
+            }
+            let name = songs[0]["name"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| id.to_string());
+            Ok((songs, format!("单曲 {name}（{id}）")))
         }
     }
 }

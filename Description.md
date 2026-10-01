@@ -17,6 +17,8 @@ src/
 ├── session.rs   pyncm session 双格式解析 + 凭据持久化（~/.config/ncm/cookie，0600；
 │                resolve_auth 优先级 --session > --cookie > 持久化文件）
 ├── source.rs    第三方 FLAC 源（xuanluoge/kangqiovo/vincentzyu，429/5xx 熔断），失败回退官方
+├── mirror.rs    解锁音源（UnblockNeteaseMusic-utils REST /match）：官方 -110/404/试听时兜底，
+│                --mirror / NCM_MIRROR 配置（默认 127.0.0.1:3000，none 禁用），10s 超时
 ├── download.rs  下载核心：Range 探测、.part+长度比对、魔数/时长/STREAMINFO 校验、降级重试
 ├── model.rs     Track 模型、文件名模板、目标解析（ID/链接/list.123 → 曲目列表）
 ├── player.rs    mpv IPC 客户端：Unix socket observe time-pos/playlist-pos，
@@ -36,7 +38,7 @@ src/
 | `ncm list <目标>` | 纯浏览歌单/专辑/歌手作品列表 |
 | `ncm playlists` | 我创建/收藏的歌单（需登录） |
 | `ncm daily` | 每日推荐浏览（需登录） |
-| `ncm play <目标\|daily>` | 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`；mpv 下 n/p/←→ 交互+歌词滚动 |
+| `ncm play <目标\|daily>` | 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`；mpv 下 n/p/←→ 交互+歌词滚动；播放前显示队列卡片（来源/音质/⚠30s试听） |
 | `ncm login/--logout` | 保存/查看/清除登录凭据（持久化） |
 | `ncm whoami` | 当前登录状态（昵称/uid/凭据来源） |
 | `ncm info <目标>` | 歌曲详情（歌名/歌手/专辑/时长/费用/版权），`--json` |
@@ -45,6 +47,8 @@ src/
 
 登录凭据优先级：`--session <file>` / `--cookie <str>` > 环境变量 `NCM_SESSION`/`NCM_COOKIE` >
 `ncm login` 持久化文件。
+
+解锁音源优先级：`--mirror <URL|none>` > `NCM_MIRROR` > 默认 `http://127.0.0.1:3000`（`none` 禁用）。
 
 ## 构建与验证
 

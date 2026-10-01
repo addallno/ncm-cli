@@ -62,7 +62,7 @@ impl Ncm {
         Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
     }
 
-    /// 搜索：type=1 单曲
+    /// 搜索：type=1 单曲（返回前按与关键词的相关度稳定重排）
     pub async fn search(&self, keyword: &str, limit: u32) -> Result<Vec<Value>> {
         let data = self
             .get_json(
@@ -75,10 +75,12 @@ impl Ncm {
                 ],
             )
             .await?;
-        Ok(data["result"]["songs"]
+        let mut songs = data["result"]["songs"]
             .as_array()
             .cloned()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        rank_songs(&mut songs, keyword);
+        Ok(songs)
     }
 
     /// 单曲详情（按 BATCH 分批）
@@ -219,4 +221,29 @@ impl Ncm {
             .cloned()
             .unwrap_or_default())
     }
+}
+
+/// 按与关键词的相关度稳定排序（sort_by_key 稳定，同档保持接口原序）：
+/// 0 = 歌名完全相等；1 = 歌名前缀；2 = 歌名/歌手包含全部关键词；3 = 有关键词未命中
+fn rank_songs(songs: &mut [Value], keyword: &str) {
+    let kw = keyword.trim().to_lowercase();
+    if kw.is_empty() || songs.len() < 2 {
+        return;
+    }
+    let terms: Vec<&str> = kw.split_whitespace().collect();
+    songs.sort_by_key(|s| {
+        let name = s["name"].as_str().unwrap_or("").to_lowercase();
+        let artist = crate::model::first_artist(s).to_lowercase();
+        let hay = format!("{name} {artist}");
+        if !terms.iter().all(|t| hay.contains(t)) {
+            return 3u8;
+        }
+        if name == kw {
+            0
+        } else if name.starts_with(&kw) {
+            1
+        } else {
+            2
+        }
+    });
 }
