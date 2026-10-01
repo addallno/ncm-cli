@@ -200,7 +200,8 @@ impl Ncm {
     pub async fn user_playlists(&self, uid: u64) -> Result<Vec<Value>> {
         let data = self
             .get_json(
-                "/api/v1/user/playlist",
+                // 注意：老路径 /api/v1/user/playlist 已被官方下线（JSON code=404）
+                "/api/user/playlist",
                 &[
                     ("uid", uid.to_string()),
                     ("limit", "1000".into()),
@@ -208,6 +209,11 @@ impl Ncm {
                 ],
             )
             .await?;
+        let code = data["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            let msg = data["message"].as_str().unwrap_or("");
+            anyhow::bail!("获取歌单失败 code={code} {msg}");
+        }
         Ok(data["playlist"].as_array().cloned().unwrap_or_default())
     }
 

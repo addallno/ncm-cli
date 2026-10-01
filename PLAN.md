@@ -132,3 +132,13 @@ CI 四平台 success，`v0.2.1` Release（初版 tag 忘 bump 版本号已废弃
 验收：fmt/clippy/tests 全绿（15 tests、clippy 0）；管道采样无 `ESC[2K`、
 `script -qec` 模拟 pty 实测进度条逐秒刷新；dl 成功/跳过/失败三态汇总表对齐；
 info/search 着色+收尾线在 TTY 正常、管道自动退化为纯文本。
+
+## J. v0.2.3 修复：我的歌单接口下线（2026-10-01）
+
+| 项 | 内容 | 状态 |
+|----|------|------|
+| J1 | `ncm playlists` 返回空表：网易已下线 `/api/v1/user/playlist`（JSON `code=404`，对照 uid=1 同样 404），改用 `/api/user/playlist`（实测 200、11 个歌单） | ✅ |
+| J2 | `user_playlists` 响应加 `code` 校验（非 200 报错带 message），不再静默成空——根因是 `get_json` 不校验业务 code 的显式化补丁（全局校验风险大，仅修此接口） | ✅ |
+
+验收：clippy 0、15 tests、远端 `~/ncm playlists` 列出全部歌单。
+背景：同日用户报 `playlists` 空输出 + DNS fallback 报错——DNS 为 Termux 瞬时断联（curl 0.4s 恢复），空表是本接口问题。
