@@ -91,6 +91,14 @@ enum Commands {
         #[command(flatten)]
         opts: ViewArgs,
     },
+    /// 首页推荐：每日推荐歌曲 + 官方榜单歌单（歌曲需登录）
+    Recommend {
+        /// 每类最多显示数量（0 = 全部）
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
     /// 保存/查看/清除登录凭据（持久化到 ~/.config/ncm/，之后自动加载）
     Login {
         /// pyncm session dump 文件（与 --cookie 二选一）
@@ -146,6 +154,9 @@ enum Commands {
         /// 不显示滚动歌词
         #[arg(long = "no-lyric")]
         no_lyric: bool,
+        /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv）
+        #[arg(long)]
+        roam: bool,
     },
 }
 
@@ -242,12 +253,61 @@ struct ItemResult {
 }
 
 /// 取播放地址：lossless 先第三方，再回退官方；返回 (row, source, reason, kind)
+/// 官方返回是否不完整：无地址或仅 30s 试听
+fn row_incomplete(row: &Value) -> bool {
+    row["url"].as_str().unwrap_or("").is_empty() || !row["freeTrialInfo"].is_null()
+}
+
+/// 第三方直连源兜底：成功写 row/source 并清 last_err，失败把错误并入 last_err
+async fn tp_fallback(
+    ncm: &Ncm,
+    id: u64,
+    row: &mut Value,
+    source: &mut String,
+    last_err: &mut String,
+) {
+    let (url, name, err) = source::resolve_lossless(ncm, id).await;
+    if let Some(url) = url {
+        // br=0 表示未知：下载侧跳过码率体积下界校验，播放侧不显示音质
+        *row = json!({"url": url, "br": 0u64});
+        *source = name.to_string();
+        last_err.clear();
+    } else if !err.trim().is_empty() {
+        *last_err = if last_err.trim().is_empty() {
+            format!("第三方源失败: {err}")
+        } else {
+            format!("{last_err}；第三方源失败: {err}")
+        };
+    }
+}
+
+/// 本地 mirror 解锁服务兜底（语义同 tp_fallback）
+async fn mirror_fallback(id: u64, row: &mut Value, source: &mut String, last_err: &mut String) {
+    match mirror::match_url(id).await {
+        Ok((url, src)) => {
+            *row = json!({"url": url, "br": 0u64});
+            *source = format!("mirror·{src}");
+            last_err.clear();
+        }
+        Err(e) => {
+            let msg = format!("mirror: {e}");
+            *last_err = if last_err.trim().is_empty() {
+                msg
+            } else {
+                format!("{last_err}；{msg}")
+            };
+        }
+    }
+}
+
 async fn fetch_row(
     ncm: &Ncm,
     id: u64,
     quality: &str,
     allow_trial: bool,
     wanted_flac: bool,
+    // 播放场景 true：先本地 mirror（快起播，低质可接受）再第三方；下载 false：先第三方保音质
+    mirror_first: bool,
 ) -> (Option<Value>, String, String, &'static str) {
     let mut row = Value::Null;
     let mut source = String::new();
@@ -273,46 +333,18 @@ async fn fetch_row(
         }
         source = "官方".into();
 
-        // 官方无地址（无版权/-110 需 VIP）或仅 30s 试听 → 依次兜底：
-        // ① 第三方直连源（无需本地服务，音质可能较低但完整；lossless 请求已在上方试过，不重复）
-        // ② 本地 mirror 解锁服务
-        let official_bad =
-            row["url"].as_str().unwrap_or("").is_empty() || !row["freeTrialInfo"].is_null();
-        if official_bad && !wanted_flac {
-            let (url, name, err) = source::resolve_lossless(ncm, id).await;
-            if let Some(url) = url {
-                // br=0 表示未知：下载侧据此跳过码率体积下界校验，播放侧不显示音质
-                row = json!({"url": url, "br": 0u64});
-                source = name.to_string();
-                last_err.clear();
-            } else if !err.trim().is_empty() {
-                last_err = if last_err.trim().is_empty() {
-                    format!("第三方源失败: {err}")
-                } else {
-                    format!("{last_err}；第三方源失败: {err}")
-                };
-            }
+        // 官方无地址（无版权/-110 需 VIP）或仅 30s 试听 → 按场景顺序兜底
+        let official_bad = row_incomplete(&row);
+        if official_bad && mirror_first && mirror::enabled() {
+            mirror_fallback(id, &mut row, &mut source, &mut last_err).await;
         }
-        // 第三方未提供完整音源 → 本地 mirror 服务兜底
-        let still_bad =
-            row["url"].as_str().unwrap_or("").is_empty() || !row["freeTrialInfo"].is_null();
-        if still_bad && mirror::enabled() {
-            match mirror::match_url(id).await {
-                Ok((url, src)) => {
-                    // br=0 表示未知：下载侧据此跳过码率体积下界校验
-                    row = json!({"url": url, "br": 0u64});
-                    source = format!("mirror·{src}");
-                    last_err.clear();
-                }
-                Err(e) => {
-                    let msg = format!("mirror: {e}");
-                    last_err = if last_err.trim().is_empty() {
-                        msg
-                    } else {
-                        format!("{last_err}；{msg}")
-                    };
-                }
-            }
+        // 第三方源（lossless 请求已在上方试过，不重复）
+        if official_bad && row_incomplete(&row) && !wanted_flac {
+            tp_fallback(ncm, id, &mut row, &mut source, &mut last_err).await;
+        }
+        // 第三方未提供完整音源 → 本地 mirror 兜底（下载场景顺序在后）
+        if official_bad && row_incomplete(&row) && mirror::enabled() && !mirror_first {
+            mirror_fallback(id, &mut row, &mut source, &mut last_err).await;
         }
     }
 
@@ -399,6 +431,7 @@ async fn download_one(
             quality,
             opts.allow_trial,
             matches!(quality, "lossless" | "hires"),
+            false, // 下载：第三方保音质优先，mirror 兜底
         )
         .await;
         spin.stop();
@@ -1100,12 +1133,13 @@ fn report(
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
 
-const SUBCOMMANDS: [&str; 11] = [
+const SUBCOMMANDS: [&str; 12] = [
     "search",
     "dl",
     "list",
     "playlists",
     "daily",
+    "recommend",
     "play",
     "login",
     "whoami",
@@ -1224,6 +1258,61 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Recommend { limit, opts }) => {
+            ui::set_json(opts.json);
+            ui::set_quiet(opts.quiet);
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            // 每日推荐（需登录，失败降级为仅榜单）+ 官方榜单
+            let mut daily = ncm.daily_songs().await.unwrap_or_default();
+            let toplist = ncm.toplist().await?;
+            if daily.is_empty() && toplist.is_empty() {
+                bail!("推荐与榜单均为空（每日推荐需登录：ncm login --session/--cookie）");
+            }
+            if limit > 0 {
+                daily.truncate(limit as usize);
+            }
+            if opts.json {
+                let out = json!({
+                    "daily": Value::Array(daily),
+                    "toplists": Value::Array(
+                        if limit > 0 { toplist.into_iter().take(limit as usize).collect() } else { toplist },
+                    ),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(0);
+            }
+            if daily.is_empty() {
+                ui::info("每日推荐为空（需登录 ncm login）");
+            } else {
+                ui::step("每日推荐");
+                print_search_table(&daily);
+                ui::info("下载: ncm dl daily -d 编号  ·  播放: ncm play daily");
+            }
+            if !toplist.is_empty() {
+                ui::step("官方榜单");
+                let rows: Vec<Vec<String>> = toplist
+                    .iter()
+                    .take(if limit > 0 {
+                        limit as usize
+                    } else {
+                        usize::MAX
+                    })
+                    .enumerate()
+                    .map(|(i, t)| {
+                        vec![
+                            (i + 1).to_string(),
+                            t["name"].as_str().unwrap_or("").to_string(),
+                            t["updateFrequency"].as_str().unwrap_or("").to_string(),
+                            t["trackCount"].as_u64().unwrap_or(0).to_string(),
+                            t["id"].as_u64().unwrap_or(0).to_string(),
+                        ]
+                    })
+                    .collect();
+                ui::table(&["#", "榜单名", "更新", "曲数", "ID"], &rows);
+                ui::info("浏览: ncm list <ID>  ·  下载: ncm dl list.<ID> -d 编号");
+            }
+            Ok(0)
+        }
         Some(Commands::Play {
             target,
             limit,
@@ -1234,6 +1323,7 @@ async fn run(cli: Cli) -> Result<i32> {
             save,
             output,
             no_lyric,
+            roam,
         }) => {
             if json && save {
                 bail!("--json 与 --save 互斥");
@@ -1402,21 +1492,22 @@ async fn run(cli: Cli) -> Result<i32> {
 
             // 6) 歌词预取（mpv + unix 下 IPC 底行：有词滚歌词，无词显示歌名占位）
             let want_ipc = !no_lyric && is_mpv && cfg!(unix);
-            let lyric_tracks: Option<std::sync::Arc<Vec<player::LyricTrack>>> = if want_ipc {
-                let ids: Vec<u64> = play_tracks.iter().map(|t| t.id).collect();
-                let got = fetch_lyrics(&ncm, &ids).await;
-                let lts: Vec<player::LyricTrack> = play_tracks
-                    .iter()
-                    .zip(got)
-                    .map(|(t, lines)| player::LyricTrack {
-                        label: format!("{} - {}", t.title, t.artists),
-                        lines: lines.unwrap_or_default(),
-                    })
-                    .collect();
-                Some(std::sync::Arc::new(lts))
-            } else {
-                None
-            };
+            let lyric_tracks: Option<std::sync::Arc<std::sync::RwLock<Vec<player::LyricTrack>>>> =
+                if want_ipc {
+                    let ids: Vec<u64> = play_tracks.iter().map(|t| t.id).collect();
+                    let got = fetch_lyrics(&ncm, &ids).await;
+                    let lts: Vec<player::LyricTrack> = play_tracks
+                        .iter()
+                        .zip(got)
+                        .map(|(t, lines)| player::LyricTrack {
+                            label: format!("{} - {}", t.title, t.artists),
+                            lines: lines.unwrap_or_default(),
+                        })
+                        .collect();
+                    Some(std::sync::Arc::new(std::sync::RwLock::new(lts)))
+                } else {
+                    None
+                };
             let want_lyric = lyric_tracks.is_some();
 
             // 7) 启动播放
@@ -1464,7 +1555,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 args.push("--term-playing-msg=".to_string());
                 Some(player::spawn_overlay(
                     sock.clone(),
-                    lyric_tracks.expect("want_lyric 保证 Some"),
+                    lyric_tracks.clone().expect("want_lyric 保证 Some"),
                 ))
             } else if is_mpv {
                 // 无歌词 IPC 时用 mpv 模板每首打一行，兼作切曲提示
@@ -1472,6 +1563,21 @@ async fn run(cli: Cli) -> Result<i32> {
                     "--term-playing-msg=♪ [${playlist-pos}/${playlist-count}] ${media-title}"
                         .to_string(),
                 );
+                None
+            } else {
+                None
+            };
+            // 播放漫游：复用歌词 IPC socket，队列将尽时预取私人FM并 append
+            let roam_handle = if roam && want_lyric {
+                ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
+                Some(tokio::spawn(roam_loop(
+                    sock.clone(),
+                    ncm.clone(),
+                    lyric_tracks.expect("want_lyric 保证 Some"),
+                    quality.clone(),
+                )))
+            } else if roam {
+                ui::info("漫游需要 mpv + 歌词 IPC（--no-lyric/非 mpv 下不可用），已忽略");
                 None
             } else {
                 None
@@ -1501,6 +1607,9 @@ async fn run(cli: Cli) -> Result<i32> {
                     .context("等待播放器失败")?
                     .with_context(|| format!("启动播放器失败: {prog}"))?
             };
+            if let Some(h) = roam_handle {
+                h.abort();
+            }
             if overlay.is_some() && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                 eprint!("\r\x1b[2K");
                 let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -1752,7 +1861,7 @@ async fn fetch_urls(
     use futures_util::future::join_all;
     let wanted_flac = matches!(quality, "lossless" | "hires");
     join_all(tracks.iter().map(|t| async move {
-        let (row, source, reason, _) = fetch_row(ncm, t.id, quality, true, wanted_flac).await;
+        let (row, source, reason, _) = fetch_row(ncm, t.id, quality, true, wanted_flac, true).await;
         let row = row.ok_or(reason)?;
         let url = row["url"]
             .as_str()
@@ -1777,6 +1886,88 @@ async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>>
 }
 
 /// 时间种子洗牌（xorshift64*，满足播放随机即可，无外部 rand 依赖）
+/// 播放漫游：队列剩余 ≤3 首时拉私人FM，取址成功后经 mpv IPC append，
+/// 并同步追加歌词 tracks（与播放列表索引对齐）；mpv 退出（IPC 连不上）静默结束
+async fn roam_loop(
+    sock: std::path::PathBuf,
+    ncm: Ncm,
+    tracks: std::sync::Arc<std::sync::RwLock<Vec<player::LyricTrack>>>,
+    quality: String,
+) {
+    let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
+    let mut batch: Vec<Value> = Vec::new();
+    let mut req_id: u64 = 9000;
+    let mut fails: u32 = 0; // 启动期 socket 未就绪的容忍计数
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // 查询失败 = mpv 未就绪或已退出（连续 3 次才认定退出）
+        req_id += 1;
+        let pos = player::ipc_get(&sock, "playlist-pos", req_id)
+            .await
+            .and_then(|v| v.as_u64());
+        req_id += 1;
+        let count = player::ipc_get(&sock, "playlist-count", req_id)
+            .await
+            .and_then(|v| v.as_u64());
+        let (Some(pos), Some(mut count)) = (pos, count) else {
+            fails += 1;
+            if fails >= 3 {
+                return;
+            }
+            continue;
+        };
+        fails = 0;
+        if pos + 3 < count {
+            continue; // 距队尾还早
+        }
+        if batch.is_empty() {
+            batch = ncm.radio_songs().await.unwrap_or_default();
+            if batch.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                continue;
+            }
+        }
+        // 预追到前方余量 ≥8 首；取址失败的曲丢弃换下一首
+        while pos + 8 > count && !batch.is_empty() {
+            let song = batch.remove(0);
+            let Some(id) = song["id"].as_u64() else {
+                continue;
+            };
+            let (row, _source, _reason, _kind) =
+                fetch_row(&ncm, id, &quality, true, wanted_flac, true).await;
+            let url = row
+                .as_ref()
+                .and_then(|r| r["url"].as_str())
+                .filter(|u| !u.is_empty())
+                .map(String::from);
+            let Some(url) = url else {
+                continue;
+            };
+            // 歌词（失败留空，底行 label 占位照常）
+            let lines = ncm
+                .lyric(id)
+                .await
+                .ok()
+                .and_then(|v| v["lrc"]["lyric"].as_str().map(lrc::parse_lrc_timeline))
+                .unwrap_or_default();
+            let t = Track::from_json(&song);
+            // 先 append 到 mpv，确认命令送达再写 tracks，保持索引对齐
+            let cmd = serde_json::json!({"command": ["loadfile", url, "append"]}).to_string();
+            if player::ipc_send(&sock, &cmd).await.is_err() {
+                return;
+            }
+            tracks
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(player::LyricTrack {
+                    label: format!("{} - {}", t.title, t.artists),
+                    lines,
+                });
+            count += 1;
+        }
+    }
+}
+
 fn shuffle_by_time(v: &mut [Value]) {
     let mut seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

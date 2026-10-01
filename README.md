@@ -5,9 +5,13 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
 
 ## 功能
 
-- **浏览 / 下载分工**：`search` `list` `daily` `playlists` 只负责看（表格 / `--json`），
-  `dl` 是唯一下载入口；`-d 1,3,5-8/all/1-` 选择器只在 `dl` 出现，TTY 下没给 `-d`
-  会交互选编号（回车仅列出）
+- **浏览 / 下载分工**：`search` `list` `daily` `playlists` `recommend` 只负责看
+  （表格 / `--json`），`dl` 是唯一下载入口；`-d 1,3,5-8/all/1-` 选择器只在 `dl` 出现，
+  TTY 下没给 `-d` 会交互选编号（回车仅列出）
+- **首页推荐**：`ncm recommend` 一次给出每日推荐歌曲（需登录）与官方榜单歌单
+  （`/api/toplist`），直接 `ncm list <ID>` 浏览、`ncm dl list.<ID>` 下载
+- **播放漫游**：`ncm play --roam` 队列剩余 ≤3 首时自动接私人FM无限续播
+  （自动取址+歌词追加，mpv 下无感接力）
 - **下载**：单曲 / 歌单 / 专辑 / 歌手链接 / `list.123` / `daily` / 关键词，
   **默认 FLAC + 歌词 + 保留音频**；进度条 / spinner / 完整性防线（Range → `.part`
   → 魔数/时长校验 → 全过才落盘）；完成后出结果一览表（`#`/状态/曲目/来源/大小/备注）

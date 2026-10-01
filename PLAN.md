@@ -157,3 +157,19 @@ the third-party provided downloading files."，且 "But remain the mirror featur
 
 验收：clippy 0、15 tests；本地 `play 2088507144 --json` source=`kangqiovo` 完整直链、
 `play 29774171`（VIP）source=`vincentzyu`、mirror 失败标注生效。
+
+## L. v0.3.0 播放漫游 / 首页推荐 / 播放取址顺序（2026-10-02）
+
+用户需求：「我需要添加漫游功能。并且如果从第三方API上下载来的歌曲，是无法支持到比较低的音质，
+使得能够快速加载的话，那我建议的是还是先走mirror local。」「播放漫游」「以及我希望能够获取到
+他推荐的歌单和歌曲，在首页上推荐的。」
+
+| 项 | 内容 | 状态 |
+|----|------|------|
+| L1 | 取址顺序按场景：`fetch_row` 加 `mirror_first`——play 先本地 mirror（快起播低质可接受）再第三方；dl 保持第三方保音质再 mirror。提取 `tp_fallback`/`mirror_fallback`/`row_incomplete` helper | ✅ |
+| L2 | `ncm recommend [-n N]`：每日推荐歌曲表（需登录，空则降级仅榜单）+ 官方榜单歌单表（`/api/toplist` 实测 200；`/api/v1/discovery/recommend/resource` 登录墙 301 放弃）；`SUBCOMMANDS` 加 `recommend`（修顶层快捷 dl 吞子命令的 bug） | ✅ |
+| L3 | `ncm play --roam` 播放漫游：私人FM（`/api/v1/radio/get`，标准 song 结构）；`roam_loop` 2s 轮询 mpv `playlist-pos/count`，剩余 ≤3 首预取，`loadfile append` 追加（serde_json 构造防转义）+ 歌词/label 同步 push 进 `Arc<RwLock<Vec<LyricTrack>>>`（overlay 三处读点改 read 锁）；取址失败曲丢弃；启动期连续 3 次查询失败才退出；mpv 退出 abort task。`Ncm` 加 `#[derive(Clone)]`；`resolve_lossless` 的 `dyn Future` 补 `+ Send`（tokio::spawn 要求）；player.rs 新增 `ipc_send`/`ipc_get`（request_id 匹配） | ✅ |
+
+验收：clippy 0、15 tests；本地 `NCM_PLAYER="mpv --ao=null --length=5" ncm play 晴天 -n 3 --roam`
+45s 跑满 timeout（15s 队列被 FM 无限接力）证明 append 生效；`recommend -n 5` 榜单表 5 行正常
+（每日推荐本地无登录态显示降级提示）。

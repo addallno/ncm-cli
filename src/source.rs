@@ -108,7 +108,7 @@ pub async fn resolve_lossless(ncm: &Ncm, id: u64) -> (Option<String>, &'static s
     let mut last_err = String::new();
     let try_next = |name: &'static str,
                     fut: std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<String>>>,
+        Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
     >| async move {
         if is_down(name) {
             return Ok(None);
@@ -126,7 +126,9 @@ pub async fn resolve_lossless(ncm: &Ncm, id: u64) -> (Option<String>, &'static s
         (
             "xuanluoge",
             Box::pin(tp_xuanluoge(ncm, id))
-                as std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>>>>,
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
+                >,
         ),
         ("kangqiovo", Box::pin(tp_kangqiovo(ncm, id))),
         ("vincentzyu", Box::pin(tp_vincentzyu(ncm, id))),

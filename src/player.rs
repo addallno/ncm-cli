@@ -37,12 +37,12 @@ pub fn cleanup_socket(path: &Path) {
 #[cfg(unix)]
 pub fn spawn_overlay(
     sock: std::path::PathBuf,
-    tracks: Arc<Vec<LyricTrack>>,
+    tracks: Arc<std::sync::RwLock<Vec<LyricTrack>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use std::io::IsTerminal;
         let tty = std::io::stderr().is_terminal();
-        if let Err(e) = overlay_loop(&sock, tracks.as_ref()).await {
+        if let Err(e) = overlay_loop(&sock, &tracks).await {
             // mpv 不在或提前退出属正常收尾，静默；其余打一行提示
             if e.kind() != std::io::ErrorKind::NotFound {
                 if tty {
@@ -60,13 +60,45 @@ pub fn spawn_overlay(
 #[cfg(not(unix))]
 pub fn spawn_overlay(
     _sock: std::path::PathBuf,
-    _tracks: Arc<Vec<LyricTrack>>,
+    _tracks: Arc<std::sync::RwLock<Vec<LyricTrack>>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async {})
 }
 
+/// 漫游用：连接 mpv IPC 发送命令（不读回应，适合 loadfile append）
 #[cfg(unix)]
-async fn overlay_loop(sock: &Path, tracks: &[LyricTrack]) -> std::io::Result<()> {
+pub async fn ipc_send(sock: &Path, cmd: &str) -> std::io::Result<()> {
+    let mut s = UnixStream::connect(sock).await?;
+    s.write_all(cmd.as_bytes()).await?;
+    s.write_all(b"\n").await?;
+    s.flush().await?;
+    Ok(())
+}
+
+/// 漫游用：查询单个属性（按 request_id 匹配回应）；连接失败或属性错误返回 None
+#[cfg(unix)]
+pub async fn ipc_get(sock: &Path, prop: &str, req_id: u64) -> Option<Value> {
+    let mut s = UnixStream::connect(sock).await.ok()?;
+    let cmd = format!("{{\"command\":[\"get_property\",\"{prop}\"],\"request_id\":{req_id}}}\n");
+    s.write_all(cmd.as_bytes()).await.ok()?;
+    s.flush().await.ok()?;
+    let mut lines = TokioBufReader::new(s).lines();
+    // mpv 可能先回无关行，最多读 8 条找匹配的 request_id
+    for _ in 0..8 {
+        let raw = lines.next_line().await.ok()??;
+        let v: Value = serde_json::from_str(&raw).ok()?;
+        if v["request_id"].as_u64() == Some(req_id) {
+            return (v["error"].as_str() == Some("success")).then(|| v["data"].clone());
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+async fn overlay_loop(
+    sock: &Path,
+    tracks: &Arc<std::sync::RwLock<Vec<LyricTrack>>>,
+) -> std::io::Result<()> {
     // mpv 启动后才创建 socket，重试等待（最多 ~5s）
     let stream = {
         let mut last = None;
@@ -116,25 +148,28 @@ async fn overlay_loop(sock: &Path, tracks: &[LyricTrack]) -> std::io::Result<()>
                         last_sec = None;
                         cur_t = 0.0;
                         dur = None;
-                        print_row(tracks, cur_idx, None, None, None);
+                        let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+                        print_row(ts.as_slice(), cur_idx, None, None, None);
                     }
                 }
                 Some("time-pos") => {
                     if let Some(t) = ev["data"].as_f64() {
                         cur_t = t;
-                        let line = current_line(tracks, cur_idx, t);
+                        let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+                        let line = current_line(ts.as_slice(), cur_idx, t);
                         let sec = t as u64;
                         if line != last_line || last_sec != Some(sec) {
                             last_line = line.clone();
                             last_sec = Some(sec);
-                            print_row(tracks, cur_idx, line.as_deref(), Some(t), dur);
+                            print_row(ts.as_slice(), cur_idx, line.as_deref(), Some(t), dur);
                         }
                     }
                 }
                 Some("duration") => {
                     dur = ev["data"].as_f64().filter(|d| *d > 0.0);
+                    let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
                     print_row(
-                        tracks,
+                        ts.as_slice(),
                         cur_idx,
                         last_line.as_deref(),
                         (cur_t > 0.0).then_some(cur_t),

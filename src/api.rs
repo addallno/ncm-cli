@@ -8,6 +8,7 @@ pub const BASE: &str = "https://music.163.com";
 pub const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 const BATCH: usize = 200;
 
+#[derive(Clone)]
 pub struct Ncm {
     pub client: Client,
     /// 第三方源多为自签证书，单独一个跳过校验的 client
@@ -226,6 +227,26 @@ impl Ncm {
             .as_array()
             .cloned()
             .unwrap_or_default())
+    }
+
+    /// 官方榜单列表（首页排行榜推荐位，元素为歌单结构，可直接 list/dl）
+    pub async fn toplist(&self) -> Result<Vec<Value>> {
+        let data = self.get_json("/api/toplist", &[]).await?;
+        let code = data["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            anyhow::bail!("获取榜单失败 code={code}");
+        }
+        Ok(data["list"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// 私人FM 一批歌曲（播放漫游数据源，元素为标准 song 结构）
+    pub async fn radio_songs(&self) -> Result<Vec<Value>> {
+        let data = self.get_json("/api/v1/radio/get", &[]).await?;
+        let code = data["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            anyhow::bail!("私人FM失败 code={code}");
+        }
+        Ok(data["data"].as_array().cloned().unwrap_or_default())
     }
 }
 
