@@ -142,3 +142,18 @@ info/search 着色+收尾线在 TTY 正常、管道自动退化为纯文本。
 
 验收：clippy 0、15 tests、远端 `~/ncm playlists` 列出全部歌单。
 背景：同日用户报 `playlists` 空输出 + DNS fallback 报错——DNS 为 Termux 瞬时断联（curl 0.4s 恢复），空表是本接口问题。
+
+## K. v0.2.4 试听曲自动第三方直连 + mirror 多候选（2026-10-01）
+
+用户反馈：`play 2088507144`（GODS）只有 30s 试听，"make it play from mirror auto
+with a low quality"；澄清 "I don't need local mirror server, I mean the mirror is
+the third-party provided downloading files."，且 "But remain the mirror feature now."
+
+| 项 | 内容 | 状态 |
+|----|------|------|
+| K1 | fetch_row 兜底顺序改为：官方失败/试听 → ①第三方直连源（resolve_lossless 三源，无需本地服务、低质可接受、br=0）→ ②本地 mirror 服务（保留）；lossless 请求不重复试第三方 | ✅ |
+| K2 | 本地 mirror 多候选：`--mirror`/`NCM_MIRROR` 支持逗号分隔，`match_url` 依次尝试聚合报错；默认 `3000,3100`（修复远端 unm 部署在 3100 而默认 3000 连不上的静默失败）；删无引用的 `base()` | ✅ |
+| K3 | 全兜底失败时来源标 `官方·试听（无完整源）`（原 mirror 失败静默，用户看不出走没走兜底） | ✅ |
+
+验收：clippy 0、15 tests；本地 `play 2088507144 --json` source=`kangqiovo` 完整直链、
+`play 29774171`（VIP）source=`vincentzyu`、mirror 失败标注生效。

@@ -86,23 +86,28 @@ ncm completions bash > ~/.local/share/bash-completion/completions/ncm
 429/5xx 自动熔断）：`xuanluoge → kangqiovo → vincentzyu`，全失败回退官方（降级 mp3）。
 无版权歌（官方 404 + 第三方全挂）会明确报因，不误判为链接问题。
 
-## 解锁音源（mirror）
+## 解锁音源（mirror + 第三方直连）
 
 官方渠道对 VIP 曲返回 `-110`（url 为空）或仅 30s 试听，非会员无法播完/下载。
-`fetch_row` 在官方失败或试听时自动请求本机解锁服务兜底：
+`fetch_row` 自动按序兜底：
+
+1. **第三方直连源**（`xuanluoge` / `kangqiovo` / `vincentzyu`）：无需任何本地服务，
+   直接解析出完整直链，音质可能较低但可完整播放/下载（来源标源名）
+2. **本地 mirror 解锁服务**（UnblockNeteaseMusic-utils）：第三方未命中时兜底，
+   支持逗号分隔配置多个候选地址依次尝试
 
 ```bash
-# 部署（默认 3000 端口；Node ≥18）
+# 可选：部署本地解锁服务（Node ≥18，默认 3000 端口）
 npx @neteasecloudmusicapienhanced/unblockmusic-utils
-# 或 git clone 后 npm install && npm run start
 
-ncm play 29774171                      # 默认打 http://127.0.0.1:3000
-ncm --mirror http://127.0.0.1:3100 dl 186016   # 显式指定
-NCM_MIRROR=none ncm dl 186016          # 禁用（仅官方源）
+ncm play 2088507144                      # 试听曲自动走第三方直连（无需本地服务）
+ncm --mirror http://127.0.0.1:3100 dl 186016   # 显式指定本地服务
+NCM_MIRROR=http://127.0.0.1:3000,http://127.0.0.1:3100 ncm play daily  # 多候选
+NCM_MIRROR=none ncm dl 186016            # 禁用本地 mirror（第三方直连仍生效）
 ```
 
-- 优先级：`--mirror` > 环境变量 `NCM_MIRROR` > 默认 `http://127.0.0.1:3000`；`none` 禁用
-- 单次匹配超时 30s；失败原因并入报错，未配置时给出部署提示
+- 本地 mirror 优先级：`--mirror` > 环境变量 `NCM_MIRROR` > 默认 `http://127.0.0.1:3000,http://127.0.0.1:3100`；`none` 禁用
+- 单次匹配超时 30s；全部兜底失败时来源标 `官方·试听（无完整源）`，报错并入失败原因
 - 成功时来源显示为 `mirror·<音源>`，下载校验按未知码率处理（不误判体积）
 
 ## 构建

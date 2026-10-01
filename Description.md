@@ -48,7 +48,7 @@ src/
 登录凭据优先级：`--session <file>` / `--cookie <str>` > 环境变量 `NCM_SESSION`/`NCM_COOKIE` >
 `ncm login` 持久化文件。
 
-解锁音源优先级：`--mirror <URL|none>` > `NCM_MIRROR` > 默认 `http://127.0.0.1:3000`（`none` 禁用）。
+取址兜底：官方失败/试听 → 第三方直连源（xuanluoge/kangqiovo/vincentzyu，无需本地服务）→ 本地 mirror（`--mirror` > `NCM_MIRROR` > 默认 3000,3100 多候选，`none` 禁用）。
 
 ## 构建与验证
 

@@ -273,10 +273,30 @@ async fn fetch_row(
         }
         source = "官方".into();
 
-        // 官方无地址（无版权/-110 需 VIP）或仅 30s 试听 → 解锁音源兜底
+        // 官方无地址（无版权/-110 需 VIP）或仅 30s 试听 → 依次兜底：
+        // ① 第三方直连源（无需本地服务，音质可能较低但完整；lossless 请求已在上方试过，不重复）
+        // ② 本地 mirror 解锁服务
         let official_bad =
             row["url"].as_str().unwrap_or("").is_empty() || !row["freeTrialInfo"].is_null();
-        if official_bad && mirror::enabled() {
+        if official_bad && !wanted_flac {
+            let (url, name, err) = source::resolve_lossless(ncm, id).await;
+            if let Some(url) = url {
+                // br=0 表示未知：下载侧据此跳过码率体积下界校验，播放侧不显示音质
+                row = json!({"url": url, "br": 0u64});
+                source = name.to_string();
+                last_err.clear();
+            } else if !err.trim().is_empty() {
+                last_err = if last_err.trim().is_empty() {
+                    format!("第三方源失败: {err}")
+                } else {
+                    format!("{last_err}；第三方源失败: {err}")
+                };
+            }
+        }
+        // 第三方未提供完整音源 → 本地 mirror 服务兜底
+        let still_bad =
+            row["url"].as_str().unwrap_or("").is_empty() || !row["freeTrialInfo"].is_null();
+        if still_bad && mirror::enabled() {
             match mirror::match_url(id).await {
                 Ok((url, src)) => {
                     // br=0 表示未知：下载侧据此跳过码率体积下界校验
@@ -285,7 +305,7 @@ async fn fetch_row(
                     last_err.clear();
                 }
                 Err(e) => {
-                    let msg = format!("mirror({}): {e}", mirror::base());
+                    let msg = format!("mirror: {e}");
                     last_err = if last_err.trim().is_empty() {
                         msg
                     } else {
@@ -328,6 +348,10 @@ async fn fetch_row(
         }
         if !source.ends_with("试听") {
             source.push_str("·试听");
+        }
+        // 第三方源与本地 mirror 都没拿到完整音源时标注，避免看起来像"没走兜底"
+        if !last_err.trim().is_empty() {
+            source.push_str("（无完整源）");
         }
     }
     (Some(row), source, String::new(), "ok")
