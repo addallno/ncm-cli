@@ -34,14 +34,14 @@ src/
 | 命令 | 说明 |
 |------|------|
 | `ncm search <kw>` | 纯浏览：表格 / `--json`（下载走 dl） |
-| `ncm dl <目标>` | 唯一下载入口：单曲/歌单/专辑/歌手/关键词/`daily`；`-d` 选择器、TTY 交互、`-n` 候选数 |
+| `ncm dl <目标>` | 唯一下载入口：单曲/歌单/专辑/歌手/关键词/`daily`；`-d` 选择器、TTY 交互、`-n` 候选数；完成出结果一览表（状态/来源/大小/失败原因）+ 耗时汇总 |
 | `ncm list <目标>` | 纯浏览歌单/专辑/歌手作品列表 |
 | `ncm playlists` | 我创建/收藏的歌单（需登录） |
 | `ncm daily` | 每日推荐浏览（需登录） |
-| `ncm play <目标\|daily>` | 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`；mpv 下 n/p/←→ 交互+歌词滚动；播放前显示队列卡片（来源/音质/⚠30s试听） |
+| `ncm play <目标\|daily>` | 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`；mpv 下 n/p/←→ 交互+歌词滚动，底行 `mm:ss/mm:ss [进度条] 歌词`（非 TTY 静默）；播放前显示队列卡片（来源/音质/⚠30s试听） |
 | `ncm login/--logout` | 保存/查看/清除登录凭据（持久化） |
 | `ncm whoami` | 当前登录状态（昵称/uid/凭据来源） |
-| `ncm info <目标>` | 歌曲详情（歌名/歌手/专辑/时长/费用/版权），`--json` |
+| `ncm info <目标>` | 歌曲详情（标题行/歌名/歌手/专辑/时长/费用着色/版权），VIP 曲提示 mirror 解锁，`--json` |
 | `ncm completions <shell>` | 生成 bash/zsh/fish/powershell 补全 |
 | `ncm <ID>` | 快捷下载（顶层无子命令即 dl） |
 

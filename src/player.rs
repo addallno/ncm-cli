@@ -40,12 +40,18 @@ pub fn spawn_overlay(
     tracks: Arc<Vec<LyricTrack>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        use std::io::IsTerminal;
+        let tty = std::io::stderr().is_terminal();
         if let Err(e) = overlay_loop(&sock, tracks.as_ref()).await {
             // mpv 不在或提前退出属正常收尾，静默；其余打一行提示
             if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("\r\x1b[2K(歌词同步: {e})");
+                if tty {
+                    eprintln!("\r\x1b[2K(歌词同步: {e})");
+                } else {
+                    eprintln!("(歌词同步: {e})");
+                }
             }
-        } else {
+        } else if tty {
             eprintln!("\r\x1b[2K");
         }
     })
@@ -85,7 +91,7 @@ async fn overlay_loop(sock: &Path, tracks: &[LyricTrack]) -> std::io::Result<()>
         }
     };
     let (read, mut write) = stream.into_split();
-    for (id, prop) in [(1, "time-pos"), (2, "playlist-pos")] {
+    for (id, prop) in [(1, "time-pos"), (2, "playlist-pos"), (3, "duration")] {
         let cmd = format!("{{\"command\":[\"observe_property\",{id},\"{prop}\"]}}\n");
         write.write_all(cmd.as_bytes()).await?;
     }
@@ -93,6 +99,9 @@ async fn overlay_loop(sock: &Path, tracks: &[LyricTrack]) -> std::io::Result<()>
 
     let mut cur_idx: usize = 0;
     let mut last_line: Option<String> = None;
+    let mut last_sec: Option<u64> = None;
+    let mut cur_t: f64 = 0.0;
+    let mut dur: Option<f64> = None;
     let mut lines = TokioBufReader::new(read).lines();
     while let Ok(Some(raw)) = lines.next_line().await {
         let Ok(ev) = serde_json::from_str::<Value>(&raw) else {
@@ -104,17 +113,33 @@ async fn overlay_loop(sock: &Path, tracks: &[LyricTrack]) -> std::io::Result<()>
                     if let Some(i) = ev["data"].as_u64() {
                         cur_idx = i as usize;
                         last_line = None; // 切曲后重置，等新 time-pos
-                        print_row(tracks, cur_idx, None);
+                        last_sec = None;
+                        cur_t = 0.0;
+                        dur = None;
+                        print_row(tracks, cur_idx, None, None, None);
                     }
                 }
                 Some("time-pos") => {
                     if let Some(t) = ev["data"].as_f64() {
+                        cur_t = t;
                         let line = current_line(tracks, cur_idx, t);
-                        if line != last_line {
+                        let sec = t as u64;
+                        if line != last_line || last_sec != Some(sec) {
                             last_line = line.clone();
-                            print_row(tracks, cur_idx, line.as_deref());
+                            last_sec = Some(sec);
+                            print_row(tracks, cur_idx, line.as_deref(), Some(t), dur);
                         }
                     }
+                }
+                Some("duration") => {
+                    dur = ev["data"].as_f64().filter(|d| *d > 0.0);
+                    print_row(
+                        tracks,
+                        cur_idx,
+                        last_line.as_deref(),
+                        (cur_t > 0.0).then_some(cur_t),
+                        dur,
+                    );
                 }
                 _ => {}
             }
@@ -157,25 +182,50 @@ fn current_line(tracks: &[LyricTrack], idx: usize, t: f64) -> Option<String> {
 
 /// 在 stderr 单行刷新歌词（覆盖行内旧内容）
 #[cfg(unix)]
-fn print_row(tracks: &[LyricTrack], idx: usize, text: Option<&str>) {
+fn print_row(
+    tracks: &[LyricTrack],
+    idx: usize,
+    text: Option<&str>,
+    t: Option<f64>,
+    dur: Option<f64>,
+) {
+    use std::io::IsTerminal;
+    // 非 TTY（管道/重定向）静默，避免裸 ANSI 序列污染输出
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
     let total = tracks.len();
     let name = tracks.get(idx).map(|t| t.label.as_str()).unwrap_or("");
     let body = text.unwrap_or(name);
-    // ANSI 宽度裁剪：中日韩宽字符按 2 列估
-    let mut width = 0usize;
-    let mut clipped = String::new();
-    for ch in body.chars() {
-        let w = if ch as u32 > 0x1100 { 2 } else { 1 };
-        if width + w > 60 {
-            break;
+    let prefix = format!("♪ [{}/{}]", idx + 1, total);
+    // 时间与进度条：mm:ss/mm:ss [bar]
+    let meta = match (t, dur) {
+        (Some(tt), Some(d)) if d > 0.0 => {
+            if tt <= d {
+                crate::ui::dim(&format!(
+                    " {} / {} {} ",
+                    fmt_t(tt),
+                    fmt_t(d),
+                    crate::ui::render_bar(tt / d, 8)
+                ))
+            } else {
+                crate::ui::dim(&format!(" {} / {} ", fmt_t(tt), fmt_t(d)))
+            }
         }
-        width += w;
-        clipped.push(ch);
-    }
-    eprint!(
-        "\r\x1b[2K\x1b[36m♪ [{}/{}]\x1b[0m {clipped}",
-        idx + 1,
-        total
-    );
+        (Some(tt), _) => crate::ui::dim(&format!(" {} ", fmt_t(tt))),
+        _ => String::new(),
+    };
+    let budget = 60usize
+        .saturating_sub(crate::ui::display_width(&prefix))
+        .saturating_sub(crate::ui::display_width(&meta));
+    let clipped = crate::ui::truncate_width(body, budget);
+    eprint!("\r\x1b[2K\x1b[36m{prefix}\x1b[0m{meta}{clipped}");
     let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+/// 秒 → mm:ss
+#[cfg(unix)]
+fn fmt_t(s: f64) -> String {
+    let s = s.max(0.0) as u64;
+    format!("{:02}:{:02}", s / 60, s % 60)
 }

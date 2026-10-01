@@ -95,7 +95,23 @@ pub fn info(msg: &str) {
 
 /// 中文/全角按 2 列计算的显示宽度
 pub fn display_width(text: &str) -> usize {
-    text.chars().map(char_width).sum()
+    // 剥离 ANSI 转义序列（\x1b[...m），带色单元格也能正确对齐
+    let mut w = 0usize;
+    let mut esc = false;
+    for c in text.chars() {
+        if esc {
+            if c.is_ascii_alphabetic() {
+                esc = false;
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            esc = true;
+            continue;
+        }
+        w += char_width(c);
+    }
+    w
 }
 
 fn char_width(c: char) -> usize {
@@ -171,6 +187,7 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) {
             .collect();
         println!("{line}");
     }
+    println!("{}", dim(&format!("  {rule}")));
 }
 
 pub fn human_size(size: u64) -> String {

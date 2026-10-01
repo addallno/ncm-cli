@@ -117,3 +117,18 @@ CI 四平台 success，`v0.2.1` Release（初版 tag 忘 bump 版本号已废弃
 远端 43.136.171.164（Termux）实测：`dl 186016 --mirror` 下载 12.1MB `周杰伦 - 晴天.mp3`（源 mirror·unm）、
 `play 29774171` VIP 曲走 mirror·byfuns 完整播放+歌词滚动、daily 队列卡片正常；
 解锁服务 `~/UnblockNeteaseMusic-utils`（PORT=3100，启动脚本 `~/start-unm.sh`）。
+
+## I. v0.2.2 输出视觉统一与体验增强（2026-10-01）
+
+用户反馈："More to enhance and design better."（开放式——自主挑高价值项实施）
+
+| 项 | 内容 | 状态 |
+|----|------|------|
+| I1 | ui 层：`display_width` 剥 ANSI（着色字符串可直接作表格单元格）、`table()` 底部收尾线、search 结果表着色（歌名 accent、时长/ID dim） | ✅ |
+| I2 | info 卡片：标题行 `♪ 歌名 · 歌手`、费用值着色（免费 good、VIP/专辑购买 warn）、VIP/专辑曲尾提示 `--mirror/NCM_MIRROR` 解锁 | ✅ |
+| I3 | dl 汇总升级：逐首失败错误截断 64 字、结果一览表（`#`/状态/曲目/来源/大小/备注，失败原因截断 30）、汇总失败/跳过只计数不重复全文、完成行加耗时、`--json` 加 `elapsed_secs` | ✅ |
+| I4 | 播放进度条：mpv IPC observe `duration`，底行 `♪ [i/N] mm:ss/mm:ss [bar] 歌词`（每秒重绘，duration 未知显 `mm:ss` 无 bar）；非 TTY 全链路静默（overlay 与收尾清理的 `\x1b[2K` 均加 TTY 门控，管道输出零裸 ANSI） | ✅ |
+
+验收：fmt/clippy/tests 全绿（15 tests、clippy 0）；管道采样无 `ESC[2K`、
+`script -qec` 模拟 pty 实测进度条逐秒刷新；dl 成功/跳过/失败三态汇总表对齐；
+info/search 着色+收尾线在 TTY 正常、管道自动退化为纯文本。

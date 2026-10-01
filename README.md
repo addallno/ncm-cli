@@ -10,7 +10,8 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
   会交互选编号（回车仅列出）
 - **下载**：单曲 / 歌单 / 专辑 / 歌手链接 / `list.123` / `daily` / 关键词，
   **默认 FLAC + 歌词 + 保留音频**；进度条 / spinner / 完整性防线（Range → `.part`
-  → 魔数/时长校验 → 全过才落盘）
+  → 魔数/时长校验 → 全过才落盘）；完成后出结果一览表（`#`/状态/曲目/来源/大小/备注）
+  与耗时汇总，管道/脚本下输出干净无 ANSI 裸序列
 - **播放**：`ncm play <ID/链接/关键词|daily>`，队列整批喂给 mpv（`n/p` 切曲、
   `←/→` 快退进、空格暂停、`/` 搜索、`q` 退出），歌词随播放滚动；`--save -o 目录`
   先下载到本地再播本地文件；`--shuffle` 洗牌、`-n` 队列长度、`--json` 输出队列
@@ -76,7 +77,8 @@ ncm completions bash > ~/.local/share/bash-completion/completions/ncm
 | `q` | 退出 |
 
 歌词同步：`ncm play` 自动拉 LRC 并通过 mpv IPC socket 跟随进度滚动显示
-（`--no-lyric` 关闭；ffplay 无歌词显示，建议装 mpv）。
+（`--no-lyric` 关闭；ffplay 无歌词显示，建议装 mpv）。底行实时显示
+`♪ [i/N] mm:ss/mm:ss [进度条] 当前歌词`（每秒刷新，非 TTY 场景自动静默）。
 
 ## FLAC 取址
 

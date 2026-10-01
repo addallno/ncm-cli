@@ -725,6 +725,7 @@ async fn download_songs(
         ui::fail("没有可处理的曲目");
         return Ok((1, Vec::new()));
     }
+    let started = Instant::now();
     let lrc_kinds: Vec<&'static str> = if opts.no_lrc {
         Vec::new()
     } else {
@@ -777,7 +778,13 @@ async fn download_songs(
         } else if let Some(s) = &r.skipped {
             ui::skip(&format!("{}/{} {} · {s}", i + 1, total, truncate(&r.title)));
         } else if let Some(e) = &r.error {
-            ui::fail(&format!("{}/{} {} · {e}", i + 1, total, truncate(&r.title)));
+            ui::fail(&format!(
+                "{}/{} {} · {}",
+                i + 1,
+                total,
+                truncate(&r.title),
+                ui::truncate_width(e, 64)
+            ));
         } else {
             let mut parts: Vec<String> = Vec::new();
             if let Some(p) = &r.audio {
@@ -805,7 +812,7 @@ async fn download_songs(
         items.push(r);
     }
 
-    let code = report(&items, &opts, &output)?;
+    let code = report(&items, &opts, &output, started.elapsed())?;
     Ok((code, items))
 }
 
@@ -826,13 +833,15 @@ fn print_search_table(songs: &[Value]) {
                 .as_u64()
                 .or_else(|| s["dt"].as_u64())
                 .unwrap_or(0);
+            let name = s["name"].as_str().unwrap_or("");
+            let id = s["id"].as_u64().unwrap_or(0);
             vec![
                 (i + 1).to_string(),
-                s["name"].as_str().unwrap_or("").to_string(),
+                ui::accent(name),
                 first_artist(s),
                 album.to_string(),
-                hms(dur),
-                s["id"].as_u64().unwrap_or(0).to_string(),
+                ui::dim(&hms(dur)),
+                ui::dim(&id.to_string()),
             ]
         })
         .collect();
@@ -920,7 +929,12 @@ fn pick_items(items: &[Value], selector: &str) -> Result<Vec<Value>> {
     Ok(picked)
 }
 
-fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -> Result<i32> {
+fn report(
+    items: &[ItemResult],
+    opts: &DownloadArgs,
+    output: &std::path::Path,
+    elapsed: std::time::Duration,
+) -> Result<i32> {
     let audio = items.iter().filter(|i| i.audio.is_some()).count();
     let lrc: usize = items.iter().map(|i| i.lrc).sum();
     let bytes: u64 = items.iter().map(|i| i.bytes).sum();
@@ -955,6 +969,7 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
             "output": output.display().to_string(),
             "quality": opts.quality,
             "dry_run": opts.dry_run,
+            "elapsed_secs": elapsed.as_secs(),
             "items": json_items,
             "summary": {"audio": audio, "lrc": lrc, "bytes": bytes,
                         "skipped": skipped, "failed": failed},
@@ -964,6 +979,45 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
     }
 
     println!();
+    // 结果一览表（dry-run 已有逐首 [dry-run] 行，不重复）
+    if !opts.dry_run && !items.is_empty() {
+        let rows: Vec<Vec<String>> = items
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let icon = if r.error.is_some() && r.audio.is_none() {
+                    ui::bad("✘")
+                } else if r.skipped.is_some() {
+                    ui::warn("◌")
+                } else {
+                    ui::good("✔")
+                };
+                let note = if let Some(e) = &r.error {
+                    ui::truncate_width(e, 30)
+                } else if let Some(s) = &r.skipped {
+                    s.clone()
+                } else if r.lrc > 0 {
+                    format!("歌词×{}", r.lrc)
+                } else {
+                    String::new()
+                };
+                vec![
+                    (i + 1).to_string(),
+                    icon,
+                    ui::truncate_width(&format!("{} - {}", r.title, r.artists), 40),
+                    r.source.clone(),
+                    if r.bytes > 0 {
+                        ui::human_size(r.bytes)
+                    } else {
+                        "—".into()
+                    },
+                    note,
+                ]
+            })
+            .collect();
+        ui::table(&["#", "状态", "曲目", "来源", "大小", "备注"], &rows);
+    }
+
     let mut parts: Vec<String> = Vec::new();
     if opts.dry_run {
         parts.push(format!("dry-run 预演 {} 项 · 未写入文件", items.len()));
@@ -978,31 +1032,46 @@ fn report(items: &[ItemResult], opts: &DownloadArgs, output: &std::path::Path) -
             parts.push(ui::human_size(bytes).to_string());
         }
     }
+    let secs = elapsed.as_secs();
+    let dur_str = if secs >= 60 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    };
+    parts.push(format!("耗时 {dur_str}"));
     let done = if opts.only_lrc { lrc } else { audio };
     ui::step(&format!("完成 {done} · {}", parts.join(" · ")));
     if !skipped.is_empty() {
-        ui::info(&format!(
-            "跳过 {}: {}",
-            skipped.len(),
-            skipped
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("；")
-        ));
+        if opts.dry_run {
+            ui::info(&format!(
+                "跳过 {}: {}",
+                skipped.len(),
+                skipped
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ));
+        } else {
+            ui::skip(&format!("跳过 {} 首", skipped.len()));
+        }
     }
     if !failed.is_empty() {
-        ui::fail(&format!(
-            "失败 {}: {}",
-            failed.len(),
-            failed
-                .iter()
-                .take(3)
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("；")
-        ));
+        if opts.dry_run {
+            ui::fail(&format!(
+                "失败 {}: {}",
+                failed.len(),
+                failed
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ));
+        } else {
+            ui::fail(&format!("失败 {} 首（详情见上表）", failed.len()));
+        }
     }
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
@@ -1408,7 +1477,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     .context("等待播放器失败")?
                     .with_context(|| format!("启动播放器失败: {prog}"))?
             };
-            if overlay.is_some() {
+            if overlay.is_some() && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                 eprint!("\r\x1b[2K");
                 let _ = std::io::Write::flush(&mut std::io::stderr());
             }
@@ -1523,10 +1592,11 @@ async fn run(cli: Cli) -> Result<i32> {
                 return Ok(0);
             }
             let t = Track::from_json(song);
-            let fee = match song["fee"].as_u64().unwrap_or(0) {
-                0 => "免费".into(),
-                1 => "VIP".into(),
-                4 => "专辑购买".into(),
+            let fee_raw = song["fee"].as_u64().unwrap_or(0);
+            let fee = match fee_raw {
+                0 => ui::good("免费"),
+                1 => ui::warn("VIP"),
+                4 => ui::warn("专辑购买"),
                 8 => "低品免费".into(),
                 n => format!("fee={n}"),
             };
@@ -1544,6 +1614,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 Some(2) => Some("网易云独家".to_string()),
                 _ => None,
             };
+            ui::step(&format!("♪ {} · {}", t.title, t.artists));
             let mut rows: Vec<Vec<String>> = vec![
                 vec!["ID".into(), id.to_string()],
                 vec!["歌名".into(), t.title],
@@ -1560,6 +1631,9 @@ async fn run(cli: Cli) -> Result<i32> {
                 rows.push(vec!["版权".into(), c]);
             }
             ui::table(&["字段", "值"], &rows);
+            if matches!(fee_raw, 1 | 4) {
+                ui::info("VIP 曲 · 配置 --mirror / NCM_MIRROR 可解锁完整音质");
+            }
             Ok(0)
         }
         Some(Commands::Completions { shell }) => {
