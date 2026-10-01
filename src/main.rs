@@ -1568,6 +1568,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 None
             };
             // 播放漫游：复用歌词 IPC socket，队列将尽时预取私人FM并 append
+            //（ipc_send/ipc_get 为 unix 实现，Windows 仅提示不支持）
+            #[cfg(unix)]
             let roam_handle = if roam && want_lyric {
                 ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
                 Some(tokio::spawn(roam_loop(
@@ -1580,6 +1582,14 @@ async fn run(cli: Cli) -> Result<i32> {
                 ui::info("漫游需要 mpv + 歌词 IPC（--no-lyric/非 mpv 下不可用），已忽略");
                 None
             } else {
+                None
+            };
+            #[cfg(not(unix))]
+            let roam_handle: Option<tokio::task::JoinHandle<()>> = {
+                if roam {
+                    ui::info("播放漫游暂不支持当前平台（需要 unix + mpv IPC），已忽略");
+                }
+                let _ = lyric_tracks;
                 None
             };
 
@@ -1888,6 +1898,7 @@ async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>>
 /// 时间种子洗牌（xorshift64*，满足播放随机即可，无外部 rand 依赖）
 /// 播放漫游：队列剩余 ≤3 首时拉私人FM，取址成功后经 mpv IPC append，
 /// 并同步追加歌词 tracks（与播放列表索引对齐）；mpv 退出（IPC 连不上）静默结束
+#[cfg(unix)]
 async fn roam_loop(
     sock: std::path::PathBuf,
     ncm: Ncm,
