@@ -149,6 +149,23 @@ async fn overlay_loop(
                         cur_t = 0.0;
                         dur = None;
                         let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+                        // 切曲往滚动历史打一行歌名（先清底行，行独立可回翻）
+                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                            let label = ts
+                                .get(cur_idx)
+                                .map(|t| t.label.as_str())
+                                .unwrap_or_default();
+                            eprint!("\r\x1b[2K");
+                            eprintln!(
+                                "{}",
+                                crate::ui::dim(&format!(
+                                    "▶ [{}/{}] {}",
+                                    cur_idx + 1,
+                                    ts.len(),
+                                    label
+                                ))
+                            );
+                        }
                         print_row(ts.as_slice(), cur_idx, None, None, None);
                     }
                 }

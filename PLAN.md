@@ -185,3 +185,11 @@ the third-party provided downloading files."，且 "But remain the mirror featur
 
 验收：clippy 0、15 tests；本地 12 首队列只取址 6 首 + `分批加载` 提示，40s 跑满；
 script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正常无 wrap。
+
+## N. v0.3.3 切曲歌名行（2026-10-02）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| N1 | 用户反馈：播放中底行只有歌词（`♪ [5/10] ... 歌词`），看不到当前曲名无法下载；修：overlay playlist-pos 切曲时先 `\r\x1b[2K` 清底行，再 eprintln 一行 `▶ [i/N] 歌名 - 歌手`（dim，进滚动历史可回翻），随后底行恢复歌词 | ✅ |
+
+验收：clippy 0、15 tests；script 伪终端 100 列实测 `▶ [1/3] 晴天(深情版) - Lucky小爱` 独立行 + 底行歌词正常。
