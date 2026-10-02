@@ -1685,8 +1685,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 h.abort();
             }
             if overlay.is_some() && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                eprint!("\r\x1b[2K");
-                let _ = std::io::Write::flush(&mut std::io::stderr());
+                player::clear_overlay_rows();
             }
             player::cleanup_socket(&sock);
             if !status.success() && status.code().is_some_and(|c| c != 0) {

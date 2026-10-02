@@ -130,7 +130,7 @@ async fn overlay_loop(
     write.flush().await?;
 
     let mut cur_idx: usize = 0;
-    let mut last_line: Option<String> = None;
+    let mut last_line: Option<(String, Option<String>)> = None;
     let mut last_sec: Option<u64> = None;
     let mut cur_t: f64 = 0.0;
     let mut dur: Option<f64> = None;
@@ -155,7 +155,7 @@ async fn overlay_loop(
                                 .get(cur_idx)
                                 .map(|t| t.label.as_str())
                                 .unwrap_or_default();
-                            eprint!("\r\x1b[2K");
+                            clear_overlay_rows(); // 清两行底行，歌名行进滚动历史
                             eprintln!(
                                 "{}",
                                 crate::ui::dim(&format!(
@@ -178,7 +178,10 @@ async fn overlay_loop(
                         if line != last_line || last_sec != Some(sec) {
                             last_line = line.clone();
                             last_sec = Some(sec);
-                            print_row(ts.as_slice(), cur_idx, line.as_deref(), Some(t), dur);
+                            let disp = line
+                                .as_ref()
+                                .map(|(main, sub)| (main.as_str(), sub.as_deref()));
+                            print_row(ts.as_slice(), cur_idx, disp, Some(t), dur);
                         }
                     }
                 }
@@ -188,7 +191,9 @@ async fn overlay_loop(
                     print_row(
                         ts.as_slice(),
                         cur_idx,
-                        last_line.as_deref(),
+                        last_line
+                            .as_ref()
+                            .map(|(main, sub)| (main.as_str(), sub.as_deref())),
                         (cur_t > 0.0).then_some(cur_t),
                         dur,
                     );
@@ -205,10 +210,10 @@ async fn overlay_loop(
 
 /// 二分查找当前时间对应的歌词行；无命中返回 None
 #[cfg(unix)]
-fn current_line(tracks: &[LyricTrack], idx: usize, t: f64) -> Option<String> {
+fn current_line(tracks: &[LyricTrack], idx: usize, t: f64) -> Option<(String, Option<String>)> {
     let track = tracks.get(idx)?;
     if track.lines.is_empty() {
-        return Some(track.label.clone()); // 无歌词 → 显示歌名占位
+        return Some((track.label.clone(), None)); // 无歌词 → 歌名占位
     }
     // 找到最后一个 t_line <= t 的行（容忍 seek 回退）
     let mut lo = 0usize;
@@ -222,22 +227,43 @@ fn current_line(tracks: &[LyricTrack], idx: usize, t: f64) -> Option<String> {
         }
     }
     if lo == 0 && track.lines[0].0 > t {
-        return Some(track.label.clone()); // 前奏段
+        return Some((track.label.clone(), None)); // 前奏段
     }
-    let (ts, text) = &track.lines[lo.saturating_sub(1)];
+    let i = lo - 1;
+    let (ts, text) = &track.lines[i];
     // 停留超过 30s 视为该行已过期（长间隔），回退歌名占位
     if t - ts > 30.0 {
-        return Some(track.label.clone());
+        return Some((track.label.clone(), None));
     }
-    Some(text.clone())
+    // 网易 lrc 原文/译文同刻成对（稳定排序后原文在前）：前条=原文，当前=译文
+    if i >= 1 && track.lines[i - 1].0 == track.lines[i].0 {
+        Some((track.lines[i - 1].1.clone(), Some(text.clone())))
+    } else {
+        Some((text.clone(), None))
+    }
 }
 
-/// 在 stderr 单行刷新歌词（覆盖行内旧内容）
+/// 底行是否已写到第二行（译文行）——刷新回移与清理用
+static ON_SECOND_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 清掉双行底行（line1 主词 + line2 译文），光标回到首行行首
+///（切曲打歌名行、播放结束清理时调用）
+pub fn clear_overlay_rows() {
+    use std::sync::atomic::Ordering::Relaxed;
+    if ON_SECOND_LINE.swap(false, Relaxed) {
+        eprint!("\r\x1b[2K\x1b[1A\r\x1b[2K");
+    } else {
+        eprint!("\r\x1b[2K");
+    }
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+/// 在 stderr 双行刷新歌词底行：line1 = 前缀+时间进度+原文，line2 = 译文（dim）
 #[cfg(unix)]
 fn print_row(
     tracks: &[LyricTrack],
     idx: usize,
-    text: Option<&str>,
+    text: Option<(&str, Option<&str>)>,
     t: Option<f64>,
     dur: Option<f64>,
 ) {
@@ -248,7 +274,7 @@ fn print_row(
     }
     let total = tracks.len();
     let name = tracks.get(idx).map(|t| t.label.as_str()).unwrap_or("");
-    let body = text.unwrap_or(name);
+    let (main_body, sub_body) = text.unwrap_or((name, None));
     let prefix = format!("♪ [{}/{}]", idx + 1, total);
     // 时间与进度条：mm:ss/mm:ss [bar]
     let meta = match (t, dur) {
@@ -275,8 +301,21 @@ fn print_row(
         .saturating_sub(crate::ui::display_width(&prefix))
         .saturating_sub(crate::ui::display_width(&meta))
         .saturating_sub(1);
-    let clipped = crate::ui::truncate_width(body, budget);
-    eprint!("\r\x1b[2K\x1b[36m{prefix}\x1b[0m{meta}{clipped}");
+    let clipped = crate::ui::truncate_width(main_body, budget);
+    let sub_clipped = sub_body.map(|s| crate::ui::truncate_width(s, budget));
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out = String::new();
+    if ON_SECOND_LINE.load(Relaxed) {
+        out.push_str("\x1b[1A\r\x1b[2K"); // 上移回 line1
+    }
+    out.push_str(&format!(
+        "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{meta}{clipped}\n\r\x1b[2K"
+    ));
+    if let Some(s) = &sub_clipped {
+        out.push_str(&crate::ui::dim(s));
+    }
+    ON_SECOND_LINE.store(true, Relaxed);
+    eprint!("{out}");
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 
@@ -285,4 +324,41 @@ fn print_row(
 fn fmt_t(s: f64) -> String {
     let s = s.max(0.0) as u64;
     format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{current_line, LyricTrack};
+
+    fn track(lines: Vec<(f64, String)>) -> LyricTrack {
+        LyricTrack {
+            label: "占位歌名".into(),
+            lines,
+        }
+    }
+
+    // 网易 lrc 原文/译文同刻成对：主行=原文、副行=译文（分行显示的依据）
+    #[test]
+    fn paired_lines_split_main_and_translation() {
+        let t = track(vec![
+            (10.0, "原文行".into()),
+            (10.0, "译文行".into()),
+            (20.0, "下一句".into()),
+        ]);
+        let (main, sub) = current_line(std::slice::from_ref(&t), 0, 10.5).unwrap();
+        assert_eq!(main, "原文行");
+        assert_eq!(sub.as_deref(), Some("译文行"));
+        let (main2, sub2) = current_line(std::slice::from_ref(&t), 0, 21.0).unwrap();
+        assert_eq!(main2, "下一句");
+        assert!(sub2.is_none());
+    }
+
+    // 无歌词/前奏段回退歌名占位，不带副行
+    #[test]
+    fn label_fallback_has_no_sub() {
+        let t = track(vec![(30.0, "第一句".into())]);
+        let (main, sub) = current_line(std::slice::from_ref(&t), 0, 5.0).unwrap();
+        assert_eq!(main, "占位歌名");
+        assert!(sub.is_none());
+    }
 }

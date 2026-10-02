@@ -6,7 +6,19 @@ use std::time::Duration;
 use crate::api::{Ncm, BASE, UA};
 
 /// Range 探测：状态码 / Content-Type / 总长（等价 musicdl 的 AudioLinkTester）
+///（失败重试 1 次：网络瞬断常见，单发失败容易误杀整曲）
 pub async fn probe_link(ncm: &Ncm, url: &str) -> Result<(u64, String), String> {
+    let mut last = String::new();
+    for _ in 0..2 {
+        match probe_once(ncm, url).await {
+            Ok(v) => return Ok(v),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+async fn probe_once(ncm: &Ncm, url: &str) -> Result<(u64, String), String> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(reqwest::header::RANGE, "bytes=0-1".parse().unwrap());
     let resp = match ncm
@@ -18,7 +30,8 @@ pub async fn probe_link(ncm: &Ncm, url: &str) -> Result<(u64, String), String> {
         .await
     {
         Ok(r) => r,
-        Err(e) => return Err(format!("探测失败: {e}")),
+        // Debug 含 source 链（dns/timeout/connect 根因），不然只有 "error sending request"
+        Err(e) => return Err(format!("探测失败: {e:?}")),
     };
     let status = resp.status().as_u16();
     if status != 200 && status != 206 {

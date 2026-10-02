@@ -193,3 +193,13 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | N1 | 用户反馈：播放中底行只有歌词（`♪ [5/10] ... 歌词`），看不到当前曲名无法下载；修：overlay playlist-pos 切曲时先 `\r\x1b[2K` 清底行，再 eprintln 一行 `▶ [i/N] 歌名 - 歌手`（dim，进滚动历史可回翻），随后底行恢复歌词 | ✅ |
 
 验收：clippy 0、15 tests；script 伪终端 100 列实测 `▶ [1/3] 晴天(深情版) - Lucky小爱` 独立行 + 底行歌词正常。
+
+## O. v0.3.4 译文分行底行 / 探测重试（2026-10-02）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| O1 | 用户需求「And the translated line should bee another line, instead of show in the window time.」——`current_line` 改返回 `(原文, Option<译文>)`（网易 lrc 同刻成对、稳定排序后原文在前：`lines[i-1].0 == lines[i].0` 判对）；`print_row` 双行恒定输出（line1 前缀+时间+原文，line2 dim 译文），`ON_SECOND_LINE` atomic 管回移（`\x1b[1A\r`）；切曲歌名行与退出清理走 `clear_overlay_rows()`（两行清理） | ✅ |
+| O2 | 探测失败加固：`probe_link` 失败重试 1 次（网络瞬断误杀整曲）；错误改 `{e:?}` 带 source 链（dns/timeout/connect 根因可见） | ✅ |
+| O3 | 单测 +2：同刻对分行（主/副）、占位无副行（17 tests） | ✅ |
+
+验收：clippy 0、17 tests；script 伪终端双行对结构 `\n\r\x1b[2K` 正常（line2 仅混译歌非空，Greed/Shape 抽测为单语空行属预期）。
