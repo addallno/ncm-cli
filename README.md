@@ -10,14 +10,16 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
   TTY 下没给 `-d` 会交互选编号（回车仅列出）
 - **首页推荐**：`ncm recommend` 一次给出每日推荐歌曲（需登录）与官方榜单歌单
   （`/api/toplist`），直接 `ncm list <ID>` 浏览、`ncm dl list.<ID>` 下载
-- **播放漫游**：`ncm play --roam` 队列剩余 ≤3 首时自动接私人FM无限续播
-  （自动取址+歌词追加，mpv 下无感接力）
+- **播放漫游**：`ncm play roam` 单开私人FM漫游歌单（首曲开播，队列将尽自动
+  接FM无限续播）；普通队列加 `--roam` 同样开启续播（mpv 下无感接力）
 - **下载**：单曲 / 歌单 / 专辑 / 歌手链接 / `list.123` / `daily` / 关键词，
   **默认 FLAC + 歌词 + 保留音频**；进度条 / spinner / 完整性防线（Range → `.part`
   → 魔数/时长校验 → 全过才落盘）；完成后出结果一览表（`#`/状态/曲目/来源/大小/备注）
   与耗时汇总，管道/脚本下输出干净无 ANSI 裸序列
-- **播放**：`ncm play <ID/链接/关键词|daily>`，队列整批喂给 mpv（`n/p` 切曲、
-  `←/→` 快退进、空格暂停、`/` 搜索、`q` 退出），歌词随播放滚动；`--save -o 目录`
+- **播放**：`ncm play <ID/链接/关键词|daily|roam>`，队列喂给 mpv（`n/p` 切曲、
+  `←/→` 快退进、空格暂停、`/` 搜索、`q` 退出），歌词随播放滚动并按终端宽度
+  自适应截行（窄屏不换行叠影）；**分批取址**：先播前 6 首，后续随播随取新链接
+  （网易直链约 10 分钟过期，全量预取会导致长队列后段 403 雪崩）；`--save -o 目录`
   先下载到本地再播本地文件；`--shuffle` 洗牌、`-n` 队列长度、`--json` 输出队列
 - **登录持久化**：`ncm login --session <pyncm dump>`（兼容 PYNCM/legacy）或
   `--cookie "MUSIC_U=...; __csrf=..."`（浏览器 F12 直接粘），凭据保存到
@@ -46,6 +48,7 @@ ncm list 24381616 -n 30             # 浏览歌单前 30 首（看，不下载�
 ncm daily                           # 浏览每日推荐
 ncm dl daily -d all                 # 每日推荐全部下载
 ncm play daily --shuffle            # 随机队列播每日推荐
+ncm play roam                       # 私人漫游：FM 歌单 + 无限续播
 ncm play 晴天 -n 5                  # 搜索最相关 5 首连播
 ncm play 401722227 --quality lossless --save -o ~/music
 ncm play <歌单链接> --json          # 只输出播放队列 JSON

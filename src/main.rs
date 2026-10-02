@@ -1133,6 +1133,9 @@ fn report(
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
 
+// 播放在线地址预取窗口：网易直链约 10 分钟过期，只先喂前 N 首，其余随播随取
+const PLAY_PREFETCH: usize = 6;
+
 const SUBCOMMANDS: [&str; 12] = [
     "search",
     "dl",
@@ -1333,30 +1336,39 @@ async fn run(cli: Cli) -> Result<i32> {
 
             // 1) 收集播放队列
             let desc;
-            let mut songs: Vec<Value> =
-                if target.eq_ignore_ascii_case("daily") || target.eq_ignore_ascii_case("today") {
-                    desc = "每日推荐".to_string();
-                    let s = ncm.daily_songs().await?;
-                    if s.is_empty() {
-                        bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
-                    }
-                    s
-                } else if is_target_like(&target) {
-                    let (found, d) = resolve_target(&ncm, &target, false).await?;
-                    if found.is_empty() {
-                        bail!("“{d}” 没有可播放的曲目");
-                    }
-                    desc = d;
-                    found
-                } else {
-                    desc = format!("搜索 “{target}”");
-                    let n = if limit > 0 { limit } else { 1 };
-                    let found = ncm.search(&target, n).await?;
-                    if found.is_empty() {
-                        bail!("未搜索到结果: {target}");
-                    }
-                    found
-                };
+            let mut songs: Vec<Value> = if target.eq_ignore_ascii_case("roam") {
+                // 私人漫游：FM 首曲开播，后续由漫游续播无限接
+                desc = "私人漫游".to_string();
+                let s = ncm.radio_songs().await?;
+                if s.is_empty() {
+                    bail!("私人FM为空（该接口需登录：ncm login --session/--cookie）");
+                }
+                s
+            } else if target.eq_ignore_ascii_case("daily") || target.eq_ignore_ascii_case("today") {
+                desc = "每日推荐".to_string();
+                let s = ncm.daily_songs().await?;
+                if s.is_empty() {
+                    bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
+                }
+                s
+            } else if is_target_like(&target) {
+                let (found, d) = resolve_target(&ncm, &target, false).await?;
+                if found.is_empty() {
+                    bail!("“{d}” 没有可播放的曲目");
+                }
+                desc = d;
+                found
+            } else {
+                desc = format!("搜索 “{target}”");
+                let n = if limit > 0 { limit } else { 1 };
+                let found = ncm.search(&target, n).await?;
+                if found.is_empty() {
+                    bail!("未搜索到结果: {target}");
+                }
+                found
+            };
+            // 私人漫游模式默认开启无限续播（等效 --roam）
+            let roam = roam || target.eq_ignore_ascii_case("roam");
             if limit > 0 && songs.len() > limit as usize {
                 songs.truncate(limit as usize);
             }
@@ -1452,6 +1464,10 @@ async fn run(cli: Cli) -> Result<i32> {
                     }
                 }
             }
+            // 分批取址：mpv+unix 下只预取前 PLAY_PREFETCH 首在线地址（网易直链
+            // 约 10 分钟过期，全量预取会让长队列后段 403 雪崩），其余随播随取
+            let batching = cfg!(unix) && is_mpv;
+            let prefetch = if batching { PLAY_PREFETCH } else { usize::MAX };
             let missing: Vec<usize> = slots
                 .iter()
                 .enumerate()
@@ -1459,27 +1475,56 @@ async fn run(cli: Cli) -> Result<i32> {
                 .map(|(i, _)| i)
                 .collect();
             if !missing.is_empty() {
-                let sub: Vec<Track> = missing.iter().map(|&i| tracks[i].clone()).collect();
+                let sub: Vec<Track> = missing
+                    .iter()
+                    .take(prefetch)
+                    .map(|&i| tracks[i].clone())
+                    .collect();
                 if !save {
-                    ui::step(&format!("取址 · {desc}（{total} 首）"));
+                    ui::step(&format!("取址 · {desc}（{} / {total} 首）", sub.len()));
                 }
                 let got = fetch_urls(&ncm, &sub, &quality).await;
-                for (idx, r) in missing.iter().zip(got) {
+                for (idx, r) in missing.iter().take(prefetch).zip(got) {
                     slots[*idx].1 = r.map(|(url, br, src)| (PlaySrc::Url(url), src, br));
                 }
             }
 
-            // 5) 汇总成功/失败
+            // 5) 汇总成功/失败；分批模式下超出预取窗口的曲进 pending 随播随取
             let mut entries: Vec<(String, PlaySrc, String, u64)> = Vec::new();
             let mut play_tracks: Vec<Track> = Vec::new();
             let mut failed: Vec<String> = Vec::new();
+            let mut pending: std::collections::VecDeque<PendingItem> =
+                std::collections::VecDeque::new();
+            let mut fed_urls = 0usize;
+            let mut cutoff = false;
             for ((label, src), t) in slots.into_iter().zip(tracks) {
                 match src {
                     Ok((s, source, br)) => {
+                        if cutoff {
+                            // 预取窗口后的曲（含本地文件）延后 append，保持播放顺序
+                            pending.push_back(PendingItem {
+                                label,
+                                src: s,
+                                track: t,
+                            });
+                            continue;
+                        }
+                        let is_url = matches!(s, PlaySrc::Url(_));
                         entries.push((label, s, source, br));
                         play_tracks.push(t);
+                        if is_url {
+                            fed_urls += 1;
+                            if fed_urls >= prefetch {
+                                cutoff = true;
+                            }
+                        }
                     }
                     Err(reason) if !reason.is_empty() => failed.push(format!("{label} · {reason}")),
+                    Err(_) if batching => pending.push_back(PendingItem {
+                        label,
+                        src: PlaySrc::Url(String::new()),
+                        track: t,
+                    }),
                     Err(_) => failed.push(format!("{label} · 无播放地址")),
                 }
             }
@@ -1513,7 +1558,8 @@ async fn run(cli: Cli) -> Result<i32> {
             // 7) 启动播放
             let locations: Vec<String> = entries.iter().map(|(_, s, _, _)| s.loc()).collect();
             let n_play = entries.len();
-            ui::step(&format!("▶ {desc} · 播放 {n_play} 首 · {prog}"));
+            let n_queue = n_play + pending.len();
+            ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
             // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告）
             let show_n = n_play.min(10);
             for (i, (label, _, source, br)) in entries.iter().take(show_n).enumerate() {
@@ -1530,8 +1576,11 @@ async fn run(cli: Cli) -> Result<i32> {
                 };
                 ui::info(&format!("  {}. {label} · {source}{quality}{trial}", i + 1));
             }
-            if n_play > show_n {
-                ui::info(&format!("  … 共 {n_play} 首"));
+            if n_queue > show_n {
+                ui::info(&format!("  … 共 {n_queue} 首"));
+            }
+            if !pending.is_empty() {
+                ui::info("  分批加载 · 链接过期前自动续取后段曲目");
             }
             if is_mpv {
                 ui::info("mpv 键位: 空格 暂停 · ←/→ 快退/快进 · n/p 上/下曲 · / 搜索 · q 退出");
@@ -1547,11 +1596,20 @@ async fn run(cli: Cli) -> Result<i32> {
             if is_mpv {
                 // 抑制 mpv 状态/info 行防止刷屏（歌词底行或每首提示接管输出）
                 args.push("--term-status-msg=".to_string());
-                args.push("--msg-level=cplayer=warn,ipc=no".to_string());
+                args.push("--msg-level=cplayer=warn,ffmpeg=warn,ipc=no".to_string());
+                // 直链交给 ffmpeg：禁用 ytdl 解析（坏掉的 yt-dlp 只会刷 traceback）
+                args.push("--ytdl=no".to_string());
             }
-            let overlay = if want_lyric {
+            // 守护任务需要 IPC socket：歌词底行 或 分批续取/漫游
+            #[cfg(unix)]
+            let guard_needed = is_mpv && (!pending.is_empty() || roam);
+            #[cfg(not(unix))]
+            let guard_needed = false;
+            if is_mpv && (want_lyric || guard_needed) {
                 player::cleanup_socket(&sock);
                 args.push(format!("--input-ipc-server={}", sock.display()));
+            }
+            let overlay = if want_lyric {
                 args.push("--term-playing-msg=".to_string());
                 Some(player::spawn_overlay(
                     sock.clone(),
@@ -1567,29 +1625,33 @@ async fn run(cli: Cli) -> Result<i32> {
             } else {
                 None
             };
-            // 播放漫游：复用歌词 IPC socket，队列将尽时预取私人FM并 append
+            // 播放守护：pending 随播随取（在线地址现取防过期）+ 可选漫游接FM
             //（ipc_send/ipc_get 为 unix 实现，Windows 仅提示不支持）
             #[cfg(unix)]
-            let roam_handle = if roam && want_lyric {
-                ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
-                Some(tokio::spawn(roam_loop(
+            let guard_handle = if guard_needed {
+                if roam {
+                    ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
+                }
+                Some(tokio::spawn(guard_loop(
                     sock.clone(),
                     ncm.clone(),
-                    lyric_tracks.expect("want_lyric 保证 Some"),
+                    lyric_tracks.clone(),
                     quality.clone(),
+                    pending,
+                    roam,
                 )))
-            } else if roam {
-                ui::info("漫游需要 mpv + 歌词 IPC（--no-lyric/非 mpv 下不可用），已忽略");
-                None
             } else {
+                if roam {
+                    ui::info("漫游需要 mpv（当前播放器无 IPC 接口），已忽略");
+                }
                 None
             };
             #[cfg(not(unix))]
-            let roam_handle: Option<tokio::task::JoinHandle<()>> = {
+            let guard_handle: Option<tokio::task::JoinHandle<()>> = {
                 if roam {
                     ui::info("播放漫游暂不支持当前平台（需要 unix + mpv IPC），已忽略");
                 }
-                let _ = lyric_tracks;
+                let _ = (lyric_tracks, pending);
                 None
             };
 
@@ -1617,7 +1679,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     .context("等待播放器失败")?
                     .with_context(|| format!("启动播放器失败: {prog}"))?
             };
-            if let Some(h) = roam_handle {
+            if let Some(h) = guard_handle {
                 h.abort();
             }
             if overlay.is_some() && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
@@ -1844,6 +1906,14 @@ async fn run(cli: Cli) -> Result<i32> {
 
 use clap::CommandFactory;
 
+/// 分批续播的待入队项：本地文件直接 append，在线地址在 append 时重新取址
+///（网易直链有时效，预取过期会 403）
+struct PendingItem {
+    label: String,
+    src: PlaySrc,
+    track: Track,
+}
+
 /// 播放来源：本地文件（--save 下载所得）或在线地址
 /// 播放取址槽位：(曲目标签, (播放源, 来源名, 码率) 或失败原因)
 type Slot = (String, Result<(PlaySrc, String, u64), String>);
@@ -1896,17 +1966,19 @@ async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>>
 }
 
 /// 时间种子洗牌（xorshift64*，满足播放随机即可，无外部 rand 依赖）
-/// 播放漫游：队列剩余 ≤3 首时拉私人FM，取址成功后经 mpv IPC append，
-/// 并同步追加歌词 tracks（与播放列表索引对齐）；mpv 退出（IPC 连不上）静默结束
+/// 播放守护：队尾将尽时把 pending 续入 mpv（在线地址现取防过期），pending
+/// 耗尽且开启漫游时拉私人FM补充；歌词容器与播放列表索引对齐；
+/// mpv 退出（IPC 连不上连续 3 次）静默结束
 #[cfg(unix)]
-async fn roam_loop(
+async fn guard_loop(
     sock: std::path::PathBuf,
     ncm: Ncm,
-    tracks: std::sync::Arc<std::sync::RwLock<Vec<player::LyricTrack>>>,
+    tracks: Option<std::sync::Arc<std::sync::RwLock<Vec<player::LyricTrack>>>>,
     quality: String,
+    mut pending: std::collections::VecDeque<PendingItem>,
+    roam: bool,
 ) {
     let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
-    let mut batch: Vec<Value> = Vec::new();
     let mut req_id: u64 = 9000;
     let mut fails: u32 = 0; // 启动期 socket 未就绪的容忍计数
     loop {
@@ -1931,49 +2003,69 @@ async fn roam_loop(
         if pos + 3 < count {
             continue; // 距队尾还早
         }
-        if batch.is_empty() {
-            batch = ncm.radio_songs().await.unwrap_or_default();
-            if batch.is_empty() {
+        // pending 耗尽且漫游开启：拉私人FM补充
+        if pending.is_empty() {
+            if !roam {
+                return;
+            }
+            let fm = ncm.radio_songs().await.unwrap_or_default();
+            if fm.is_empty() {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 continue;
             }
+            for song in fm {
+                let t = Track::from_json(&song);
+                pending.push_back(PendingItem {
+                    label: format!("{} - {}", t.title, t.artists),
+                    src: PlaySrc::Url(String::new()),
+                    track: t,
+                });
+            }
         }
-        // 预追到前方余量 ≥8 首；取址失败的曲丢弃换下一首
-        while pos + 8 > count && !batch.is_empty() {
-            let song = batch.remove(0);
-            let Some(id) = song["id"].as_u64() else {
-                continue;
+        // 预追到前方余量 ≥8 首；取址失败的曲跳过换下一首
+        while pos + 8 > count {
+            let Some(item) = pending.pop_front() else {
+                break;
             };
-            let (row, _source, _reason, _kind) =
-                fetch_row(&ncm, id, &quality, true, wanted_flac, true).await;
-            let url = row
-                .as_ref()
-                .and_then(|r| r["url"].as_str())
-                .filter(|u| !u.is_empty())
-                .map(String::from);
-            let Some(url) = url else {
-                continue;
+            let t = &item.track;
+            // 在线地址现取（预取链接会过期，防 403），本地文件直接用
+            let loc = match &item.src {
+                PlaySrc::File(_) => item.src.loc(),
+                PlaySrc::Url(_) => {
+                    let (row, _source, _reason, _kind) =
+                        fetch_row(&ncm, t.id, &quality, true, wanted_flac, true).await;
+                    let url = row
+                        .as_ref()
+                        .and_then(|r| r["url"].as_str())
+                        .filter(|u| !u.is_empty())
+                        .map(String::from);
+                    let Some(url) = url else {
+                        ui::skip(&format!("{} · 续取失败", item.label));
+                        continue;
+                    };
+                    url
+                }
             };
             // 歌词（失败留空，底行 label 占位照常）
             let lines = ncm
-                .lyric(id)
+                .lyric(t.id)
                 .await
                 .ok()
                 .and_then(|v| v["lrc"]["lyric"].as_str().map(lrc::parse_lrc_timeline))
                 .unwrap_or_default();
-            let t = Track::from_json(&song);
             // 先 append 到 mpv，确认命令送达再写 tracks，保持索引对齐
-            let cmd = serde_json::json!({"command": ["loadfile", url, "append"]}).to_string();
+            let cmd = serde_json::json!({"command": ["loadfile", loc, "append"]}).to_string();
             if player::ipc_send(&sock, &cmd).await.is_err() {
                 return;
             }
-            tracks
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(player::LyricTrack {
-                    label: format!("{} - {}", t.title, t.artists),
-                    lines,
-                });
+            if let Some(ts) = &tracks {
+                ts.write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(player::LyricTrack {
+                        label: format!("{} - {}", t.title, t.artists),
+                        lines,
+                    });
+            }
             count += 1;
         }
     }

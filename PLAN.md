@@ -173,3 +173,15 @@ the third-party provided downloading files."，且 "But remain the mirror featur
 验收：clippy 0、15 tests；本地 `NCM_PLAYER="mpv --ao=null --length=5" ncm play 晴天 -n 3 --roam`
 45s 跑满 timeout（15s 队列被 FM 无限接力）证明 append 生效；`recommend -n 5` 榜单表 5 行正常
 （每日推荐本地无登录态显示降级提示）。
+
+## M. v0.3.1 分批取址防 403 / play roam 入口 / 底行宽度自适应（2026-10-02）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| M1 | 用户反馈①：「我需要添加漫游功能」→ `ncm play roam` 独立入口（FM 首曲开播，复用续播守护）；`let roam = roam \|\| target=="roam"` 自动开 | ✅ |
+| M2 | 用户反馈②：每日推荐播到第 13 首起全部 `[ffmpeg] HTTP 403` —— 确诊网易直链 ~10 分钟过期，33 首播放前批量预取全老化；修：`PLAY_PREFETCH=6` 分批取址（仅 mpv+unix），`guard_loop`（roam_loop 泛化）队尾将尽时把 pending 续入：在线地址**现取**（`fetch_row` mirror_first=true），本地文件直 append；pending 空 + roam → FM 补充；`--ytdl=no` 去坏 yt-dlp traceback、`msg-level` 加 `ffmpeg=warn` 压掉与底行交错的 ffmpeg 消息 | ✅ |
+| M3 | 用户反馈③：「lrc 行只显示前 N 字符+...且疑似叠影」—— `print_row` 预算写死 60 列；修：`terminal_size_of(stderr)` 实取宽度，预算 = 屏宽 - prefix - meta - 1（窄屏不 wrap 叠影，宽屏多显示） | ✅ |
+| M4 | `PendingItem{label,src,track}`、slot 汇总加 cutoff（第 6 个在线地址后全部进 pending 保顺序）；`guard_needed = is_mpv && (!pending \|\| roam)` 独立于歌词（`--no-lyric` 下漫游也可用）；socket 提到 overlay 分支外 | ✅ |
+
+验收：clippy 0、15 tests；本地 12 首队列只取址 6 首 + `分批加载` 提示，40s 跑满；
+script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正常无 wrap。

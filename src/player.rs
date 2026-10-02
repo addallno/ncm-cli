@@ -250,9 +250,14 @@ fn print_row(
         (Some(tt), _) => crate::ui::dim(&format!(" {} ", fmt_t(tt))),
         _ => String::new(),
     };
-    let budget = 60usize
+    // 按 stderr 实际终端宽度算预算（写死 60 会在宽屏截太短、窄屏换行叠影）
+    let term_w = terminal_size::terminal_size_of(std::io::stderr())
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80);
+    let budget = term_w
         .saturating_sub(crate::ui::display_width(&prefix))
-        .saturating_sub(crate::ui::display_width(&meta));
+        .saturating_sub(crate::ui::display_width(&meta))
+        .saturating_sub(1);
     let clipped = crate::ui::truncate_width(body, budget);
     eprint!("\r\x1b[2K\x1b[36m{prefix}\x1b[0m{meta}{clipped}");
     let _ = std::io::Write::flush(&mut std::io::stderr());
