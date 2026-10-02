@@ -126,9 +126,9 @@ enum Commands {
         /// 目标 shell
         shell: clap_complete::Shell,
     },
-    /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 n/p 切曲、←/→ 快退进、歌词同步滚动）
+    /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 </> 切曲、←/→ 快退进、歌词同步滚动）
     Play {
-        /// 歌曲 ID / 链接 / 关键词；daily = 每日推荐
+        /// 歌曲 ID / 链接 / 关键词；daily = 每日推荐，roam = 仅私人漫游（FM 无限续播）
         target: String,
         /// 最多播放 N 首（0 = 全部；关键词默认取最相关 1 首，-n 指定则取前 N 首连续播）
         #[arg(short = 'n', long, default_value_t = 0)]
@@ -154,7 +154,7 @@ enum Commands {
         /// 不显示滚动歌词
         #[arg(long = "no-lyric")]
         no_lyric: bool,
-        /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv）
+        /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv；目标为 roam 时已默认开启）
         #[arg(long)]
         roam: bool,
     },
@@ -1583,7 +1583,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 ui::info("  分批加载 · 链接过期前自动续取后段曲目");
             }
             if is_mpv {
-                ui::info("mpv 键位: 空格 暂停 · ←/→ 快退/快进 · n/p 上/下曲 · / 搜索 · q 退出");
+                ui::info("mpv 键位: 空格 暂停 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · q 退出");
             }
             if !no_lyric && !cfg!(unix) && is_mpv {
                 ui::info("当前平台不支持 mpv IPC 歌词同步，已跳过");
@@ -1599,6 +1599,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 args.push("--msg-level=cplayer=warn,ffmpeg=warn,ipc=no".to_string());
                 // 直链交给 ffmpeg：禁用 ytdl 解析（坏掉的 yt-dlp 只会刷 traceback）
                 args.push("--ytdl=no".to_string());
+                // 预开播放列表下一条：按 > 跳过时新曲已就绪，无需等冷加载缓冲
+                args.push("--prefetch-playlist=yes".to_string());
             }
             // 守护任务需要 IPC socket：歌词底行 或 分批续取/漫游
             #[cfg(unix)]
