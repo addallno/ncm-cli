@@ -38,7 +38,7 @@ src/
 | `ncm list <目标>` | 纯浏览歌单/专辑/歌手作品列表 |
 | `ncm playlists` | 我创建/收藏的歌单（需登录） |
 | `ncm daily` | 每日推荐浏览（需登录） |
-| `ncm play <目标\|daily\|roam>` | 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`、`--roam` 播放漫游（队列将尽自动接私人FM续播）、`roam` 目标单开私人FM漫游歌单；mpv 下 <>/←→ 交互+歌词滚动（`--prefetch-playlist` 预开下首，跳过无缓冲等待），双行底行 `mm:ss/mm:ss [进度条] 原文` + `译文(dim)` 按终端宽度截行（非 TTY 静默）；切曲历史打一行 `▶ [i/N] 歌名`；**分批取址**：先播前 6 首，后续随播随取（防网易直链 ~10min 过期 403 雪崩）；取址先本地 mirror 再第三方（快起播） |
+| `ncm play <目标\|daily\|roam>` | 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`、`--roam` 播放漫游（队列将尽自动接私人FM续播）、`roam` 目标单开私人FM漫游歌单；mpv 下 <>/←→ 交互+歌词滚动（`--prefetch-playlist` 预开下首，跳过无缓冲等待），双行底行 `mm:ss/mm:ss [进度条] 原文` + `译文(dim)` 按终端宽度截行（非 TTY 静默）；切曲历史打一行 `▶ [i/N] 歌名`；**参数透传** `-- --volume=60 --ao=alsa`（经 `--` 分隔置于最后，同名以用户为准，仅 mpv，ffplay 忽略）；**分批取址**：先播前 6 首，后续随播随取（防网易直链 ~10min 过期 403 雪崩）；取址先本地 mirror 再第三方（快起播） |
 | `ncm recommend` | 首页推荐：每日推荐歌曲表（需登录）+ 官方榜单歌单表（`-n` 控制数量，`--json`） |
 | `ncm login/--logout` | 保存/查看/清除登录凭据（持久化） |
 | `ncm whoami` | 当前登录状态（昵称/uid/凭据来源） |

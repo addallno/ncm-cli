@@ -203,3 +203,12 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | O3 | 单测 +2：同刻对分行（主/副）、占位无副行（17 tests） | ✅ |
 
 验收：clippy 0、17 tests；script 伪终端双行对结构 `\n\r\x1b[2K` 正常（line2 仅混译歌非空，Greed/Shape 抽测为单语空行属预期）。
+
+## P. v0.3.5 播放器参数透传（2026-10-02）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| P1 | 用户需求「I need it allow to pass args to mpv, like --volume, --ao, --ar.」——`Play` 加 `player_args: Vec<OsString>`（clap `last = true`，经 `--` 分隔）；UTF-8 校验后 `args.extend` 置于内置参数之后（mpv 同名后者生效）；ffplay 选项体系不同 → 提示忽略 | ✅ |
+| P2 | 单测 +1：`--` 后参数全部归 `player_args` 不被 ncm 选项拦截（18 tests） | ✅ |
+
+验收：clippy 0、18 tests；实跑 `ncm play <id> --no-lyric -- --ao=null --volume=5` mpv 正常启动静默播放（mpv 只认 `=` 形式，help/文档已注明）。

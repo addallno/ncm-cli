@@ -157,6 +157,9 @@ enum Commands {
         /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv；目标为 roam 时已默认开启）
         #[arg(long)]
         roam: bool,
+        /// 透传给播放器的参数（经 `--` 分隔，置于最后同名以用户为准；mpv 需 `=` 形式，如 -- --volume=60 --ao=alsa）
+        #[arg(last = true, value_name = "ARGS")]
+        player_args: Vec<std::ffi::OsString>,
     },
 }
 
@@ -1327,11 +1330,21 @@ async fn run(cli: Cli) -> Result<i32> {
             output,
             no_lyric,
             roam,
+            player_args,
         }) => {
             if json && save {
                 bail!("--json 与 --save 互斥");
             }
             let _ = quality_br(&quality)?;
+            // 透传参数要求 UTF-8（与内部 args: Vec<String> 统一，避免静默失真）
+            let player_args: Vec<String> = player_args
+                .iter()
+                .map(|a| {
+                    a.to_str().map(str::to_string).with_context(|| {
+                        format!("透传参数含非 UTF-8 字节: {}", a.to_string_lossy())
+                    })
+                })
+                .collect::<Result<_>>()?;
             let ncm = Ncm::with_cookie(auth.as_deref())?;
 
             // 1) 收集播放队列
@@ -1627,6 +1640,14 @@ async fn run(cli: Cli) -> Result<i32> {
             } else {
                 None
             };
+            // 透传用户参数：置于内置参数之后（mpv 同名选项后者生效）；ffplay 选项不兼容，忽略并提示
+            if !player_args.is_empty() {
+                if is_ffplay {
+                    ui::info("透传参数仅支持 mpv（ffplay 选项体系不同），已忽略");
+                } else {
+                    args.extend(player_args);
+                }
+            }
             // 播放守护：pending 随播随取（在线地址现取防过期）+ 可选漫游接FM
             //（ipc_send/ipc_get 为 unix 实现，Windows 仅提示不支持）
             #[cfg(unix)]
@@ -2084,5 +2105,42 @@ fn shuffle_by_time(v: &mut [Value]) {
         seed ^= seed << 17;
         let j = (seed as usize) % (i + 1);
         v.swap(i, j);
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// `--` 之后的参数全部透传给播放器，不被 ncm 自身选项解析拦截
+    #[test]
+    fn trailing_player_args_parsed() {
+        let cli = Cli::try_parse_from([
+            "ncm",
+            "play",
+            "123",
+            "--no-lyric",
+            "--",
+            "--volume",
+            "60",
+            "--ao",
+            "alsa",
+        ])
+        .expect("应解析成功");
+        match cli.cmd {
+            Some(Commands::Play {
+                player_args,
+                no_lyric,
+                ..
+            }) => {
+                assert!(no_lyric);
+                assert_eq!(
+                    player_args,
+                    ["--volume", "60", "--ao", "alsa"].map(std::ffi::OsString::from)
+                );
+            }
+            _ => panic!("应为 Play 命令"),
+        }
     }
 }

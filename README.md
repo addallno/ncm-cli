@@ -22,7 +22,8 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
   自适应截行（窄屏不换行叠影）；原文与译文分两行显示（line1 时间+原文，
   line2 译文 dim）；**分批取址**：先播前 6 首，后续随播随取新链接
   （网易直链约 10 分钟过期，全量预取会导致长队列后段 403 雪崩）；`--save -o 目录`
-  先下载到本地再播本地文件；`--shuffle` 洗牌、`-n` 队列长度、`--json` 输出队列
+  先下载到本地再播本地文件；`--shuffle` 洗牌、`-n` 队列长度、`--json` 输出队列；
+  播放器参数经 `--` 透传（mpv 需 `=` 形式）：`ncm play 晴天 -- --volume=60 --ao=alsa`
 - **登录持久化**：`ncm login --session <pyncm dump>`（兼容 PYNCM/legacy）或
   `--cookie "MUSIC_U=...; __csrf=..."`（浏览器 F12 直接粘），凭据保存到
   `~/.config/ncm/cookie`（0600），之后所有命令自动加载；`ncm whoami` 看状态、
