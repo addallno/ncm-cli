@@ -212,3 +212,13 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | P2 | 单测 +1：`--` 后参数全部归 `player_args` 不被 ncm 选项拦截（18 tests） | ✅ |
 
 验收：clippy 0、18 tests；实跑 `ncm play <id> --no-lyric -- --ao=null --volume=5` mpv 正常启动静默播放（mpv 只认 `=` 形式，help/文档已注明）。
+
+## Q. v0.3.6 播放杂散日志与播放计数修复（2026-10-03）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| Q1 | 用户贴远端输出报告行错乱（`▶`/`♪` 同行拼接）与 `shared memfd open() failed: Unknown error 38`、`[ipc_N] Write error (Broken pipe)` 刷屏——根因：mpv 杂散 stderr 日志不带 ANSI 光标协议，插进 overlay 双行打乱行状态（`ipc=no` 匹配不到带编号的 `ipc_2348` module）；修：`--msg-level=all=fatal`（排障可经 `--` 透传覆盖） | ✅ |
+| Q2 | `播放完毕 · N 首` 用首批 `entries.len()`，guard 续喂未计入（报告 3 首实播到 32）——修：`Arc<AtomicUsize>` fed 计数，成功 append 才累加，退出 `n_play + fed` | ✅ |
+| Q3 | guard 续取失败 `ui::skip` 直接打印会插进 overlay 行——修：TTY 下先 `player::clear_overlay_rows()`（下秒 time-pos 自动重刷底行） | ✅ |
+
+验收：clippy 0、18 tests；远端实测无 memfd/ipc 噪音、`▶`/`♪` 各自成行、播放计数含续喂。

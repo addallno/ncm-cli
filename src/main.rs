@@ -1345,6 +1345,8 @@ async fn run(cli: Cli) -> Result<i32> {
                     })
                 })
                 .collect::<Result<_>>()?;
+            // guard 续喂成功计数（播放完毕报告用；仅 mpv+unix 分支会累加）
+            let fed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let ncm = Ncm::with_cookie(auth.as_deref())?;
 
             // 1) 收集播放队列
@@ -1609,7 +1611,9 @@ async fn run(cli: Cli) -> Result<i32> {
             if is_mpv {
                 // 抑制 mpv 状态/info 行防止刷屏（歌词底行或每首提示接管输出）
                 args.push("--term-status-msg=".to_string());
-                args.push("--msg-level=cplayer=warn,ffmpeg=warn,ipc=no".to_string());
+                // 抑制 mpv 全部非 fatal 输出：memfd/ipc_N Write error 等杂散日志
+                // 不带光标协议，插进 overlay 双行会打乱行状态（排障可经 -- 透传覆盖 msg-level）
+                args.push("--msg-level=all=fatal".to_string());
                 // 直链交给 ffmpeg：禁用 ytdl 解析（坏掉的 yt-dlp 只会刷 traceback）
                 args.push("--ytdl=no".to_string());
                 // 预开播放列表下一条：按 > 跳过时新曲已就绪，无需等冷加载缓冲
@@ -1662,6 +1666,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     quality.clone(),
                     pending,
                     roam,
+                    fed.clone(),
                 )))
             } else {
                 if roam {
@@ -1715,7 +1720,10 @@ async fn run(cli: Cli) -> Result<i32> {
             if !failed.is_empty() {
                 ui::info(&format!("（{} 首未播放，见上方跳过提示）", failed.len()));
             }
-            ui::ok(&format!("播放完毕 · {n_play} 首"));
+            ui::ok(&format!(
+                "播放完毕 · {} 首",
+                n_play + fed.load(std::sync::atomic::Ordering::Relaxed)
+            ));
             Ok(0)
         }
         Some(Commands::Login {
@@ -1999,6 +2007,7 @@ async fn guard_loop(
     quality: String,
     mut pending: std::collections::VecDeque<PendingItem>,
     roam: bool,
+    fed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
     let mut req_id: u64 = 9000;
@@ -2062,6 +2071,10 @@ async fn guard_loop(
                         .filter(|u| !u.is_empty())
                         .map(String::from);
                     let Some(url) = url else {
+                        // 续取失败提示入滚动历史：先清 overlay 双行，避免插行打乱光标状态
+                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                            player::clear_overlay_rows();
+                        }
                         ui::skip(&format!("{} · 续取失败", item.label));
                         continue;
                     };
@@ -2089,6 +2102,7 @@ async fn guard_loop(
                     });
             }
             count += 1;
+            fed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

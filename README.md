@@ -23,7 +23,8 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
   line2 译文 dim）；**分批取址**：先播前 6 首，后续随播随取新链接
   （网易直链约 10 分钟过期，全量预取会导致长队列后段 403 雪崩）；`--save -o 目录`
   先下载到本地再播本地文件；`--shuffle` 洗牌、`-n` 队列长度、`--json` 输出队列；
-  播放器参数经 `--` 透传（mpv 需 `=` 形式）：`ncm play 晴天 -- --volume=60 --ao=alsa`
+  播放器参数经 `--` 透传（mpv 需 `=` 形式）：`ncm play 晴天 -- --volume=60 --ao=alsa`；
+  mpv 非 fatal 日志全静默（杂散 stderr 不再打乱歌词底行），`播放完毕 · N 首` 含续喂数
 - **登录持久化**：`ncm login --session <pyncm dump>`（兼容 PYNCM/legacy）或
   `--cookie "MUSIC_U=...; __csrf=..."`（浏览器 F12 直接粘），凭据保存到
   `~/.config/ncm/cookie`（0600），之后所有命令自动加载；`ncm whoami` 看状态、
