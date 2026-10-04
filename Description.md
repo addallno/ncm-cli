@@ -24,7 +24,7 @@ src/
 ├── player.rs    mpv IPC 客户端：Unix socket observe time-pos/playlist-pos，
 │                歌词二分定位 + 终端单行滚动（♪ [i/N]）
 ├── lrc.rs       LRC 时间轴解析（parse_lrc_timeline）、yrc 转 ASS、多类型歌词
-├── tags.rs      lofty 写 ID3：封面嵌入、音轨编号、多类型歌词帧
+├── tags.rs      lofty 写 ID3：封面嵌入、音轨编号、多类型歌词帧、ncm-id 反查键
 ├── lrc.txt      内嵌歌词资源
 └── ui.rs        进度条/spinner/表格/颜色（NO_COLOR、TTY 检测、管道降级）
 ```

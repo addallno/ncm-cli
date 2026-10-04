@@ -655,6 +655,7 @@ async fn download_one(
             &track.album,
             embed_lyrics.as_deref(),
             embed_cover.as_deref(),
+            Some(track.id),
         ) {
             ui::info(&format!("标签写入失败（不影响文件）: {e}"));
         }

@@ -243,3 +243,12 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | S3 | 复测：`ncm dl 关键词` → PICTURE 嵌入成功（封面最长边上限按用户建议 1600） | ✅ |
 
 验收：clippy 0、20 tests；关键词路径出图；远端跑 fix8.py 补 8 首 + 部署本版。
+
+## T. v0.3.9 下载嵌入 ncm-id 反查键（2026-10-04）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| T1 | 用户要求「In ncm-cli you should add to embed ncm-id.」——`write_tags` 增参 `ncm_id: Option<u64>`，写入键 `ncm-id`（`src/tags.rs` 常量 `NCM_ID_KEY`），main.rs 下载路径传 `Some(track.id)`。关键坑：lofty `Tag::insert_text` 内部 `re_map(tag_type, allow_unknown=false)` 会直接拒掉 `ItemKey::Unknown`，必须 `insert_unchecked`。FLAC→Vorbis 键（`verify_key` 校验 ASCII 0x20~0x7D 非 `=`，通过）；MP3→`ItemKey::Unknown` 经 `Tag→Id3v2Tag` 转换落成 TXXX 描述帧（读回走 description≠4字符分支 round-trip） | ✅ |
+| T2 | 单测 +3（23 tests）：`writes_ncm_id_as_vorbis_key`（极简 FLAC fixture：fLaC+STREAMINFO+尾 PADDING，覆盖写+读回）、`skips_ncm_id_when_absent`、`writes_ncm_id_as_txxx_on_mp3`（Tag→Id3v2Tag→`get_user_text`）。另以 ffmpeg 生成真 mp3 端到端临时验证通过后删除 | ✅ |
+
+验收：clippy 0、23 tests、fmt clean。
