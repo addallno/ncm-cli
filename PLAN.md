@@ -222,3 +222,14 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | Q3 | guard 续取失败 `ui::skip` 直接打印会插进 overlay 行——修：TTY 下先 `player::clear_overlay_rows()`（下秒 time-pos 自动重刷底行） | ✅ |
 
 验收：clippy 0、18 tests；远端实测无 memfd/ipc 噪音、`▶`/`♪` 各自成行、播放计数含续喂。
+
+## R. v0.3.7 封面压缩与标签健壮性（2026-10-04）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| R1 | 用户报告「The music file it download have a large picture header, that normal player cannot load the picture regularly.」远端扫描实证：Dehors 单首 PICTURE 1MB/3000x3000、Ari Abdul 0x0 尺寸、10 月 8 首无图（标签字段俱在=当时封面 fetch 瞬断，非 bail）。根因：`write_tags` 原样内嵌网易原图（可达 8MB 上限）。修：`prepare_cover` 压到最长边 ≤1000 + JPEG q85（image crate），lofty 从规范 JPEG 解出正确尺寸 → 实证 1.5MB→176KB/1000x1000 | ✅ |
+| R2 | 封面 MIME 无法识别时旧代码 `bail` 中断整个标签写入（标题/歌词全丢）——修：识别失败仅跳过封面；`image_mime` 删除，webp 等交由 image 解码器，全格式统一转 JPEG | ✅ |
+| R3 | 单测 +1：`prepare_cover` 大图压缩断言（≤1000px + JPEG 魔数）与垃圾输入 None（19 tests） | ✅ |
+| R4 | 远端存量修复（不 pull 本地）：Dehors/Ari Abdul 用 ffmpeg 抽图缩放 + `~/fixcover.py`（python 原地重建 metadata，帧数据/SEEKTABLE 不动，SOF 头解析真尺寸）；8 首无图 `~/fix8.py`（VORBIS TITLE/ARTIST → search+song/detail 拿 picUrl → 下载缩放嵌入） | 🔶 远端网络抖动进行中 |
+
+验收：clippy 0、19 tests；新下载 PICTURE ≤~200KB/1000x1000；远端重扫无 BIG/0x0/none。
