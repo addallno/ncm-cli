@@ -21,13 +21,14 @@ pub async fn probe_link(ncm: &Ncm, url: &str) -> Result<(u64, String), String> {
 async fn probe_once(ncm: &Ncm, url: &str) -> Result<(u64, String), String> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(reqwest::header::RANGE, "bytes=0-1".parse().unwrap());
-    let resp = match ncm
-        .insecure
-        .get(url)
-        .headers(headers)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
+    let resp = match crate::retry::retry_reqwest(|| {
+        ncm.insecure
+            .get(url)
+            .headers(headers.clone())
+            .timeout(Duration::from_secs(15))
+            .send()
+    })
+    .await
     {
         Ok(r) => r,
         // Debug 含 source 链（dns/timeout/connect 根因），不然只有 "error sending request"
@@ -226,16 +227,17 @@ pub async fn download_audio(
         reqwest::header::HeaderValue::from_static(UA),
     );
 
-    let resp = ncm
-        .insecure
-        .get(url)
-        .headers(headers)
-        .timeout(Duration::from_secs(60))
-        .send()
-        .await
-        .map_err(|e| format!("下载异常: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("下载异常: {e}"))?;
+    let resp = crate::retry::retry_reqwest(|| {
+        ncm.insecure
+            .get(url)
+            .headers(headers.clone())
+            .timeout(Duration::from_secs(60))
+            .send()
+    })
+    .await
+    .map_err(|e| format!("下载异常: {e}"))?
+    .error_for_status()
+    .map_err(|e| format!("下载异常: {e}"))?;
 
     let declared = resp
         .headers()

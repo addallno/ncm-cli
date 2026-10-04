@@ -6,12 +6,12 @@ use lofty::prelude::*;
 use lofty::tag::{ItemKey, Tag, TagType};
 use std::path::Path;
 
-/// 封面统一规格化：最长边 ≤1000（保纵横比）、转 JPEG q85。
+/// 封面统一规格化：最长边 ≤1600（保纵横比）、转 JPEG q85。
 /// 网易原图可达 3000px/1.5MB，直接内嵌会让普通播放器加载失败；
 /// 解码/编码任一步失败返回 None（调用方跳过嵌入，不中断标签写入）
 fn prepare_cover(data: &[u8]) -> Option<Vec<u8>> {
     let img = image::load_from_memory(data).ok()?;
-    let rgb = img.thumbnail(1000, 1000).to_rgb8();
+    let rgb = img.thumbnail(1600, 1600).to_rgb8();
     let mut out = std::io::Cursor::new(Vec::new());
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
         .encode_image(&image::DynamicImage::ImageRgb8(rgb))
@@ -79,7 +79,7 @@ pub fn write_tags(
 mod tests {
     use super::*;
 
-    /// 大图压到 ≤1000px 且输出 JPEG；垃圾输入返回 None
+    /// 大图压到 ≤1600px 且输出 JPEG；垃圾输入返回 None
     #[test]
     fn prepare_cover_compresses_and_rejects_garbage() {
         let big = image::DynamicImage::ImageRgb8(image::RgbImage::new(2400, 1200));
@@ -89,8 +89,8 @@ mod tests {
         assert_eq!(&out[..2], &[0xFF, 0xD8], "输出应为 JPEG");
         let dec = image::load_from_memory(&out).unwrap();
         assert!(
-            dec.width() <= 1000 && dec.height() <= 1000,
-            "最长边应 ≤1000"
+            dec.width() <= 1600 && dec.height() <= 1600,
+            "最长边应 ≤1600"
         );
         assert!(prepare_cover(b"not an image").is_none());
     }

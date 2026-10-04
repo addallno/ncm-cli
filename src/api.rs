@@ -53,11 +53,7 @@ impl Ncm {
         } else {
             format!("{BASE}{path}")
         };
-        let resp = self
-            .client
-            .get(&url)
-            .query(query)
-            .send()
+        let resp = crate::retry::retry_reqwest(|| self.client.get(&url).query(query).send())
             .await?
             .error_for_status()?;
         Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
@@ -148,7 +144,9 @@ impl Ncm {
 
     /// 下载图片等小资源字节（封面用），超限报错
     pub async fn fetch_bytes(&self, url: &str, max: usize) -> Result<Vec<u8>> {
-        let resp = self.client.get(url).send().await?.error_for_status()?;
+        let resp = crate::retry::retry_reqwest(|| self.client.get(url).send())
+            .await?
+            .error_for_status()?;
         let mut out = Vec::new();
         let mut stream = resp.bytes_stream();
         use futures_util::StreamExt;

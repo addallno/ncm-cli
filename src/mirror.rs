@@ -71,15 +71,17 @@ pub async fn match_url(id: u64) -> Result<(String, String)> {
 
 /// 对单个候选地址发起 /match
 async fn try_match(client: &Client, base: &str, id: u64) -> Result<(String, String)> {
-    let resp = client
-        .get(format!("{base}/match"))
-        .query(&[("id", id.to_string())])
-        .timeout(MATCH_TIMEOUT)
-        .send()
-        .await
-        .with_context(|| format!("连接 {base} 失败"))?
-        .error_for_status()
-        .with_context(|| format!("{base} 返回错误状态"))?;
+    let resp = crate::retry::retry_reqwest(|| {
+        client
+            .get(format!("{base}/match"))
+            .query(&[("id", id.to_string())])
+            .timeout(MATCH_TIMEOUT)
+            .send()
+    })
+    .await
+    .with_context(|| format!("连接 {base} 失败"))?
+    .error_for_status()
+    .with_context(|| format!("{base} 返回错误状态"))?;
     let v: Value = resp.json().await.context("响应不是合法 JSON")?;
     if v["code"].as_i64() != Some(200) {
         let msg = v["message"].as_str().unwrap_or("未知错误");

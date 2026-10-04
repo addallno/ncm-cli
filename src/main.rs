@@ -6,6 +6,7 @@ mod lrc;
 mod mirror;
 mod model;
 mod player;
+mod retry;
 mod session;
 mod source;
 mod tags;
@@ -285,6 +286,15 @@ async fn tp_fallback(
 }
 
 /// 本地 mirror 解锁服务兜底（语义同 tp_fallback）
+/// 从歌曲 json 三处兼容取 picUrl（al/album/picUrl），空串视为缺失
+fn pick_pic_url(song: &Value) -> Option<&str> {
+    song["al"]["picUrl"]
+        .as_str()
+        .or_else(|| song["album"]["picUrl"].as_str())
+        .or_else(|| song["picUrl"].as_str())
+        .filter(|u| !u.is_empty())
+}
+
 async fn mirror_fallback(id: u64, row: &mut Value, source: &mut String, last_err: &mut String) {
     match mirror::match_url(id).await {
         Ok((url, src)) => {
@@ -617,16 +627,22 @@ async fn download_one(
 
     // 封面（仅音频存在时；下载失败不阻塞）
     if result.audio.is_some() {
-        let pic = song["al"]["picUrl"]
-            .as_str()
-            .or_else(|| song["album"]["picUrl"].as_str())
-            .or_else(|| song["picUrl"].as_str())
-            .filter(|u| !u.is_empty());
-        if let Some(url) = pic {
-            match ncm.fetch_bytes(url, 8 * 1024 * 1024).await {
+        // 搜索接口返回的 json 不带 picUrl，先取本地三处，缺失则二跳 song/detail 补全
+        let mut pic = pick_pic_url(song).map(str::to_owned);
+        if pic.is_none() {
+            let detail = ncm.song_detail(&[track.id]).await.ok();
+            pic = detail
+                .as_ref()
+                .and_then(|v| v.first())
+                .and_then(pick_pic_url)
+                .map(str::to_owned);
+        }
+        match pic {
+            Some(url) => match ncm.fetch_bytes(&url, 8 * 1024 * 1024).await {
                 Ok(bytes) => embed_cover = Some(bytes),
                 Err(e) => ui::info(&format!("封面下载失败（不影响文件）: {e}")),
-            }
+            },
+            None => ui::info("该曲无封面信息，跳过嵌入"),
         }
     }
 
@@ -2156,5 +2172,25 @@ mod cli_tests {
             }
             _ => panic!("应为 Play 命令"),
         }
+    }
+
+    /// picUrl 三处兼容取值：al（网易详情）、album（另一形状）、顶层；空串/缺失为 None
+    #[test]
+    fn pick_pic_url_fallback_shapes() {
+        use serde_json::json;
+        assert_eq!(
+            super::pick_pic_url(&json!({"al": {"picUrl": "http://a/p.jpg"}})),
+            Some("http://a/p.jpg")
+        );
+        assert_eq!(
+            super::pick_pic_url(&json!({"album": {"picUrl": "http://b/p.jpg"}})),
+            Some("http://b/p.jpg")
+        );
+        assert_eq!(
+            super::pick_pic_url(&json!({"picUrl": "http://c/p.jpg"})),
+            Some("http://c/p.jpg")
+        );
+        assert_eq!(super::pick_pic_url(&json!({"al": {"picUrl": ""}})), None);
+        assert_eq!(super::pick_pic_url(&json!({"name": "无图"})), None);
     }
 }

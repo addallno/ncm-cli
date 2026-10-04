@@ -233,3 +233,13 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | R4 | 远端存量修复（不 pull 本地）：Dehors/Ari Abdul 用 ffmpeg 抽图缩放 + `~/fixcover.py`（python 原地重建 metadata，帧数据/SEEKTABLE 不动，SOF 头解析真尺寸）；8 首无图 `~/fix8.py`（VORBIS TITLE/ARTIST → search+song/detail 拿 picUrl → 下载缩放嵌入） | 🔶 远端网络抖动进行中 |
 
 验收：clippy 0、19 tests；新下载 PICTURE ≤~200KB/1000x1000；远端重扫无 BIG/0x0/none。
+
+## S. v0.3.8 关键词下载封面 + 网络退避重试（2026-10-04）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| S1 | 用户定位：「when ncm download music, it will actually not download and embed it at the while」——本地复现坐实：`ncm dl 关键词` 静默无图。根因：`search()` 返回的 json 不带 picUrl，封面段三处取值全 None 直接跳过且无提示。修：`pick_pic_url` 纯函数抽离，None 时二跳 `song_detail([track.id])` 补 `album.picUrl`；仍无 → `ui::info("该曲无封面信息，跳过嵌入")` 不再静默。单测 +1（三形状/空串/缺失，20 tests） | ✅ |
+| S2 | 用户要求「if it cannot connect to DNS or others, silently retry 5 times then report if still failing」+「not just try 5 times instantly」——新增 `src/retry.rs`：`retry_reqwest` 指数退避 1/2/4/8/16s，共 5 次重试，全程无输出；`transient()` 只重试连接/超时/请求/传输类错误，HTTP 状态码直接返回不空耗。接入 `api::get_json`、`api::fetch_bytes`、`download::probe_once`、`download` 下载 send、`mirror::try_match` 五处 | ✅ |
+| S3 | 复测：`ncm dl 关键词` → PICTURE 嵌入成功（封面最长边上限按用户建议 1600） | ✅ |
+
+验收：clippy 0、20 tests；关键词路径出图；远端跑 fix8.py 补 8 首 + 部署本版。

@@ -1,6 +1,6 @@
 [package]
 name = "ncm"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 description = "网易云音乐统一命令行工具（搜索 / 下载 / 歌词 / TUI）"
 license = "MIT"
