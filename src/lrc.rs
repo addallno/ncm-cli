@@ -286,6 +286,39 @@ pub fn parse_lrc_timeline(text: &str) -> Vec<(f64, String)> {
     out
 }
 
+/// 把译文行并入原文时间轴：译文插到同刻原文之后且**沿用原文时间戳**
+/// （player::current_line 靠 `lines[i-1].0 == lines[i].0` 精确相等判配对）；
+/// 找不到同刻原文的译文行丢弃，避免错位成主行
+pub fn merge_translation(
+    orig: Vec<(f64, String)>,
+    trans: Vec<(f64, String)>,
+) -> Vec<(f64, String)> {
+    if trans.is_empty() {
+        return orig;
+    }
+    let mut out = orig;
+    for (t, text) in trans {
+        let Some(idx) = out.iter().rposition(|(ot, _)| (ot - t).abs() <= 0.05) else {
+            continue;
+        };
+        let ts = out[idx].0;
+        out.insert(idx + 1, (ts, text));
+    }
+    out
+}
+
+/// /api/song/lyric 响应 → 播放时间轴（原文 + 同刻译文分行所需的成对条目）
+pub fn timeline_from_lyric(v: &serde_json::Value) -> Vec<(f64, String)> {
+    let Some(text) = v["lrc"]["lyric"].as_str() else {
+        return Vec::new();
+    };
+    let mut lines = parse_lrc_timeline(text);
+    if let Some(tl) = v["tlyric"]["lyric"].as_str() {
+        lines = merge_translation(lines, parse_lrc_timeline(tl));
+    }
+    lines
+}
+
 /// `[mm:ss]` / `[mm:ss.xx]` / `[mm:ss.xxx]` → 秒；非时间标签返回 None
 fn parse_timestamp(tag: &str) -> Option<f64> {
     let (mm, ss) = tag.split_once(':')?;
@@ -336,5 +369,68 @@ mod timeline_tests {
         let lrc = "[offset:500]\n[00:01]词\n";
         let v = parse_lrc_timeline(lrc);
         assert_eq!(v, vec![(1.0, "词".to_string())]);
+    }
+
+    /// 译文紧跟同刻原文之后且时间戳完全相等（player 配对判定依赖精确相等）
+    #[test]
+    fn merge_translation_pairs_same_timestamp() {
+        let orig = vec![
+            (8.272, "I been running".into()),
+            (11.991, "Trippin over".into()),
+        ];
+        let trans = vec![(8.272, "大脑回旋".into()), (99.0, "孤儿译文".into())];
+        let m = merge_translation(orig, trans);
+        assert_eq!(
+            m,
+            vec![
+                (8.272, "I been running".into()),
+                (8.272, "大脑回旋".into()),
+                (11.991, "Trippin over".into()),
+            ],
+            "同刻插入 + 无匹配译文丢弃"
+        );
+        // 时间戳精确相等 → player::current_line 可判成对
+        assert_eq!(m[0].0, m[1].0);
+    }
+
+    /// tlyric 时间戳与原文有微小偏差（≤0.05s）时对齐到原文时间戳
+    #[test]
+    fn merge_translation_snaps_slight_offset() {
+        let orig = vec![(12.5, "原文".into())];
+        let trans = vec![(12.52, "译文".into())];
+        let m = merge_translation(orig, trans);
+        assert_eq!(m, vec![(12.5, "原文".into()), (12.5, "译文".into())]);
+    }
+
+    /// 无 tlyric 字段时按纯原文返回
+    #[test]
+    fn timeline_from_lyric_without_tlyric() {
+        let v: serde_json::Value = serde_json::json!({"lrc": {"lyric": "[00:01]词\n"}});
+        assert_eq!(timeline_from_lyric(&v), vec![(1.0, "词".into())]);
+    }
+
+    /// 有 tlyric 时译文并入成对
+    #[test]
+    fn timeline_from_lyric_merges_tlyric() {
+        let v: serde_json::Value = serde_json::json!({
+            "lrc": {"lyric": "[00:08.272]I been running\n[00:11.991]Trippin over\n"},
+            "tlyric": {"lyric": "[by:x]\n[00:08.272]大脑回旋着\n"}
+        });
+        let lines = timeline_from_lyric(&v);
+        assert_eq!(
+            lines,
+            vec![
+                (8.272, "I been running".into()),
+                (8.272, "大脑回旋着".into()),
+                (11.991, "Trippin over".into()),
+            ]
+        );
+    }
+
+    /// lrc 缺失时返回空（不 panic）
+    #[test]
+    fn timeline_from_lyric_missing_lrc() {
+        let v: serde_json::Value = serde_json::json!({"nolyric": true});
+        assert!(timeline_from_lyric(&v).is_empty());
     }
 }

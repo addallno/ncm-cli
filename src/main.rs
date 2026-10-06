@@ -2005,8 +2005,7 @@ async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>>
     use futures_util::future::join_all;
     join_all(ids.iter().map(|&id| async move {
         let v = ncm.lyric(id).await.ok()?;
-        let text = v["lrc"]["lyric"].as_str()?;
-        let lines = lrc::parse_lrc_timeline(text);
+        let lines = lrc::timeline_from_lyric(&v);
         (!lines.is_empty()).then_some(lines)
     }))
     .await
@@ -2103,7 +2102,7 @@ async fn guard_loop(
                 .lyric(t.id)
                 .await
                 .ok()
-                .and_then(|v| v["lrc"]["lyric"].as_str().map(lrc::parse_lrc_timeline))
+                .map(|v| lrc::timeline_from_lyric(&v))
                 .unwrap_or_default();
             // 先 append 到 mpv，确认命令送达再写 tracks，保持索引对齐
             let cmd = serde_json::json!({"command": ["loadfile", loc, "append"]}).to_string();

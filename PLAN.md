@@ -252,3 +252,12 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | T2 | 单测 +3（23 tests）：`writes_ncm_id_as_vorbis_key`（极简 FLAC fixture：fLaC+STREAMINFO+尾 PADDING，覆盖写+读回）、`skips_ncm_id_when_absent`、`writes_ncm_id_as_txxx_on_mp3`（Tag→Id3v2Tag→`get_user_text`）。另以 ffmpeg 生成真 mp3 端到端临时验证通过后删除 | ✅ |
 
 验收：clippy 0、23 tests、fmt clean。
+
+## U. v0.3.10 播放译文行回归修复（2026-10-04）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| U1 | 用户报「现在他歌词又不显示翻一行了。」——根因：`fetch_lyrics`(main.rs:2007) 与 `guard_loop` 续歌取词(main.rs:2103) 都只读 `v["lrc"]["lyric"]`，**从未合并 `tlyric`**（curl 实测 API 返回里 tlyric 有完整译文，keys 含 lrc/tlyric/romalrc/yrc/ytlrc）。v0.3.4 的分行显示只在 lrc 恰好同刻自带译文时才可见，故表现为「又不显示」。修：`lrc.rs` 新增 `merge_translation`（译文插到同刻原文之后、**沿用原文时间戳**以满足 `current_line` 的 `lines[i-1].0 == lines[i].0` 精确相等判定，容差 ≤0.05s 吸收微偏移，无匹配译文丢弃防错位成主行）与 `timeline_from_lyric(&Value)`（lrc 缺失返回空不 panic）；两处取词点改调 `timeline_from_lyric` | ✅ |
+| U2 | 单测 +5（28 tests）：`merge_translation_pairs_same_timestamp`、`merge_translation_snaps_slight_offset`、`timeline_from_lyric_{without_tlyric,merges_tlyric,missing_lrc}`；另用真实 API（id=1817576399）临时 ignored 测试验证 `lines=120 pairs=59`、样例配对输出正确，验证后删除 | ✅ |
+
+验收：clippy 0、28 tests、fmt clean；真实 API 译文成对。
