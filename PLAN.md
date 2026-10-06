@@ -269,3 +269,15 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | V1 | 用户反馈：「译文行应当与原文行对齐头才对。颜色就不要用灰色了吧，也不要用白色。你不要用绿色，用一个淡蓝色吧。」——`print_row` line2 由顶格改为跳过 `display_width(prefix)+display_width(meta)` 空格，与 line1 原文起始列对齐；颜色 `ui::dim` → 新增 `ui::soft_blue`（256 色 `38;5;117` 亮天蓝） | ✅ |
 
 验收：fmt clean、clippy 0、28 tests。
+
+## W. v0.3.12 config 配置 / 多会话板块绑定 / 播放快捷下载（2026-10-06）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| W1 | 用户需求：「我需要一个快捷键，当我在play的时候能够快捷下载，能够支持config下载到指定的目录。可以通过命令行直接配置，而不是改配置文件。希望能支持多个用户会话，并且希望能为不同板块分别设置不同的用户会话。比如说我希望为推荐和漫游设置一个用户的cookie，而下载时使用另一个VIP的cookie。」——新增 `src/config.rs`：`~/.config/ncm/config.json` 白名单键（`download-dir` / `play.download-key` / `profile.<板块>`，板块=default/download/play/recommend/roam/search/list），`ncm config set/get/list/unset` 子命令，0700/0600 权限；**事故：`SUBCOMMANDS` 注入白名单缺 `config` 导致 `ncm config ...` 被注入 `dl` 真实误下载 123MB×2，修数组长度 12→13 并补词，误下文件已全部清理** | ✅ |
+| W2 | 多会话与板块绑定：`session.rs` 新增 `cookie_path/load_profile/save_profile/clear_profile`（`login --profile <名>` 存 `cookie.<名>`，default 复用旧 `cookie` 文件），`resolve_auth` → `resolve_auth_for(section, …)`（CLI/env > 板块 profile 映射 > 默认凭据）；`main.rs` 新增 `section_of()` 板块判定（dl=download、play roam=roam、play daily/daily/recommend=recommend、search=list/list=list…）接入 run() | ✅ |
+| W3 | 下载目录配置：`DownloadArgs.output` 与 `play -o` 改 `Option<PathBuf>`，回退链 `-o` > `config download-dir` > `.`（dl / play --save / 快捷下载共用） | ✅ |
+| W4 | 播放快捷下载：mpv 临时 input-conf（`{key} script-message ncm-download`，键取 `play.download-key` 默认 `d`）+ `player::spawn_msg_listener` 独立 IPC 客户端置 `DOWNLOAD_REQ` 原子量 + `guard_loop` 扩参（queue/dl_ncm/dl_dir，`#[allow(too_many_arguments)]`）消费请求 → `quick_download`（song_detail 复用 download_songs，download 板块凭据，先 clear_overlay_rows 防乱行）；`guard_needed=is_mpv`、pending 耗尽非漫游由 return 改 continue（监听至 mpv 退出）；`download_audio` 进度回调 `dyn FnMut` → `impl FnMut + Send`（future 可 spawn）；mpv 键位提示行加「{key} 下载当前曲」 | ✅ |
+| W5 | 测试 28→34：config 3 个（set/get/unset 回转、非法键拒、默认值）、session `profile_paths_isolated`（多 profile 隔离+CLI 优先）、cli `subcommand_whitelist_covers_all`（clap 子命令名 vs SUBCOMMANDS 防 inject 回归）+ `section_of_commands`；持久化测试共用 `config::tests::LOCK` 防 XDG_CONFIG_HOME 互踩 | ✅ |
+
+验收：fmt clean、clippy 0（`--all-targets -- -D warnings`）、34 tests、`--help` 正常列出 config；config/login 冒烟通过。

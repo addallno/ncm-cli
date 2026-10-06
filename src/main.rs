@@ -1,5 +1,6 @@
 //! ncm — 网易云音乐统一命令行工具（搜索 / 下载 / 歌词）
 mod api;
+mod config;
 mod dns;
 mod download;
 mod lrc;
@@ -111,9 +112,17 @@ enum Commands {
         /// 登出：删除已保存的凭据
         #[arg(long)]
         logout: bool,
+        /// 会话 profile 名（多账号：保存到 ~/.config/ncm/cookie.<名>；配 profile.<板块> 绑定到板块）
+        #[arg(long, value_name = "名称")]
+        profile: Option<String>,
     },
     /// 查看当前登录状态
     Whoami,
+    /// 持久化配置（download-dir / play.download-key / profile.<板块>，写入 ~/.config/ncm/config.json）
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// 查看歌曲详情（ID / 专辑 / 发行日期 / 音质 / 版权等）
     Info {
         /// 歌曲 ID / 链接 / 关键词
@@ -149,9 +158,9 @@ enum Commands {
         /// 播放前先下载到本地并播放本地文件
         #[arg(long)]
         save: bool,
-        /// 下载目录（--save 时生效）
-        #[arg(short = 'o', long, default_value = ".")]
-        output: PathBuf,
+        /// 下载目录（--save / 快捷下载时生效；未指定取 config download-dir）
+        #[arg(short = 'o', long, value_name = "目录")]
+        output: Option<PathBuf>,
         /// 不显示滚动歌词
         #[arg(long = "no-lyric")]
         no_lyric: bool,
@@ -161,6 +170,29 @@ enum Commands {
         /// 透传给播放器的参数（经 `--` 分隔，置于最后同名以用户为准；mpv 需 `=` 形式，如 -- --volume=60 --ao=alsa）
         #[arg(last = true, value_name = "ARGS")]
         player_args: Vec<std::ffi::OsString>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// 写入配置项（如: ncm config set download-dir /sdcard/Music/NCMusic）
+    Set {
+        /// 配置键（download-dir / play.download-key / profile.<板块>）
+        key: String,
+        /// 配置值
+        value: String,
+    },
+    /// 读取单个配置项
+    Get {
+        /// 配置键
+        key: String,
+    },
+    /// 列出全部已配置项
+    List,
+    /// 删除配置项
+    Unset {
+        /// 配置键
+        key: String,
     },
 }
 
@@ -180,9 +212,9 @@ struct DownloadArgs {
     /// 关键词候选取前 N 首（仅 dl 关键词时生效；TTY 下可交互选择，非 TTY 无 -d 取 1 首）
     #[arg(short = 'n', long, default_value_t = 10)]
     limit: u32,
-    /// 音频输出目录
-    #[arg(short = 'o', long, default_value = ".")]
-    output: PathBuf,
+    /// 音频输出目录（未指定时取 config download-dir，再未配置为当前目录）
+    #[arg(short = 'o', long, value_name = "目录")]
+    output: Option<PathBuf>,
     /// 歌词输出目录（可重复指定多个；默认与音频同目录）
     #[arg(long = "lrc-dir", value_name = "目录")]
     lrc_dir: Vec<PathBuf>,
@@ -811,9 +843,14 @@ async fn download_songs(
     let quality = normalize_quality(&opts.quality).to_string();
     let _ = quality_br(&opts.quality)?;
 
-    let output = opts.output.canonicalize().unwrap_or_else(|_| {
-        std::fs::create_dir_all(&opts.output).ok();
-        std::fs::canonicalize(&opts.output).unwrap_or_else(|_| opts.output.clone())
+    let out_arg = opts
+        .output
+        .clone()
+        .or_else(config::download_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let output = out_arg.canonicalize().unwrap_or_else(|_| {
+        std::fs::create_dir_all(&out_arg).ok();
+        std::fs::canonicalize(&out_arg).unwrap_or_else(|_| out_arg.clone())
     });
     let lrc_dirs: Vec<PathBuf> = opts
         .lrc_dir
@@ -1156,7 +1193,7 @@ fn report(
 // 播放在线地址预取窗口：网易直链约 10 分钟过期，只先喂前 N 首，其余随播随取
 const PLAY_PREFETCH: usize = 6;
 
-const SUBCOMMANDS: [&str; 12] = [
+const SUBCOMMANDS: [&str; 13] = [
     "search",
     "dl",
     "list",
@@ -1167,6 +1204,7 @@ const SUBCOMMANDS: [&str; 12] = [
     "login",
     "whoami",
     "info",
+    "config",
     "completions",
     "help",
 ];
@@ -1197,10 +1235,26 @@ async fn main() {
     std::process::exit(code);
 }
 
+/// 命令 → 板块名（决定用哪个 profile 凭据：`ncm config set profile.<板块> <名>`）
+fn section_of(cmd: Option<&Commands>) -> &'static str {
+    match cmd {
+        Some(Commands::Search { .. }) => "search",
+        Some(Commands::Dl { .. }) => "download",
+        Some(Commands::List { .. }) | Some(Commands::Playlists { .. }) => "list",
+        Some(Commands::Daily { .. }) | Some(Commands::Recommend { .. }) => "recommend",
+        Some(Commands::Play { target, .. }) => match target.as_str() {
+            "roam" => "roam",
+            "daily" => "recommend",
+            _ => "play",
+        },
+        _ => "default",
+    }
+}
+
 async fn run(cli: Cli) -> Result<i32> {
     ui::set_color(!cli.no_color && std::env::var_os("NO_COLOR").is_none());
     mirror::init(cli.mirror.as_deref());
-    // 登录凭据：--session/--cookie 优先，回退 NCM_SESSION/NCM_COOKIE 环境变量
+    // 登录凭据：--session/--cookie 优先，回退 NCM_SESSION/NCM_COOKIE 环境变量，再按板块绑的 profile
     let session = cli
         .session
         .clone()
@@ -1209,7 +1263,11 @@ async fn run(cli: Cli) -> Result<i32> {
         .cookie
         .clone()
         .or_else(|| std::env::var("NCM_COOKIE").ok());
-    let auth = session::resolve_auth(session.as_deref(), cookie.as_deref())?;
+    let auth = session::resolve_auth_for(
+        section_of(cli.cmd.as_ref()),
+        session.as_deref(),
+        cookie.as_deref(),
+    )?;
     match cli.cmd {
         Some(Commands::Search {
             keyword,
@@ -1353,6 +1411,11 @@ async fn run(cli: Cli) -> Result<i32> {
                 bail!("--json 与 --save 互斥");
             }
             let _ = quality_br(&quality)?;
+            // 下载目录：-o > config download-dir > 当前目录（--save 与快捷下载共用）
+            let out_dir = output
+                .clone()
+                .or_else(config::download_dir)
+                .unwrap_or_else(|| PathBuf::from("."));
             // 透传参数要求 UTF-8（与内部 args: Vec<String> 统一，避免静默失真）
             let player_args: Vec<String> = player_args
                 .iter()
@@ -1365,6 +1428,12 @@ async fn run(cli: Cli) -> Result<i32> {
             // guard 续喂成功计数（播放完毕报告用；仅 mpv+unix 分支会累加）
             let fed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let ncm = Ncm::with_cookie(auth.as_deref())?;
+            // 快捷下载用 download 板块凭据（可与播放板块不同，如 VIP 下载号）
+            #[cfg(unix)]
+            let dl_ncm = Ncm::with_cookie(
+                session::resolve_auth_for("download", session.as_deref(), cookie.as_deref())?
+                    .as_deref(),
+            )?;
 
             // 1) 收集播放队列
             let desc;
@@ -1468,7 +1537,7 @@ async fn run(cli: Cli) -> Result<i32> {
             if save {
                 let dl_opts = DownloadArgs {
                     limit: 0,
-                    output: output.clone(),
+                    output: Some(out_dir.clone()),
                     lrc_dir: Vec::new(),
                     lrcs: LRC_DEFAULT.to_string(),
                     no_lrc: false,
@@ -1486,7 +1555,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 let (_code, items) = download_songs(
                     &ncm,
                     songs.clone(),
-                    vec![format!("{desc} 下载到 {}", output.display())],
+                    vec![format!("{desc} 下载到 {}", out_dir.display())],
                     dl_opts,
                 )
                 .await?;
@@ -1586,6 +1655,14 @@ async fn run(cli: Cli) -> Result<i32> {
                     None
                 };
             let want_lyric = lyric_tracks.is_some();
+            // 快捷下载队列：(曲 id, 标签)，与 mpv 播放列表索引对齐（guard 续入时同步 push）
+            let queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String)>>> =
+                std::sync::Arc::new(std::sync::RwLock::new(
+                    play_tracks
+                        .iter()
+                        .map(|t| (t.id, format!("{} - {}", t.title, t.artists)))
+                        .collect(),
+                ));
 
             // 7) 启动播放
             let locations: Vec<String> = entries.iter().map(|(_, s, _, _)| s.loc()).collect();
@@ -1615,6 +1692,12 @@ async fn run(cli: Cli) -> Result<i32> {
                 ui::info("  分批加载 · 链接过期前自动续取后段曲目");
             }
             if is_mpv {
+                #[cfg(unix)]
+                ui::info(&format!(
+                    "mpv 键位: 空格 暂停 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · {} 下载当前曲 · q 退出",
+                    config::play_download_key()
+                ));
+                #[cfg(not(unix))]
                 ui::info("mpv 键位: 空格 暂停 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · q 退出");
             }
             if !no_lyric && !cfg!(unix) && is_mpv {
@@ -1636,11 +1719,27 @@ async fn run(cli: Cli) -> Result<i32> {
                 // 预开播放列表下一条：按 > 跳过时新曲已就绪，无需等冷加载缓冲
                 args.push("--prefetch-playlist=yes".to_string());
             }
-            // 守护任务需要 IPC socket：歌词底行 或 分批续取/漫游
+            // 守护任务：续取/漫游 + 快捷下载按键消费（都需要 IPC socket）
             #[cfg(unix)]
-            let guard_needed = is_mpv && (!pending.is_empty() || roam);
+            let guard_needed = is_mpv;
             #[cfg(not(unix))]
             let guard_needed = false;
+            // 快捷下载键写入临时 input-conf（mpv 仅取文件中列出的绑定，不影响默认键）
+            #[cfg(unix)]
+            let input_conf = if guard_needed {
+                let key = config::play_download_key();
+                let p = std::env::temp_dir().join(format!("ncm-input-{}.conf", std::process::id()));
+                if std::fs::write(&p, format!("{key} script-message ncm-download\n")).is_ok() {
+                    args.push(format!("--input-conf={}", p.display()));
+                    Some(p)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            #[cfg(not(unix))]
+            let input_conf: Option<PathBuf> = None;
             if is_mpv && (want_lyric || guard_needed) {
                 player::cleanup_socket(&sock);
                 args.push(format!("--input-ipc-server={}", sock.display()));
@@ -1670,13 +1769,15 @@ async fn run(cli: Cli) -> Result<i32> {
                 }
             }
             // 播放守护：pending 随播随取（在线地址现取防过期）+ 可选漫游接FM
-            //（ipc_send/ipc_get 为 unix 实现，Windows 仅提示不支持）
+            // + 快捷下载按键监听（ipc_send/ipc_get 为 unix 实现，Windows 仅提示不支持）
             #[cfg(unix)]
-            let guard_handle = if guard_needed {
+            let (guard_handle, msg_listener) = if guard_needed {
                 if roam {
                     ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
                 }
-                Some(tokio::spawn(guard_loop(
+                // 独立客户端监听 script-message（与歌词 overlay 并存，mpv 支持多客户端）
+                let listener = Some(player::spawn_msg_listener(sock.clone()));
+                let handle = Some(tokio::spawn(guard_loop(
                     sock.clone(),
                     ncm.clone(),
                     lyric_tracks.clone(),
@@ -1684,19 +1785,23 @@ async fn run(cli: Cli) -> Result<i32> {
                     pending,
                     roam,
                     fed.clone(),
-                )))
+                    queue.clone(),
+                    dl_ncm,
+                    out_dir.clone(),
+                )));
+                (handle, listener)
             } else {
                 if roam {
                     ui::info("漫游需要 mpv（当前播放器无 IPC 接口），已忽略");
                 }
-                None
+                (None, None)
             };
             #[cfg(not(unix))]
             let guard_handle: Option<tokio::task::JoinHandle<()>> = {
                 if roam {
                     ui::info("播放漫游暂不支持当前平台（需要 unix + mpv IPC），已忽略");
                 }
-                let _ = (lyric_tracks, pending);
+                let _ = (lyric_tracks, pending, queue);
                 None
             };
 
@@ -1727,6 +1832,13 @@ async fn run(cli: Cli) -> Result<i32> {
             if let Some(h) = guard_handle {
                 h.abort();
             }
+            #[cfg(unix)]
+            if let Some(l) = msg_listener {
+                l.abort();
+            }
+            if let Some(p) = input_conf {
+                let _ = std::fs::remove_file(p);
+            }
             if overlay.is_some() && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                 player::clear_overlay_rows();
             }
@@ -1747,13 +1859,16 @@ async fn run(cli: Cli) -> Result<i32> {
             session,
             cookie,
             logout,
+            profile,
         }) => {
+            let prof = profile.as_deref();
             if logout {
-                let had = session::clear_saved()?;
+                let had = session::clear_profile(prof)?;
+                let name = prof.unwrap_or("默认");
                 if had {
-                    ui::ok("已删除保存的登录凭据");
+                    ui::ok(&format!("已删除 {name} profile 的登录凭据"));
                 } else {
-                    ui::info("没有已保存的凭据");
+                    ui::info(&format!("{name} profile 没有已保存的凭据"));
                 }
                 return Ok(0);
             }
@@ -1770,12 +1885,12 @@ async fn run(cli: Cli) -> Result<i32> {
                     bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
                 }
                 c.to_string()
-            } else if let Some(saved) = session::load_saved() {
+            } else if let Some(saved) = session::load_profile(prof) {
                 saved
             } else {
                 ui::info(&format!(
-                    "未保存凭据。用法:\n  ncm login --session <pyncm文件>\n  ncm login --cookie \"MUSIC_U=...; __csrf=...\"\n  ncm login --logout  登出\n凭据将保存到 {}",
-                    session::saved_cookie_path().display()
+                    "未保存凭据。用法:\n  ncm login --session <pyncm文件>\n  ncm login --cookie \"MUSIC_U=...; __csrf=...\"\n  ncm login --profile <名称>  保存/查看指定 profile（多账号）\n  ncm login --logout [--profile <名称>]  登出\n凭据将保存到 {}",
+                    session::cookie_path(prof).display()
                 ));
                 return Ok(0);
             };
@@ -1783,7 +1898,7 @@ async fn run(cli: Cli) -> Result<i32> {
             match ncm.whoami().await? {
                 Some((uid, name)) => {
                     if given {
-                        let path = session::save_cookie(&auth_str)?;
+                        let path = session::save_profile(prof, &auth_str)?;
                         ui::ok(&format!(
                             "登录成功并已保存：{name} (uid {uid})\n  凭据: {}",
                             path.display()
@@ -1802,6 +1917,40 @@ async fn run(cli: Cli) -> Result<i32> {
                     bail!("已保存凭据已失效，请重新 ncm login --session/--cookie");
                 }
             }
+        }
+        Some(Commands::Config { action }) => {
+            match action {
+                ConfigAction::Set { key, value } => {
+                    config::set(&key, &value)?;
+                    ui::ok(&format!("{key} = {value}"));
+                }
+                ConfigAction::Get { key } => match config::get(&key)? {
+                    Some(v) => println!("{key} = {v}"),
+                    None => ui::info(&format!("{key} 未配置（ncm config set {key} <值>）")),
+                },
+                ConfigAction::List => {
+                    let all = config::list();
+                    if all.is_empty() {
+                        ui::info(&format!(
+                            "无已配置项（配置文件: {}）",
+                            config::config_path().display()
+                        ));
+                    } else {
+                        for (k, v) in &all {
+                            println!("{k} = {v}");
+                        }
+                        ui::info(&format!("配置文件: {}", config::config_path().display()));
+                    }
+                }
+                ConfigAction::Unset { key } => {
+                    if config::unset(&key)? {
+                        ui::ok(&format!("已删除 {key}"));
+                    } else {
+                        ui::info(&format!("{key} 未配置"));
+                    }
+                }
+            }
+            Ok(0)
         }
         Some(Commands::Whoami) => {
             let ncm = Ncm::with_cookie(auth.as_deref())?;
@@ -2011,11 +2160,56 @@ async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>>
     .await
 }
 
+/// 快捷下载：播放中按 <key> 触发，独立任务下载当前曲（song_detail 补全元数据
+/// 后复用 dl 下载管线；质量同 play 参数，目录取 -o / config download-dir）
+#[cfg(unix)]
+async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, quality: String) {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() {
+        player::clear_overlay_rows(); // 下载输出进滚动历史，先清底行避免插行打乱光标
+    }
+    ui::step(&format!("快捷下载 · {label}"));
+    let songs = match ncm.song_detail(&[id]).await {
+        Ok(s) if !s.is_empty() => s,
+        Ok(_) => {
+            ui::skip(&format!("快捷下载 · {label} · 歌曲详情为空"));
+            return;
+        }
+        Err(e) => {
+            ui::skip(&format!("快捷下载 · {label} · 获取详情失败: {e}"));
+            return;
+        }
+    };
+    let opts = DownloadArgs {
+        limit: 0,
+        output: Some(out_dir),
+        lrc_dir: Vec::new(),
+        lrcs: LRC_DEFAULT.to_string(),
+        no_lrc: false,
+        only_lrc: false,
+        quality,
+        quiet: false,
+        dry_run: false,
+        template: "{artists} - {track}".to_string(),
+        skip_existing: true,
+        allow_trial: false,
+        artist: false,
+        json: false,
+        download: None,
+    };
+    if let Err(e) = download_songs(&ncm, songs, vec![format!("快捷下载 · {label}")], opts).await
+    {
+        ui::skip(&format!("快捷下载 · {label} · 失败: {e:#}"));
+    }
+}
+
 /// 时间种子洗牌（xorshift64*，满足播放随机即可，无外部 rand 依赖）
 /// 播放守护：队尾将尽时把 pending 续入 mpv（在线地址现取防过期），pending
 /// 耗尽且开启漫游时拉私人FM补充；歌词容器与播放列表索引对齐；
+/// 消费快捷下载按键请求（<key> 下载当前曲，用 download 板块凭据）；
 /// mpv 退出（IPC 连不上连续 3 次）静默结束
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 async fn guard_loop(
     sock: std::path::PathBuf,
     ncm: Ncm,
@@ -2024,7 +2218,11 @@ async fn guard_loop(
     mut pending: std::collections::VecDeque<PendingItem>,
     roam: bool,
     fed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String)>>>,
+    dl_ncm: Ncm,
+    dl_dir: PathBuf,
 ) {
+    use std::sync::atomic::Ordering;
     let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
     let mut req_id: u64 = 9000;
     let mut fails: u32 = 0; // 启动期 socket 未就绪的容忍计数
@@ -2047,13 +2245,30 @@ async fn guard_loop(
             continue;
         };
         fails = 0;
+        // 快捷下载请求：取当前曲 spawn 独立下载，不阻塞续曲轮询（多次按下合并为一次）
+        if player::DOWNLOAD_REQ.swap(0, Ordering::Relaxed) > 0 {
+            let hit = queue
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(pos as usize)
+                .cloned();
+            if let Some((id, label)) = hit {
+                tokio::spawn(quick_download(
+                    dl_ncm.clone(),
+                    id,
+                    label,
+                    dl_dir.clone(),
+                    quality.clone(),
+                ));
+            }
+        }
         if pos + 3 < count {
             continue; // 距队尾还早
         }
-        // pending 耗尽且漫游开启：拉私人FM补充
+        // pending 耗尽且漫游开启：拉私人FM补充；未开漫游则继续轮询（快捷下载监听至 mpv 退出）
         if pending.is_empty() {
             if !roam {
-                return;
+                continue;
             }
             let fm = ncm.radio_songs().await.unwrap_or_default();
             if fm.is_empty() {
@@ -2117,6 +2332,10 @@ async fn guard_loop(
                         lines,
                     });
             }
+            queue
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((t.id, format!("{} - {}", t.title, t.artists)));
             count += 1;
             fed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -2141,7 +2360,35 @@ fn shuffle_by_time(v: &mut [Value]) {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
+
+    /// inject 白名单必须覆盖全部子命令名，缺词会让该子命令被误注入 dl（config 曾中招）
+    #[test]
+    fn subcommand_whitelist_covers_all() {
+        for name in Cli::command().get_subcommands().map(|c| c.get_name()) {
+            assert!(SUBCOMMANDS.contains(&name), "SUBCOMMANDS 缺 {name}");
+        }
+    }
+
+    /// 命令 → 板块映射（决定用哪个 profile 凭据）
+    #[test]
+    fn section_of_commands() {
+        let cases: Vec<(Vec<&str>, &str)> = vec![
+            (vec!["ncm", "dl", "1"], "download"),
+            (vec!["ncm", "play", "roam"], "roam"),
+            (vec!["ncm", "play", "daily"], "recommend"),
+            (vec!["ncm", "play", "259138"], "play"),
+            (vec!["ncm", "daily"], "recommend"),
+            (vec!["ncm", "recommend"], "recommend"),
+            (vec!["ncm", "search", "moon"], "search"),
+            (vec!["ncm", "list", "1"], "list"),
+            (vec!["ncm", "whoami"], "default"),
+        ];
+        for (args, want) in cases {
+            let cli = Cli::try_parse_from(args.clone()).expect("应解析成功");
+            assert_eq!(section_of(cli.cmd.as_ref()), want, "{args:?}");
+        }
+    }
 
     /// `--` 之后的参数全部透传给播放器，不被 ncm 自身选项解析拦截
     #[test]

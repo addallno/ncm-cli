@@ -213,7 +213,8 @@ pub async fn download_audio(
     dest_base: &Path,
     expect_ms: u64,
     expect_br: Option<u64>,
-    on_progress: &mut dyn FnMut(u64, u64),
+    // impl + Send：调用方闭包需 Send，整个 future 才能被 tokio::spawn（快捷下载）
+    on_progress: &mut (impl FnMut(u64, u64) + Send),
 ) -> Result<(PathBuf, u64), String> {
     let (total, _) = probe_link(ncm, url).await?;
 

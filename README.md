@@ -30,6 +30,13 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
   `--cookie "MUSIC_U=...; __csrf=..."`（浏览器 F12 直接粘），凭据保存到
   `~/.config/ncm/cookie`（0600），之后所有命令自动加载；`ncm whoami` 看状态、
   `ncm login --logout` 登出；环境变量 `NCM_SESSION`/`NCM_COOKIE` 仍可临时覆盖
+- **多会话与板块绑定**：`ncm login --profile <名>` 另存一份凭据（`cookie.<名>`），
+  `ncm config set profile.<板块> <名>` 把板块绑到该会话（板块：`download`/`play`/
+  `recommend`/`roam`/`search`/`list`/`default`）——如下载用 VIP 号、听歌用小号：
+  `ncm login --profile vip --cookie "..."` + `ncm config set profile.download vip`
+- **持久化配置**：`ncm config set <键> <值>`（不改文件，0600 白名单键）：
+  `download-dir` 默认下载目录、`play.download-key` 播放快捷下载键（默认 `d`）、
+  `profile.<板块>` 会话绑定；`ncm config get/list/unset` 查改删
 - **歌词下载**：`--lrcs lrc,tlyric,romalrc,yrc,ass` 多类型（yrc 转 ASS），
   `--lrc-dir A --lrc-dir B` 多路径，`--only-lrc` 只下歌词（无版权歌照样可用）
 - **信息 / 补全**：`ncm info <ID/链接/关键词>` 看详情（歌名/歌手/专辑/时长/费用/版权），
@@ -43,6 +50,9 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
 
 ```bash
 ncm login --session dump.json       # 保存登录态（一次性，之后自动加载）
+ncm config set download-dir ~/music # 默认下载目录（dl/play -o 未指定时生效）
+ncm config set profile.download vip # 下载板块绑定 VIP 会话（login --profile vip 存的）
+ncm config list                     # 查看全部配置
 ncm search 晴天 -n 10               # 搜索浏览（表格）
 ncm search 晴天 -q -n 3 --json      # 静默 JSON（管道友好）
 ncm dl 晴天 -d 1                    # 按编号下载搜索结果
@@ -66,7 +76,7 @@ ncm completions bash > ~/.local/share/bash-completion/completions/ncm
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
-| `-o, --output` | `.` | 音频输出目录 |
+| `-o, --output` | config `download-dir`，无则 `.` | 音频输出目录 |
 | `-n, --limit` | `10` | 关键词候选数量 |
 | `-d, --download` | — | 按编号选择：`1,3` / `5-8` / `all` |
 | `--lrc-dir` | 随音频 | 歌词目录，可重复 |
@@ -86,6 +96,7 @@ ncm completions bash > ~/.local/share/bash-completion/completions/ncm
 | `←` / `→` | 快退 / 快进 5s（`Shift` 1s） |
 | `n` / `p` | 下一首 / 上一首 |
 | `/` | 跳转搜索 |
+| `d` | 下载当前曲（键可改：`ncm config set play.download-key <键>`） |
 | `q` | 退出 |
 
 歌词同步：`ncm play` 自动拉 LRC 并通过 mpv IPC socket 跟随进度滚动显示

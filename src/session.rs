@@ -19,8 +19,12 @@ const LEGACY_MARK: &str = "36cd479b6b5";
 /// 解析登录凭据，返回可直接放进 Cookie 头的字符串（不含 os=pc 等固定项）
 ///
 /// 优先级：`--session` > `--cookie` > `NCM_SESSION`/`NCM_COOKIE`（调用方已合并到参数）>
-/// 持久化文件（`ncm login` 写入）
-pub fn resolve_auth(session: Option<&Path>, cookie: Option<&str>) -> Result<Option<String>> {
+/// 板块绑定的 profile 凭据（`ncm config set profile.<板块> <名>`）> 默认持久化文件
+pub fn resolve_auth_for(
+    section: &str,
+    session: Option<&Path>,
+    cookie: Option<&str>,
+) -> Result<Option<String>> {
     if let Some(path) = session {
         let raw = std::fs::read(path)
             .with_context(|| format!("读取 session 文件失败: {}", path.display()))?;
@@ -35,8 +39,68 @@ pub fn resolve_auth(session: Option<&Path>, cookie: Option<&str>) -> Result<Opti
         }
         return Ok(Some(c.to_string()));
     }
-    // 回退：ncm login 持久化的凭据
+    // 板块 → profile 映射（如 download 绑 vip）→ 该 profile 凭据
+    if let Some(prof) = crate::config::profile_for(section) {
+        if let Some(c) = load_profile(Some(&prof)) {
+            return Ok(Some(c));
+        }
+    }
+    // 回退：ncm login 持久化的默认凭据
     Ok(load_saved())
+}
+
+/// 某 profile 的凭据文件路径；`None`/`default` 即默认 profile（兼容旧 `cookie` 文件）
+pub fn cookie_path(profile: Option<&str>) -> std::path::PathBuf {
+    match profile {
+        None | Some("default") => saved_cookie_path(),
+        Some(name) => config_dir().join(format!("cookie.{name}")),
+    }
+}
+
+/// 读取指定 profile 凭据（不存在或损坏返回 None）
+pub fn load_profile(profile: Option<&str>) -> Option<String> {
+    let txt = std::fs::read_to_string(cookie_path(profile)).ok()?;
+    let t = txt.trim();
+    if t.contains('=') {
+        Some(t.to_string())
+    } else {
+        None
+    }
+}
+
+/// 写入指定 profile 凭据（目录 0700、文件 0600）
+pub fn save_profile(profile: Option<&str>, cookie: &str) -> Result<std::path::PathBuf> {
+    let c = cookie.trim();
+    if !c.contains('=') {
+        bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
+    }
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("创建配置目录失败: {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = cookie_path(profile);
+    std::fs::write(&path, format!("{c}\n"))
+        .with_context(|| format!("写入凭据失败: {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(path)
+}
+
+/// 删除指定 profile 凭据；返回是否确实存在
+pub fn clear_profile(profile: Option<&str>) -> Result<bool> {
+    let path = cookie_path(profile);
+    if path.exists() {
+        std::fs::remove_file(&path).with_context(|| format!("删除凭据失败: {}", path.display()))?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// 配置目录：`$XDG_CONFIG_HOME/ncm` 或 `~/.config/ncm`
@@ -55,50 +119,9 @@ pub fn saved_cookie_path() -> std::path::PathBuf {
     config_dir().join("cookie")
 }
 
-/// 读取持久化凭据（不存在或损坏返回 None）
+/// 读取默认 profile 凭据（不存在或损坏返回 None）
 pub fn load_saved() -> Option<String> {
-    let txt = std::fs::read_to_string(saved_cookie_path()).ok()?;
-    let t = txt.trim();
-    if t.contains('=') {
-        Some(t.to_string())
-    } else {
-        None
-    }
-}
-
-/// 写入持久化凭据（目录 0700、文件 0600）
-pub fn save_cookie(cookie: &str) -> Result<std::path::PathBuf> {
-    let c = cookie.trim();
-    if !c.contains('=') {
-        bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
-    }
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("创建配置目录失败: {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
-    let path = saved_cookie_path();
-    std::fs::write(&path, format!("{c}\n"))
-        .with_context(|| format!("写入凭据失败: {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(path)
-}
-
-/// 删除持久化凭据；返回是否确实存在
-pub fn clear_saved() -> Result<bool> {
-    let path = saved_cookie_path();
-    if path.exists() {
-        std::fs::remove_file(&path).with_context(|| format!("删除凭据失败: {}", path.display()))?;
-        return Ok(true);
-    }
-    Ok(false)
+    load_profile(None)
 }
 
 /// 解析 session dump 字节流 → cookie 字符串
@@ -235,15 +258,52 @@ mod persist_tests {
 
     #[test]
     fn saved_cookie_roundtrip() {
+        // 与 config 测试共锁：都会临时改 XDG_CONFIG_HOME
+        let _g = crate::config::tests::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("ncm-sess-test-{}", std::process::id()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
-        let _ = clear_saved();
-        assert!(load_saved().is_none());
-        assert!(save_cookie("MUSIC_U=abc; __csrf=t").is_ok());
-        assert_eq!(load_saved().as_deref(), Some("MUSIC_U=abc; __csrf=t"));
-        assert!(save_cookie("bad").is_err());
-        assert!(clear_saved().unwrap());
-        assert!(!clear_saved().unwrap());
+        let _ = clear_profile(None);
+        assert!(load_profile(None).is_none());
+        assert!(save_profile(None, "MUSIC_U=abc; __csrf=t").is_ok());
+        assert_eq!(load_profile(None).as_deref(), Some("MUSIC_U=abc; __csrf=t"));
+        assert!(save_profile(None, "bad").is_err());
+        assert!(clear_profile(None).unwrap());
+        assert!(!clear_profile(None).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_paths_isolated() {
+        let _g = crate::config::tests::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ncm-prof-test-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _ = clear_profile(None);
+        let _ = clear_profile(Some("vip"));
+        // 多 profile 互不覆盖；default 仍走旧 cookie 文件路径
+        assert!(save_profile(None, "MUSIC_U=main; x=1").is_ok());
+        assert!(save_profile(Some("vip"), "MUSIC_U=vip2; y=2").is_ok());
+        assert!(save_profile(Some("default"), "MUSIC_U=alias; z=3").is_ok());
+        assert_eq!(load_profile(None).as_deref(), Some("MUSIC_U=alias; z=3"));
+        assert_eq!(
+            load_profile(Some("vip")).as_deref(),
+            Some("MUSIC_U=vip2; y=2")
+        );
+        // profile 回退 resolve：CLI/env 缺省时按板块映射取 cookie
+        crate::config::set("profile.download", "vip").unwrap();
+        let auth = resolve_auth_for("download", None, None).unwrap();
+        assert_eq!(auth.as_deref(), Some("MUSIC_U=vip2; y=2"));
+        let auth = resolve_auth_for("play", None, None).unwrap();
+        assert_eq!(auth.as_deref(), Some("MUSIC_U=alias; z=3"));
+        // CLI 显式参数优先于板块映射
+        let auth = resolve_auth_for("download", None, Some("MUSIC_U=cli; a=1")).unwrap();
+        assert_eq!(auth.as_deref(), Some("MUSIC_U=cli; a=1"));
+        let _ = clear_profile(None);
+        let _ = clear_profile(Some("vip"));
+        let _ = crate::config::unset("profile.download");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

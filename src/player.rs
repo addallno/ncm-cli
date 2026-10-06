@@ -20,6 +20,53 @@ pub struct LyricTrack {
     pub lines: Vec<(f64, String)>,
 }
 
+/// 播放中按快捷键请求下载当前曲的计数（overlay/消息监听置位，guard_loop 消费）
+#[cfg(unix)]
+pub static DOWNLOAD_REQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 连接 mpv IPC 并只监听 script-message 快捷下载请求（mpv input-conf 绑键
+/// `script-message ncm-download`）；mpv 退出（EOF）自然结束
+///
+/// 与歌词 overlay 是两个独立客户端，mpv 支持多客户端连接同一 socket
+#[cfg(unix)]
+pub fn spawn_msg_listener(sock: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // mpv 启动后才创建 socket，重试等待（同 overlay，~5s）
+        let stream = {
+            let mut ok = None;
+            for _ in 0..50 {
+                match UnixStream::connect(&sock).await {
+                    Ok(s) => {
+                        ok = Some(s);
+                        break;
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            }
+            ok
+        };
+        let Some(stream) = stream else { return };
+        let mut lines = TokioBufReader::new(stream).lines();
+        while let Ok(Some(raw)) = lines.next_line().await {
+            let Ok(ev) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            if ev["event"] == "client-message" && ev["args"][0].as_str() == Some("ncm-download") {
+                std::sync::atomic::AtomicUsize::fetch_add(
+                    &DOWNLOAD_REQ,
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
+    })
+}
+
+#[cfg(not(unix))]
+pub fn spawn_msg_listener(_sock: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async {})
+}
+
 /// 生成 mpv IPC socket 路径（tmp 下，带 pid 避免冲突）
 pub fn socket_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("ncm-mpv-{}.sock", std::process::id()))

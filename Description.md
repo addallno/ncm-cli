@@ -14,8 +14,10 @@ src/
 ├── main.rs      CLI 定义（clap derive）+ 命令分支 + run_batch（dl 统一入口）+ 播放队列编排
 ├── api.rs       明文接口封装（search/detail/playlist/lyric/player_url/daily/user_playlists/whoami），
 │                Ncm::with_cookie 注入登录 Cookie
-├── session.rs   pyncm session 双格式解析 + 凭据持久化（~/.config/ncm/cookie，0600；
-│                resolve_auth 优先级 --session > --cookie > 持久化文件）
+├── session.rs   pyncm session 双格式解析 + 多 profile 凭据持久化（~/.config/ncm/cookie[.<名>]，0600；
+│                resolve_auth_for 优先级 --session --cookie > 板块绑定 profile > 默认文件）
+├── config.rs    持久化配置（~/.config/ncm/config.json 白名单：download-dir / play.download-key /
+│                profile.<板块>，set/get/list/unset，0700/0600）
 ├── source.rs    第三方 FLAC 源（xuanluoge/kangqiovo/vincentzyu，429/5xx 熔断），失败回退官方
 ├── mirror.rs    解锁音源（UnblockNeteaseMusic-utils REST /match）：官方 -110/404/试听时兜底，
 │                --mirror / NCM_MIRROR 配置（默认 127.0.0.1:3000，none 禁用），30s 超时
@@ -40,14 +42,17 @@ src/
 | `ncm daily` | 每日推荐浏览（需登录） |
 | `ncm play <目标\|daily\|roam>` | 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`、`--roam` 播放漫游（队列将尽自动接私人FM续播）、`roam` 目标单开私人FM漫游歌单；mpv 下 <>/←→ 交互+歌词滚动（`--prefetch-playlist` 预开下首，跳过无缓冲等待），双行底行 `mm:ss/mm:ss [进度条] 原文` + `译文(dim)` 按终端宽度截行（非 TTY 静默）；切曲历史打一行 `▶ [i/N] 歌名`；**参数透传** `-- --volume=60 --ao=alsa`（经 `--` 分隔置于最后，同名以用户为准，仅 mpv，ffplay 忽略）；mpv `--msg-level=all=fatal`（memfd/ipc 杂散日志不打乱底行），播放计数含 guard 续喂；**分批取址**：先播前 6 首，后续随播随取（防网易直链 ~10min 过期 403 雪崩）；取址先本地 mirror 再第三方（快起播） |
 | `ncm recommend` | 首页推荐：每日推荐歌曲表（需登录）+ 官方榜单歌单表（`-n` 控制数量，`--json`） |
-| `ncm login/--logout` | 保存/查看/清除登录凭据（持久化） |
+| `ncm login/--logout` | 保存/查看/清除登录凭据（持久化）；`--profile <名>` 多账号另存 `cookie.<名>` |
+| `ncm config set/get/list/unset` | 持久化配置：`download-dir` 默认下载目录、`play.download-key` 播放快捷下载键（默认 `d`）、`profile.<板块>` 板块绑定会话（板块：default/download/play/recommend/roam/search/list） |
 | `ncm whoami` | 当前登录状态（昵称/uid/凭据来源） |
 | `ncm info <目标>` | 歌曲详情（标题行/歌名/歌手/专辑/时长/费用着色/版权），VIP 曲提示 mirror 解锁，`--json` |
 | `ncm completions <shell>` | 生成 bash/zsh/fish/powershell 补全 |
 | `ncm <ID>` | 快捷下载（顶层无子命令即 dl） |
 
 登录凭据优先级：`--session <file>` / `--cookie <str>` > 环境变量 `NCM_SESSION`/`NCM_COOKIE` >
-`ncm login` 持久化文件。
+板块绑定的 profile（`ncm config set profile.<板块> <名>`）> `ncm login` 默认持久化文件。
+板块判定（`section_of`）：dl=download、play roam=roam、play daily/daily/recommend=recommend、
+search=search、list/playlists=list、其余=default；播放中按下载键用 download 板块凭据下载。
 
 取址兜底：官方失败/试听 → 第三方直连源（xuanluoge/kangqiovo/vincentzyu，无需本地服务）→ 本地 mirror（`--mirror` > `NCM_MIRROR` > 默认 3000,3100 多候选，`none` 禁用）。
 
