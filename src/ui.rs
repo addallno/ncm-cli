@@ -65,6 +65,11 @@ pub fn dim(t: &str) -> String {
     paint(t, "2")
 }
 
+/// 淡蓝（256 色亮天蓝），用于译文行
+pub fn soft_blue(t: &str) -> String {
+    paint(t, "38;5;117")
+}
+
 pub fn step(msg: &str) {
     if json_mode() || quiet() {
         return;

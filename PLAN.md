@@ -261,3 +261,11 @@ script 伪终端 100 列实测底行 `♪ [1/3] 00:01 / 04:39 [bar] 歌词` 正�
 | U2 | 单测 +5（28 tests）：`merge_translation_pairs_same_timestamp`、`merge_translation_snaps_slight_offset`、`timeline_from_lyric_{without_tlyric,merges_tlyric,missing_lrc}`；另用真实 API（id=1817576399）临时 ignored 测试验证 `lines=120 pairs=59`、样例配对输出正确，验证后删除 | ✅ |
 
 验收：clippy 0、28 tests、fmt clean；真实 API 译文成对。
+
+## V. v0.3.11 译文行对齐与配色（2026-10-04）
+
+| # | 内容 | 状态 |
+|---|------|------|
+| V1 | 用户反馈：「译文行应当与原文行对齐头才对。颜色就不要用灰色了吧，也不要用白色。你不要用绿色，用一个淡蓝色吧。」——`print_row` line2 由顶格改为跳过 `display_width(prefix)+display_width(meta)` 空格，与 line1 原文起始列对齐；颜色 `ui::dim` → 新增 `ui::soft_blue`（256 色 `38;5;117` 亮天蓝） | ✅ |
+
+验收：fmt clean、clippy 0、28 tests。

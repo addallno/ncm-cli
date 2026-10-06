@@ -258,7 +258,7 @@ pub fn clear_overlay_rows() {
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 
-/// 在 stderr 双行刷新歌词底行：line1 = 前缀+时间进度+原文，line2 = 译文（dim）
+/// 在 stderr 双行刷新歌词底行：line1 = 前缀+时间进度+原文，line2 = 译文（淡蓝，与原文对齐）
 #[cfg(unix)]
 fn print_row(
     tracks: &[LyricTrack],
@@ -312,7 +312,9 @@ fn print_row(
         "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{meta}{clipped}\n\r\x1b[2K"
     ));
     if let Some(s) = &sub_clipped {
-        out.push_str(&crate::ui::dim(s));
+        // 与 line1 原文起始列对齐（跳过 prefix+meta 宽度），译文用淡蓝
+        let pad = " ".repeat(crate::ui::display_width(&prefix) + crate::ui::display_width(&meta));
+        out.push_str(&crate::ui::soft_blue(&format!("{pad}{s}")));
     }
     ON_SECOND_LINE.store(true, Relaxed);
     eprint!("{out}");
