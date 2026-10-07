@@ -84,14 +84,15 @@ enum Commands {
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 下载（唯一下载入口）：歌曲ID / 歌单·专辑链接 / 关键词 / daily（每日推荐）
-    Dl {
+    /// 下载（唯一下载入口，别名 dl）：歌曲 ID / 歌单·专辑链接 / 关键词 / daily（每日推荐）
+    #[command(name = "download", visible_alias = "dl")]
+    Download {
         /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / daily（每日推荐）/ 关键词
         targets: Vec<String>,
         #[command(flatten)]
         opts: DownloadArgs,
     },
-    /// 浏览歌单/专辑/歌手的作品列表（下载用 ncm dl <链接>）
+    /// 浏览歌单/专辑/歌手的作品列表（下载用 ncm download <链接>）
     List {
         /// 歌单/专辑/歌手 ID 或链接
         target: String,
@@ -101,7 +102,7 @@ enum Commands {
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 列出我创建/收藏的歌单（需登录，下载用 ncm dl list.<ID>）
+    /// 列出我创建/收藏的歌单（需登录，下载用 ncm download list.<ID>）
     Playlists {
         /// 最多显示数量（0 = 全部）
         #[arg(short = 'n', long, default_value_t = 50)]
@@ -109,7 +110,7 @@ enum Commands {
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 每日推荐歌曲（需登录；下载: ncm dl daily · 播放: ncm play daily）
+    /// 每日推荐歌曲（需登录；下载: ncm download daily · 播放: ncm play daily）
     Daily {
         /// 只列出前 N 首（0 = 全部）
         #[arg(short = 'n', long, default_value_t = 0)]
@@ -1264,7 +1265,7 @@ async fn main() {
 fn section_of(cmd: Option<&Commands>) -> &'static str {
     match cmd {
         Some(Commands::Search { .. }) => "search",
-        Some(Commands::Dl { .. }) => "download",
+        Some(Commands::Download { .. }) => "download",
         Some(Commands::List { .. }) | Some(Commands::Playlists { .. }) => "list",
         Some(Commands::Daily { .. }) | Some(Commands::Recommend { .. }) => "recommend",
         Some(Commands::Play { target, .. }) => match target.as_str() {
@@ -1349,11 +1350,13 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Dl { targets, opts }) => {
+        Some(Commands::Download { targets, opts }) => {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             if targets.is_empty() {
-                bail!("请提供歌曲 ID / 歌单·专辑链接 / 关键词 / daily（ncm help dl 查看用法）");
+                bail!(
+                    "请提供歌曲 ID / 歌单·专辑链接 / 关键词 / daily（ncm help download 查看用法）"
+                );
             }
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             run_batch(&ncm, targets, opts).await
@@ -1376,7 +1379,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 ui::info(&format!("{desc} 没有可显示的曲目"));
             } else {
                 print_search_table(&songs);
-                ui::info(&format!("下载: ncm dl \"{target}\" -d 编号"));
+                ui::info(&format!("下载: ncm download \"{target}\" -d 编号"));
             }
             Ok(0)
         }
@@ -1395,7 +1398,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 print_search_json(&songs)?;
             } else {
                 print_search_table(&songs);
-                ui::info("下载: ncm dl daily -d 编号  ·  播放: ncm play daily");
+                ui::info("下载: ncm download daily -d 编号  ·  播放: ncm play daily");
             }
             Ok(0)
         }
@@ -2230,7 +2233,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 .collect();
             ui::table(&["#", "歌单名", "曲数", "来源", "ID"], &rows);
             if !opts.quiet {
-                ui::info("浏览: ncm list <ID>  ·  下载: ncm dl list.<ID> -d 编号");
+                ui::info("浏览: ncm list <ID>  ·  下载: ncm download list.<ID> -d 编号");
             }
             Ok(0)
         }
@@ -2512,7 +2515,17 @@ mod cli_tests {
         // 真正未知词同样报错
         assert!(Cli::try_parse_from(["ncm", "bogus", "259138"]).is_err());
         // 显式子命令不受影响
+        assert!(Cli::try_parse_from(["ncm", "download", "259138"]).is_ok());
         assert!(Cli::try_parse_from(["ncm", "dl", "259138"]).is_ok());
+    }
+
+    /// download 为正式名，dl 为别名，同一 variant
+    #[test]
+    fn download_alias_parses() {
+        let a = Cli::try_parse_from(["ncm", "download", "1"]).unwrap();
+        let b = Cli::try_parse_from(["ncm", "dl", "1"]).unwrap();
+        assert!(matches!(a.cmd, Some(Commands::Download { .. })));
+        assert!(matches!(b.cmd, Some(Commands::Download { .. })));
     }
 
     /// 命令 → 板块映射（决定用哪个 profile 凭据）
