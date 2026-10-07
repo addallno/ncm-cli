@@ -78,7 +78,7 @@ enum Commands {
             long_help = searchtype::TYPE_HELP
         )]
         types: Vec<u32>,
-        /// 输出总条数（多类型时平分）
+        /// 输出总条数（多类型时平分；0 = 全部）
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
         #[command(flatten)]
@@ -1310,9 +1310,11 @@ async fn run(cli: Cli) -> Result<i32> {
             let mut groups: Vec<(u32, Vec<(u32, Value)>)> = Vec::new();
             for (&ty, &q) in types.iter().zip(&qs) {
                 // 配额 0 = 不限，请求上限 100
-                let items = ncm
+                let mut items = ncm
                     .search_typed(&kw, ty, if q == 0 { 100 } else { q })
                     .await?;
+                // 服务端不遵守 limit 时按配额截断（JSON 与表格分支共用此处）
+                searchtype::truncate_to_quota(&mut items, q);
                 groups.push((ty, items));
             }
             let total: usize = groups.iter().map(|(_, v)| v.len()).sum();

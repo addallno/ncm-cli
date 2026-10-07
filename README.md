@@ -131,6 +131,9 @@ ncm recommend -t daily,toplist -n 10 # 多推荐位，统一表输出
 ncm recommend -t fm,radar
 ```
 
+`--json` 形状（实测）：单 `daily`/`fm` → **数组**；单 `toplist` → 对象
+`{"toplist": [...]}`；单 `radar` → 对象 `{"playlist_id","desc","songs"}`（未命中/未登录输出 `[]` 并报错）；多源 → 对象 `{"daily": [...], "toplist": [...]}`。
+
 ### `-n` 总条数语义
 
 `-n/--limit` 统一表示**该命令输出的总条数**（多类型 / 多推荐位按类平分，余数给

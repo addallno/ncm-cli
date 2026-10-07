@@ -74,6 +74,14 @@ pub fn quotas(n: u32, k: usize) -> Vec<u32> {
     (0..k).map(|i| base + u32::from(i < rem)).collect()
 }
 
+/// 按配额截断结果（配额 0 = 不限）：服务端可能不遵守 limit（实测 type=1009
+/// 传 3 返回 30），截断后才满足 `-n` 总条数契约
+pub fn truncate_to_quota<T>(items: &mut Vec<T>, quota: u32) {
+    if quota > 0 && items.len() > quota as usize {
+        items.truncate(quota as usize);
+    }
+}
+
 /// 类型列中文文案；未收录 → `类型N`
 pub fn type_label(ty: u32) -> String {
     match ty {
@@ -256,6 +264,49 @@ mod tests {
         assert_eq!(type_label(1), "单曲");
         assert_eq!(type_label(1000), "歌单");
         assert_eq!(type_label(9999), "类型9999");
+    }
+
+    #[test]
+    fn truncate_to_quota_enforces_total_limit() {
+        // 服务端可能忽略 limit（实测 type=1009 传 3 返回 30），按配额截断
+        let mut v: Vec<u32> = (0..30).collect();
+        truncate_to_quota(&mut v, 3);
+        assert_eq!(v.len(), 3);
+        // 配额 0 = 不限，不截断
+        let mut v: Vec<u32> = (0..150).collect();
+        truncate_to_quota(&mut v, 0);
+        assert_eq!(v.len(), 150);
+        // 未超配额时原样保留
+        let mut v = vec![1, 2];
+        truncate_to_quota(&mut v, 5);
+        assert_eq!(v, vec![1, 2]);
+    }
+
+    #[test]
+    fn extract_unknown_type_degrades() {
+        // 未收录 type 走通用降级：提取 name/id，artist/meta 固定 "-"
+        let r = extract_row(9999, &json!({"id": 42, "name": "神秘条目"}));
+        assert_eq!(
+            (
+                r.name.as_str(),
+                r.artist.as_str(),
+                r.meta.as_str(),
+                r.id.as_str(),
+                r.label
+            ),
+            ("神秘条目", "-", "-", "42", "类型9999")
+        );
+        // 残缺 / 空对象行不 panic
+        let r = extract_row(9999, &json!({"foo": 1}));
+        assert_eq!(
+            (r.name.as_str(), r.id.as_str(), r.label),
+            ("-", "-", "类型9999")
+        );
+        let r = extract_row(9999, &json!({}));
+        assert_eq!(
+            (r.name.as_str(), r.artist.as_str(), r.meta.as_str()),
+            ("-", "-", "-")
+        );
     }
 
     #[test]
