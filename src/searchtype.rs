@@ -130,7 +130,10 @@ pub fn extract_row(ty: u32, it: &Value) -> RenderRow {
                     .map(crate::model::hms)
                     .unwrap_or_else(|| "-".into())
             } else {
-                format!("{} 首", it["size"].as_u64().unwrap_or(0))
+                it["size"]
+                    .as_u64()
+                    .map(|n| format!("{n} 首"))
+                    .unwrap_or_else(|| "-".into())
             };
             RenderRow {
                 name,
@@ -141,7 +144,10 @@ pub fn extract_row(ty: u32, it: &Value) -> RenderRow {
             }
         }
         100 => RenderRow {
-            meta: format!("{} 首", it["musicSize"].as_u64().unwrap_or(0)),
+            meta: it["musicSize"]
+                .as_u64()
+                .map(|n| format!("{n} 首"))
+                .unwrap_or_else(|| "-".into()),
             name,
             artist: "-".into(),
             id,
@@ -149,7 +155,10 @@ pub fn extract_row(ty: u32, it: &Value) -> RenderRow {
         },
         1000 => RenderRow {
             artist: str_of(it["creator"]["nickname"].as_str()),
-            meta: format!("{} 首", it["trackCount"].as_u64().unwrap_or(0)),
+            meta: it["trackCount"]
+                .as_u64()
+                .map(|n| format!("{n} 首"))
+                .unwrap_or_else(|| "-".into()),
             name,
             id,
             label: "歌单",
@@ -202,7 +211,7 @@ pub fn extract_row(ty: u32, it: &Value) -> RenderRow {
             id,
             label: "声音",
         },
-        // 未收录类型：通用降级（能取到什么显示什么；label 每行一个小字符串，量级 ≤ limit）
+        // 未收录类型：通用降级（仅提取 name/id，artist/meta 固定 "-"；label 每行一个小字符串，量级 ≤ limit）
         _ => RenderRow {
             name,
             artist: "-".into(),
@@ -237,6 +246,11 @@ mod tests {
     }
 
     #[test]
+    fn dedup_keeps_order() {
+        assert_eq!(dedup_types(vec![1, 1000, 1, 1000, 10]), vec![1, 1000, 10]);
+    }
+
+    #[test]
     fn labels() {
         assert_eq!(type_label(1), "单曲");
         assert_eq!(type_label(1000), "歌单");
@@ -263,6 +277,16 @@ mod tests {
         // duration 存在 → hms 格式；缺失 → "-"
         let r = extract_row(1004, &json!({"id": 1, "name": "v", "duration": 91000}));
         assert_eq!((r.meta.as_str(), r.label), ("01:31", "MV"));
+        // 计数字段缺失 → "-"（未知不等于 0）
+        let r = extract_row(
+            1000,
+            &json!({"id": 1, "name": "歌单x", "creator": {"nickname": "乙"}}),
+        );
+        assert_eq!(r.meta.as_str(), "-");
+        let r = extract_row(10, &json!({"id": 2, "name": "专辑x"}));
+        assert_eq!(r.meta.as_str(), "-");
+        let r = extract_row(100, &json!({"id": 3, "name": "歌手x"}));
+        assert_eq!(r.meta.as_str(), "-");
         let r = extract_row(1014, &json!({"name": "v2"}));
         assert_eq!(r.meta.as_str(), "-");
     }
