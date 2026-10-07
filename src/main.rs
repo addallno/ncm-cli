@@ -50,12 +50,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 搜索歌曲并列出表格（下载用 ncm dl <关键词>）
+    /// 搜索并列出表格（-t 选类型如 1,1000；下载用 ncm download <关键词>）
     Search {
         /// 搜索关键词（可多个词，自动合并）
         #[arg(required = true)]
         keyword: Vec<String>,
-        /// 结果数量
+        /// 搜索类型，逗号分隔（数字或别名，多类型合并为一张表）
+        #[arg(
+            short = 't',
+            long = "type",
+            value_delimiter = ',',
+            value_parser = searchtype::parse_type_token,
+            default_value = "1",
+            long_help = searchtype::TYPE_HELP
+        )]
+        types: Vec<u32>,
+        /// 输出总条数（多类型时平分）
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
         #[command(flatten)]
@@ -964,8 +974,6 @@ fn print_search_table(songs: &[Value]) {
 }
 
 /// 多类型统一表：通用列 + 类型列（单组 type=1 仍走 print_search_table 保持原状）
-// Task 4 接线后移除
-#[allow(dead_code)]
 fn print_render_table(rows: &[searchtype::RenderRow]) {
     let body: Vec<Vec<String>> = rows
         .iter()
@@ -1296,21 +1304,56 @@ async fn run(cli: Cli) -> Result<i32> {
     match cli.cmd {
         Some(Commands::Search {
             keyword,
+            types,
             limit,
             opts,
         }) => {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let kw = keyword.join(" ");
+            let types = searchtype::dedup_types(types);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
-            let found = ncm.search(&kw, limit).await?;
+            let qs = searchtype::quotas(limit, types.len());
+            let mut groups: Vec<(u32, Vec<(u32, Value)>)> = Vec::new();
+            for (&ty, &q) in types.iter().zip(&qs) {
+                // 配额 0 = 不限，请求上限 100
+                let items = ncm
+                    .search_typed(&kw, ty, if q == 0 { 100 } else { q })
+                    .await?;
+                groups.push((ty, items));
+            }
+            let total: usize = groups.iter().map(|(_, v)| v.len()).sum();
             if opts.json {
-                print_search_json(&found)?;
-            } else if found.is_empty() {
+                if groups.len() == 1 {
+                    let items: Vec<Value> = groups[0].1.iter().map(|(_, v)| v.clone()).collect();
+                    print_search_json(&items)?;
+                } else {
+                    // 多类型：{ "1": [...], "1000": [...] }，键序同输入
+                    let mut obj = serde_json::Map::new();
+                    for (ty, items) in &groups {
+                        obj.insert(
+                            ty.to_string(),
+                            Value::Array(items.iter().map(|(_, v)| v.clone()).collect()),
+                        );
+                    }
+                    println!("{}", serde_json::to_string_pretty(&Value::Object(obj))?);
+                }
+            } else if total == 0 {
                 ui::info(&format!("未搜索到结果: {kw}"));
+            } else if groups.len() == 1 && groups[0].0 == 1 {
+                // 单组单曲：保持原输出不变
+                let items: Vec<Value> = groups[0].1.iter().map(|(_, v)| v.clone()).collect();
+                print_search_table(&items);
+                ui::info(&format!("下载: ncm download \"{kw}\" -d 编号"));
             } else {
-                print_search_table(&found);
-                ui::info(&format!("下载: ncm dl \"{kw}\" -d 编号"));
+                let mut rows: Vec<searchtype::RenderRow> = Vec::new();
+                for (_ty, items) in &groups {
+                    rows.extend(items.iter().map(|(t, v)| searchtype::extract_row(*t, v)));
+                }
+                print_render_table(&rows);
+                ui::info(&format!(
+                    "下载: ncm download \"{kw}\" -d 编号  ·  浏览歌单: ncm list <ID>"
+                ));
             }
             Ok(0)
         }
@@ -2464,5 +2507,29 @@ mod cli_tests {
         );
         assert_eq!(super::pick_pic_url(&json!({"al": {"picUrl": ""}})), None);
         assert_eq!(super::pick_pic_url(&json!({"name": "无图"})), None);
+    }
+
+    /// -t 支持数字、别名、逗号分隔，解析为去重 Vec<u32>
+    #[test]
+    fn search_type_flag_parses() {
+        let cli = Cli::try_parse_from(["ncm", "search", "-t", "1,1000", "moon"]).unwrap();
+        match cli.cmd {
+            Some(Commands::Search { types, .. }) => assert_eq!(types, vec![1, 1000]),
+            _ => panic!("应为 Search"),
+        }
+        let cli = Cli::try_parse_from(["ncm", "search", "-t", "song,playlist,SONG", "x"]).unwrap();
+        match cli.cmd {
+            // value_parser 逐 token 解析；去重在 handler 做，此处断言解析值
+            Some(Commands::Search { types, .. }) => assert_eq!(types, vec![1, 1000, 1]),
+            _ => panic!("应为 Search"),
+        }
+        // 未知别名 → clap 解析错误
+        assert!(Cli::try_parse_from(["ncm", "search", "-t", "bogus", "x"]).is_err());
+        // 不给 -t 默认 [1]
+        let cli = Cli::try_parse_from(["ncm", "search", "moon"]).unwrap();
+        match cli.cmd {
+            Some(Commands::Search { types, .. }) => assert_eq!(types, vec![1]),
+            _ => panic!("应为 Search"),
+        }
     }
 }
