@@ -113,7 +113,7 @@ ncm recommend -t fm,radar
 
 - 字段缺失一律显示 `-`，不 panic。
 - **通用降级**：未收录的 type（全放开允许），先按 `result` 内第一个数组取，逐行尝试 `id`/`name`/常见副信息键，取到什么显示什么，类型列显示 `类型N`（N=数字）。
-- JSON 模式：只指定一个 type（或默认）时输出数组（与现状同构）；指定多个 type 时输出对象 `{ "<type>": [...], ... }`，键为 type 数字字符串，顺序同输入。
+- JSON 模式：只指定一个 type（或默认）时输出数组（与现状同构）；指定多个 type 时输出对象 `{ "<type>": [...], ... }`，键为 type 数字字符串，按字符串字典序输出（serde_json Map 默认排序，非输入序，实测为准）。
 
 ## 4. 严格 subcommand
 
@@ -126,7 +126,7 @@ ncm recommend -t fm,radar
 ## 5. `download` 别名
 
 - `Commands::Dl` 重命名为 `Commands::Download`，clap 属性 `#[command(name = "download", visible_alias = "dl")]`。
-- `ncm dl ...` 继续可用；`--help` 显示 `download [dl]`。
+- `ncm dl ...` 继续可用；`--help` 实测渲染 `download … [alias: dl]`（clap 别名展示格式）。
 - 所有 `Commands::Dl` 引用、`section_of`、文档示例同步：文档主用 `download`，并注明别名 `dl`。
 - `dl` 内部对非数字目标的搜索下载流程**保留**（`ncm download 周杰伦` 仍然工作——它是显式 download 命令，不是隐式注入）。
 

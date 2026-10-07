@@ -301,7 +301,7 @@ impl Ncm {
         Ok(data["recommend"].as_array().cloned().unwrap_or_default())
     }
 
-    /// 官方榜单列表（首页排行榜推荐位，元素为歌单结构，可直接 list/dl）
+    /// 官方榜单列表（首页排行榜推荐位，元素为歌单结构，可直接 list/download）
     pub async fn toplist(&self) -> Result<Vec<Value>> {
         let data = self.get_json("/api/toplist", &[]).await?;
         let code = data["code"].as_i64().unwrap_or(-1);

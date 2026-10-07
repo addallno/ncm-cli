@@ -1,5 +1,6 @@
 //! 搜索/推荐 type 解析、配额与统一表行提取
-// 多任务分期交付：本任务尚无调用方，后续任务接入后移除本行
+// type_label 目前只有测试调用方（生产行提取走 extract_row 的内联文案），
+// 保留属性避免 dead_code 误报
 #![allow(dead_code)]
 use serde_json::Value;
 

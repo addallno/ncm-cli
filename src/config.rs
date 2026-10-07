@@ -1,7 +1,7 @@
 //! 持久化配置（`~/.config/ncm/config.json`）：`ncm config` 子命令读写
 //!
 //! 纯字符串键值 + 键白名单，避免手改配置文件：
-//! - `download-dir`：默认下载目录（`dl -o` / `play -o` 未指定时回退）
+//! - `download-dir`：默认下载目录（`download -o` / `play -o` 未指定时回退）
 //! - `play.download-key`：播放时快捷下载的 mpv 按键（默认 `d`）
 //! - `profile.<板块>`：板块 → 登录会话 profile 名（`login --profile <名>` 保存的凭据）
 use anyhow::{bail, Context, Result};

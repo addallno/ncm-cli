@@ -242,7 +242,7 @@ struct ViewArgs {
 
 #[derive(Args, Clone)]
 struct DownloadArgs {
-    /// 关键词候选取前 N 首（仅 dl 关键词时生效；TTY 下可交互选择，非 TTY 无 -d 取 1 首）
+    /// 关键词候选取前 N 首（仅 download 关键词时生效；TTY 下可交互选择，非 TTY 无 -d 取 1 首）
     #[arg(short = 'n', long, default_value_t = 10)]
     limit: u32,
     /// 音频输出目录（未指定时取 config download-dir，再未配置为当前目录）
@@ -284,7 +284,7 @@ struct DownloadArgs {
     /// 机器可读的 JSON 输出
     #[arg(long)]
     json: bool,
-    /// 按编号选择要下载的项：1,3 / 5-8 / 1- / all（dl 结果统一生效）
+    /// 按编号选择要下载的项：1,3 / 5-8 / 1- / all（download 结果统一生效）
     #[arg(short = 'd', long)]
     download: Option<String>,
 }
@@ -767,7 +767,7 @@ fn find_player(spec: Option<&str>) -> Option<(String, Vec<String>)> {
     None
 }
 
-/// dl 的批量编排：收集曲目（ID/链接/关键词/daily）→ TTY 交互选号 → 下载
+/// download 的批量编排：收集曲目（ID/链接/关键词/daily）→ TTY 交互选号 → 下载
 ///
 /// 关键词取 `-n` 候选；非 TTY 且未给 `-d` 时取最相关 1 首（兼容旧用法），
 /// TTY 下列出候选表并交互选择（回车仅展示不下载）。
@@ -1321,7 +1321,8 @@ async fn run(cli: Cli) -> Result<i32> {
                     let items: Vec<Value> = groups[0].1.iter().map(|(_, v)| v.clone()).collect();
                     print_search_json(&items)?;
                 } else {
-                    // 多类型：{ "1": [...], "1000": [...] }，键序同输入
+                    // 多类型：{ "1": [...], "1000": [...] }，键按 type 字符串字典序
+                    // （serde_json::Map 默认 BTreeMap，非输入顺序）
                     let mut obj = serde_json::Map::new();
                     for (ty, items) in &groups {
                         obj.insert(
@@ -1503,7 +1504,8 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             if opts.json {
                 if kinds.len() == 1 && kinds[0] != RecKind::Toplist {
-                    // 单非榜单源：直接输出数组（保持旧 daily JSON 形状）
+                    // 单非榜单源：直接输出该源的值（daily/fm 为数组，radar 为
+                    // {playlist_id,desc,songs} 对象），保持旧 daily JSON 形状
                     let v = json_out
                         .values()
                         .next()
@@ -1523,14 +1525,11 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             let rows: Vec<searchtype::RenderRow> = song_rows.into_iter().chain(topo_rows).collect();
             if rows.is_empty() {
-                bail!(
-                    "{}（每日推荐/雷达需登录: ncm login）",
-                    if errors.is_empty() {
-                        "推荐内容为空".to_string()
-                    } else {
-                        errors.join("；")
-                    }
-                );
+                if errors.is_empty() {
+                    bail!("推荐内容为空（每日推荐/雷达需登录: ncm login）");
+                }
+                // 错误文案自身常带括号，用分号衔接登录提示，避免出现双括号
+                bail!("{}；每日推荐/雷达需登录: ncm login", errors.join("；"));
             }
             print_render_table(&rows);
             for e in &errors {
@@ -2306,7 +2305,7 @@ async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>>
 }
 
 /// 快捷下载：播放中按 <key> 触发，独立任务下载当前曲（song_detail 补全元数据
-/// 后复用 dl 下载管线；质量同 play 参数，目录取 -o / config download-dir）
+/// 后复用 download 下载管线；质量同 play 参数，目录取 -o / config download-dir）
 #[cfg(unix)]
 async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, quality: String) {
     use std::io::IsTerminal;
