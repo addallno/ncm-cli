@@ -8,6 +8,7 @@ mod mirror;
 mod model;
 mod player;
 mod retry;
+mod searchtype;
 mod session;
 mod source;
 mod tags;

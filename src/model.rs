@@ -123,7 +123,7 @@ pub fn sanitize(name: &str) -> String {
 
 pub fn hms(ms: u64) -> String {
     let s = ms / 1000;
-    format!("{}:{:02}", s / 60, s % 60)
+    format!("{:02}:{:02}", s / 60, s % 60)
 }
 
 /// 解析目标字符串：返回 (类别, id, 是否显式指定类别)。
