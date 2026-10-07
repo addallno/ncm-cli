@@ -59,25 +59,91 @@ impl Ncm {
         Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
     }
 
-    /// 搜索：type=1 单曲（返回前按与关键词的相关度稳定重排）
-    pub async fn search(&self, keyword: &str, limit: u32) -> Result<Vec<Value>> {
+    /// 按 type 搜索；返回 (最终type, 条目)。type=1018 综合：按 result.order 展开各子类
+    pub async fn search_typed(
+        &self,
+        keyword: &str,
+        ty: u32,
+        limit: u32,
+    ) -> Result<Vec<(u32, Value)>> {
         let data = self
             .get_json(
                 "/api/search/get/web",
                 &[
-                    ("type", "1".into()),
+                    ("type", ty.to_string()),
                     ("s", keyword.into()),
                     ("limit", limit.to_string()),
                     ("offset", "0".into()),
                 ],
             )
             .await?;
-        let mut songs = data["result"]["songs"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        rank_songs(&mut songs, keyword);
-        Ok(songs)
+        let result = &data["result"];
+        let mut out: Vec<(u32, Value)> = Vec::new();
+        if ty == 1018 {
+            // 综合：order 声明子类顺序；key → 子 type 映射
+            const CLOUD_KEYS: &[(&str, u32)] = &[
+                ("songs", 1),
+                ("albums", 10),
+                ("artists", 100),
+                ("playlists", 1000),
+                ("mvs", 1004),
+                ("djRadios", 1009),
+                ("videos", 1014),
+            ];
+            if let Some(order) = result["order"].as_array() {
+                for k in order.iter().filter_map(|x| x.as_str()) {
+                    if let Some((_, sub)) = CLOUD_KEYS.iter().find(|(key, _)| *key == k) {
+                        if let Some(arr) = result[k].as_array() {
+                            out.extend(arr.iter().map(|x| (*sub, x.clone())));
+                        }
+                    }
+                }
+            }
+            return Ok(out);
+        }
+        // 单类型：取 result 内该 type 的数组键；未收录键 → 找第一个数组
+        let key = match ty {
+            1 | 1006 => "songs",
+            10 => "albums",
+            100 => "artists",
+            1000 => "playlists",
+            1002 => "userprofiles",
+            1004 => "mvs",
+            1009 => "djRadios",
+            1014 => "videos",
+            2000 => "sounds",
+            _ => "",
+        };
+        let arr = if !key.is_empty() {
+            result[key].as_array()
+        } else {
+            None
+        };
+        let arr = arr.or_else(|| {
+            result
+                .as_object()
+                .and_then(|m| m.values().find_map(|v| v.as_array()))
+        });
+        if let Some(arr) = arr {
+            out.extend(arr.iter().map(|x| (ty, x.clone())));
+        }
+        if ty == 1 {
+            // 单曲保持既有相关度排序
+            let mut songs: Vec<Value> = out.iter().map(|(_, v)| v.clone()).collect();
+            rank_songs(&mut songs, keyword);
+            out = songs.into_iter().map(|v| (1, v)).collect();
+        }
+        Ok(out)
+    }
+
+    /// 兼容旧签名：仅搜单曲
+    pub async fn search(&self, keyword: &str, limit: u32) -> Result<Vec<Value>> {
+        Ok(self
+            .search_typed(keyword, 1, limit)
+            .await?
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect())
     }
 
     /// 单曲详情（按 BATCH 分批）
@@ -225,6 +291,16 @@ impl Ncm {
             .as_array()
             .cloned()
             .unwrap_or_default())
+    }
+
+    /// 每日推荐歌单列表（需登录）；私人雷达在其中按名称筛出
+    // 暂未接线到 CLI，待后续任务消费
+    #[allow(dead_code)]
+    pub async fn daily_playlists(&self) -> Result<Vec<Value>> {
+        let data = self
+            .get_json("/api/v1/discovery/recommend/resource", &[])
+            .await?;
+        Ok(data["recommend"].as_array().cloned().unwrap_or_default())
     }
 
     /// 官方榜单列表（首页排行榜推荐位，元素为歌单结构，可直接 list/dl）
