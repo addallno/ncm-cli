@@ -1247,38 +1247,9 @@ fn report(
 // 播放在线地址预取窗口：网易直链约 10 分钟过期，只先喂前 N 首，其余随播随取
 const PLAY_PREFETCH: usize = 6;
 
-const SUBCOMMANDS: [&str; 13] = [
-    "search",
-    "dl",
-    "list",
-    "playlists",
-    "daily",
-    "recommend",
-    "play",
-    "login",
-    "whoami",
-    "info",
-    "config",
-    "completions",
-    "help",
-];
-
-/// 快捷方式：首个参数不是子命令时自动补 `dl`（`ncm 259138` == `ncm dl 259138`）；
-/// 纯 flags（-h/-V）不改写，交给顶层解析
-fn inject_dl_subcommand() -> Vec<String> {
-    let mut args: Vec<String> = std::env::args().collect();
-    let positional = args[1..].iter().find(|a| !a.starts_with('-'));
-    if let Some(p) = positional {
-        if !SUBCOMMANDS.contains(&p.as_str()) {
-            args.insert(1, "dl".to_string());
-        }
-    }
-    args
-}
-
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse_from(inject_dl_subcommand());
+    let cli = Cli::parse();
     let code = match run(cli).await {
         Ok(c) => c,
         Err(e) => {
@@ -2531,14 +2502,17 @@ fn shuffle_by_time(v: &mut [Value]) {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
-    use clap::{CommandFactory, Parser};
+    use clap::Parser;
 
-    /// inject 白名单必须覆盖全部子命令名，缺词会让该子命令被误注入 dl（config 曾中招）
+    /// 未知首参不再注入 dl，由 clap 报 unrecognized subcommand
     #[test]
-    fn subcommand_whitelist_covers_all() {
-        for name in Cli::command().get_subcommands().map(|c| c.get_name()) {
-            assert!(SUBCOMMANDS.contains(&name), "SUBCOMMANDS 缺 {name}");
-        }
+    fn unknown_first_arg_is_not_search_or_dl() {
+        assert!(Cli::try_parse_from(["ncm", "259138"]).is_err());
+        assert!(Cli::try_parse_from(["ncm", "moon"]).is_err());
+        // 真正未知词同样报错
+        assert!(Cli::try_parse_from(["ncm", "bogus", "259138"]).is_err());
+        // 显式子命令不受影响
+        assert!(Cli::try_parse_from(["ncm", "dl", "259138"]).is_ok());
     }
 
     /// 命令 → 板块映射（决定用哪个 profile 凭据）
