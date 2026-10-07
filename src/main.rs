@@ -2234,7 +2234,7 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        // 无子命令（纯 flags 或空参数）：inject 已把裸参数注入 dl，走到这里只可能是空输入
+        // 无子命令（纯 flags 或空参数）：打印帮助
         None => {
             Cli::command().print_help()?;
             Ok(0)
