@@ -963,6 +963,30 @@ fn print_search_table(songs: &[Value]) {
     ui::table(&["#", "歌名", "歌手", "专辑", "时长", "ID"], &rows);
 }
 
+/// 多类型统一表：通用列 + 类型列（单组 type=1 仍走 print_search_table 保持原状）
+// Task 4 接线后移除
+#[allow(dead_code)]
+fn print_render_table(rows: &[searchtype::RenderRow]) {
+    let body: Vec<Vec<String>> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            vec![
+                (i + 1).to_string(),
+                r.name.clone(),
+                r.artist.clone(),
+                r.meta.clone(),
+                r.label.to_string(),
+                r.id.clone(),
+            ]
+        })
+        .collect();
+    ui::table(
+        &["#", "名称", "艺术家·创建者", "时长·曲数", "类型", "ID"],
+        &body,
+    );
+}
+
 fn print_search_json(songs: &[Value]) -> Result<()> {
     let arr: Vec<Value> = songs
         .iter()
