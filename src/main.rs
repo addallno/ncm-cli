@@ -48,6 +48,19 @@ struct Cli {
     cmd: Option<Commands>,
 }
 
+/// recommend 的推荐位枚举（clap ValueEnum 自动列出可能值）
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
+pub enum RecKind {
+    /// 每日推荐歌曲（需登录）
+    Daily,
+    /// 官方榜单
+    Toplist,
+    /// 私人FM 首批曲目
+    Fm,
+    /// 私人雷达歌单
+    Radar,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// 搜索并列出表格（-t 选类型如 1,1000；下载用 ncm download <关键词>）
@@ -104,9 +117,17 @@ enum Commands {
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 首页推荐：每日推荐歌曲 + 官方榜单歌单（歌曲需登录）
+    /// 首页推荐（-t daily,toplist,fm,radar，默认 daily 只列每日推荐歌曲）
     Recommend {
-        /// 每类最多显示数量（0 = 全部）
+        /// 推荐位，逗号分隔：daily 每日推荐 / toplist 榜单 / fm 私人FM / radar 私人雷达
+        #[arg(
+            short = 't',
+            long = "type",
+            value_delimiter = ',',
+            default_value = "daily"
+        )]
+        types: Vec<crate::RecKind>,
+        /// 输出总条数（多推荐位平分；0 = 全部）
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
         #[command(flatten)]
@@ -1407,59 +1428,141 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Recommend { limit, opts }) => {
+        Some(Commands::Recommend { types, limit, opts }) => {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
-            // 每日推荐（需登录，失败降级为仅榜单）+ 官方榜单
-            let mut daily = ncm.daily_songs().await.unwrap_or_default();
-            let toplist = ncm.toplist().await?;
-            if daily.is_empty() && toplist.is_empty() {
-                bail!("推荐与榜单均为空（每日推荐需登录：ncm login --session/--cookie）");
+            // 去重保序
+            let mut kinds: Vec<RecKind> = Vec::new();
+            for &k in &types {
+                if !kinds.contains(&k) {
+                    kinds.push(k);
+                }
             }
-            if limit > 0 {
-                daily.truncate(limit as usize);
+            let qs = searchtype::quotas(limit, kinds.len());
+            // 各源取曲目：单曲源 Vec<Value>；榜单是歌单列表单独处理
+            let mut song_rows: Vec<searchtype::RenderRow> = Vec::new();
+            let mut topo_rows: Vec<searchtype::RenderRow> = Vec::new();
+            let mut json_out = serde_json::Map::new();
+            let mut errors: Vec<String> = Vec::new();
+            for (&k, &q) in kinds.iter().zip(&qs) {
+                let cap = if q == 0 { usize::MAX } else { q as usize };
+                let key = match k {
+                    RecKind::Daily => "daily",
+                    RecKind::Toplist => "toplist",
+                    RecKind::Fm => "fm",
+                    RecKind::Radar => "radar",
+                };
+                match k {
+                    RecKind::Daily => match ncm.daily_songs().await {
+                        Ok(mut s) => {
+                            if s.len() > cap {
+                                s.truncate(cap);
+                            }
+                            json_out.insert(key.into(), Value::Array(s.clone()));
+                            song_rows.extend(s.iter().map(|v| searchtype::extract_row(1, v)));
+                        }
+                        Err(e) => errors.push(format!("每日推荐失败: {e:#}")),
+                    },
+                    RecKind::Fm => match ncm.radio_songs().await {
+                        Ok(mut s) => {
+                            if s.len() > cap {
+                                s.truncate(cap);
+                            }
+                            json_out.insert(key.into(), Value::Array(s.clone()));
+                            song_rows.extend(s.iter().map(|v| searchtype::extract_row(1, v)));
+                        }
+                        Err(e) => errors.push(format!("私人FM失败: {e:#}")),
+                    },
+                    RecKind::Toplist => match ncm.toplist().await {
+                        Ok(mut t) => {
+                            if t.len() > cap {
+                                t.truncate(cap);
+                            }
+                            json_out.insert(key.into(), Value::Array(t.clone()));
+                            topo_rows.extend(t.iter().map(|it| {
+                                searchtype::RenderRow {
+                                    name: it["name"].as_str().unwrap_or("-").into(),
+                                    artist: it["updateFrequency"].as_str().unwrap_or("-").into(),
+                                    meta: format!("{} 首", it["trackCount"].as_u64().unwrap_or(0)),
+                                    id: it["id"]
+                                        .as_u64()
+                                        .map(|x| x.to_string())
+                                        .unwrap_or_else(|| "-".into()),
+                                    label: "榜单",
+                                }
+                            }));
+                        }
+                        Err(e) => errors.push(format!("榜单获取失败: {e:#}")),
+                    },
+                    RecKind::Radar => {
+                        // 每日推荐歌单中筛「私人雷达」；接口失败或未命中给统一兜底
+                        let found = ncm.daily_playlists().await.ok().and_then(|pls| {
+                            pls.iter()
+                                .find(|p| {
+                                    p["name"].as_str().is_some_and(|n| n.contains("私人雷达"))
+                                })
+                                .and_then(|p| p["id"].as_u64())
+                        });
+                        match found {
+                            Some(id) => match resolve_list(&ncm, &id.to_string()).await {
+                                Ok((mut songs, desc)) => {
+                                    if songs.len() > cap {
+                                        songs.truncate(cap);
+                                    }
+                                    json_out.insert(
+                                        key.into(),
+                                        json!({ "playlist_id": id, "desc": desc, "songs": songs }),
+                                    );
+                                    song_rows.extend(
+                                        songs.iter().map(|v| searchtype::extract_row(1, v)),
+                                    );
+                                }
+                                Err(e) => errors.push(format!("私人雷达歌单解析失败: {e:#}")),
+                            },
+                            None => errors.push(
+                                "未找到私人雷达歌单（可 ncm list <私人雷达链接> 手动浏览）".into(),
+                            ),
+                        }
+                    }
+                }
             }
             if opts.json {
-                let out = json!({
-                    "daily": Value::Array(daily),
-                    "toplists": Value::Array(
-                        if limit > 0 { toplist.into_iter().take(limit as usize).collect() } else { toplist },
-                    ),
-                });
-                println!("{}", serde_json::to_string_pretty(&out)?);
+                if kinds.len() == 1 && kinds[0] != RecKind::Toplist {
+                    // 单非榜单源：直接输出数组（保持旧 daily JSON 形状）
+                    let v = json_out
+                        .values()
+                        .next()
+                        .cloned()
+                        .unwrap_or(Value::Array(vec![]));
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&Value::Object(json_out))?
+                    );
+                }
+                if !errors.is_empty() {
+                    bail!("{}", errors.join("；"));
+                }
                 return Ok(0);
             }
-            if daily.is_empty() {
-                ui::info("每日推荐为空（需登录 ncm login）");
-            } else {
-                ui::step("每日推荐");
-                print_search_table(&daily);
-                ui::info("下载: ncm dl daily -d 编号  ·  播放: ncm play daily");
-            }
-            if !toplist.is_empty() {
-                ui::step("官方榜单");
-                let rows: Vec<Vec<String>> = toplist
-                    .iter()
-                    .take(if limit > 0 {
-                        limit as usize
+            let rows: Vec<searchtype::RenderRow> = song_rows.into_iter().chain(topo_rows).collect();
+            if rows.is_empty() {
+                bail!(
+                    "{}（每日推荐/雷达需登录: ncm login）",
+                    if errors.is_empty() {
+                        "推荐内容为空".to_string()
                     } else {
-                        usize::MAX
-                    })
-                    .enumerate()
-                    .map(|(i, t)| {
-                        vec![
-                            (i + 1).to_string(),
-                            t["name"].as_str().unwrap_or("").to_string(),
-                            t["updateFrequency"].as_str().unwrap_or("").to_string(),
-                            t["trackCount"].as_u64().unwrap_or(0).to_string(),
-                            t["id"].as_u64().unwrap_or(0).to_string(),
-                        ]
-                    })
-                    .collect();
-                ui::table(&["#", "榜单名", "更新", "曲数", "ID"], &rows);
-                ui::info("浏览: ncm list <ID>  ·  下载: ncm dl list.<ID> -d 编号");
+                        errors.join("；")
+                    }
+                );
             }
+            print_render_table(&rows);
+            for e in &errors {
+                ui::info(e);
+            }
+            ui::info("下载: ncm download -d 编号  ·  浏览: ncm list <ID>");
             Ok(0)
         }
         Some(Commands::Play {
@@ -2531,5 +2634,29 @@ mod cli_tests {
             Some(Commands::Search { types, .. }) => assert_eq!(types, vec![1]),
             _ => panic!("应为 Search"),
         }
+    }
+
+    /// recommend -t 值域与默认
+    #[test]
+    fn recommend_type_flag_parses() {
+        use crate::RecKind;
+        // 默认 daily
+        let cli = Cli::try_parse_from(["ncm", "recommend"]).unwrap();
+        match cli.cmd {
+            Some(Commands::Recommend { types, .. }) => {
+                assert_eq!(types, vec![RecKind::Daily])
+            }
+            _ => panic!("应为 Recommend"),
+        }
+        // 逗号多值
+        let cli = Cli::try_parse_from(["ncm", "recommend", "-t", "fm,radar"]).unwrap();
+        match cli.cmd {
+            Some(Commands::Recommend { types, .. }) => {
+                assert_eq!(types, vec![RecKind::Fm, RecKind::Radar])
+            }
+            _ => panic!("应为 Recommend"),
+        }
+        // 未知值报错
+        assert!(Cli::try_parse_from(["ncm", "recommend", "-t", "nope"]).is_err());
     }
 }

@@ -294,8 +294,6 @@ impl Ncm {
     }
 
     /// 每日推荐歌单列表（需登录）；私人雷达在其中按名称筛出
-    // 暂未接线到 CLI，待后续任务消费
-    #[allow(dead_code)]
     pub async fn daily_playlists(&self) -> Result<Vec<Value>> {
         let data = self
             .get_json("/api/v1/discovery/recommend/resource", &[])
