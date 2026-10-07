@@ -135,7 +135,8 @@ ncm recommend -t fm,radar
 
 `-n/--limit` 统一表示**该命令输出的总条数**（多类型 / 多推荐位按类平分，余数给
 前几类）；`0` = 全部（适用处：`search`/`recommend`/`list`/`daily`/`playlists`/
-`play`，其中 `search`/`recommend` 单类单次请求上限 100）。`download` 的 `-n`
+`play`；其中 `search` 单类单次请求上限 100，`recommend` 各源无 limit 参数，
+`0`/大值受服务端单次返回量限制）。`download` 的 `-n`
 是关键词候选取前 N 首（默认 10）。
 
 常用选项（`ncm download --help` 全量，别名 `ncm dl`）：

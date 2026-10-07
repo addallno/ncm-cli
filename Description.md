@@ -4,7 +4,7 @@
 
 Rust 重写版网易云 CLI，替代远端 `pyncm`（8.3 MB aarch64）与 `musicdl`（30+ 依赖包），
 单二进制覆盖：多类型搜索（`search -t` 逗号分隔）、下载（音频+歌词+封面）、浏览歌单、
-每日推荐与首页推荐（`recommend -t daily/toplist/fm,radar`）、队列播放（mpv
+每日推荐与首页推荐（`recommend -t daily,toplist,fm,radar`）、队列播放（mpv
 交互+歌词同步）、登录持久化、歌曲详情、shell 补全。严格子命令：`ncm <未知命令>`
 报 `unrecognized subcommand`（不再自动当下载）。
 CLI 选项与 Python 原型 `ncmt-local` 同名兼容。
