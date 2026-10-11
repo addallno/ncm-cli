@@ -13,6 +13,8 @@ pub struct Track {
     pub duration_ms: u64,
     pub no: u64,
     pub publish_ms: i64,
+    /// 喜欢人数（likeCount/likedCount，无则 0）
+    pub like_count: u64,
 }
 
 impl Track {
@@ -53,6 +55,10 @@ impl Track {
                 .or_else(|| v["position"].as_u64())
                 .unwrap_or(0),
             publish_ms: publish,
+            like_count: v["likeCount"]
+                .as_u64()
+                .or_else(|| v["likedCount"].as_u64())
+                .unwrap_or(0),
         }
     }
 

@@ -188,8 +188,11 @@ enum Commands {
     },
     /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 </> 切曲、←/→ 快退进、歌词同步滚动）
     Play {
-        /// 歌曲 ID / 链接 / 关键词；daily = 每日推荐，roam = 仅私人漫游（FM 无限续播）
-        target: String,
+        /// 歌曲 ID / 链接 / 关键词（可多个，按序拼接）；daily = 每日推荐，roam = 仅私人漫游（FM 无限续播）
+        target: Vec<String>,
+        /// 从文件读取目标列表（每行一个，与命令行目标拼接）
+        #[arg(short = 'f', long, value_name = "FILE")]
+        file: Option<PathBuf>,
         /// 最多播放 N 首（0 = 全部；关键词默认取最相关 1 首，-n 指定则取前 N 首连续播）
         #[arg(short = 'n', long, default_value_t = 0)]
         limit: u32,
@@ -1365,11 +1368,18 @@ fn section_of(cmd: Option<&Commands>) -> &'static str {
         | Some(Commands::Playlists { .. })
         | Some(Commands::Playlist { .. }) => "list",
         Some(Commands::Daily { .. }) | Some(Commands::Recommend { .. }) => "recommend",
-        Some(Commands::Play { target, .. }) => match target.as_str() {
-            "roam" => "roam",
-            "daily" => "recommend",
-            _ => "play",
-        },
+        Some(Commands::Play { target, .. }) => {
+            if target.iter().any(|t| t.eq_ignore_ascii_case("roam")) {
+                "roam"
+            } else if target
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case("daily") || t.eq_ignore_ascii_case("today"))
+            {
+                "recommend"
+            } else {
+                "play"
+            }
+        }
         _ => "default",
     }
 }
@@ -1726,6 +1736,7 @@ async fn run(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Play {
             target,
+            file,
             limit,
             shuffle,
             player,
@@ -1770,41 +1781,60 @@ async fn run(cli: Cli) -> Result<i32> {
                 .as_deref(),
             )?;
 
-            // 1) 收集播放队列
-            let desc;
-            let mut songs: Vec<Value> = if target.eq_ignore_ascii_case("roam") {
-                // 私人漫游：FM 首曲开播，后续由漫游续播无限接
-                desc = "私人漫游".to_string();
-                let s = ncm.radio_songs().await?;
-                if s.is_empty() {
-                    bail!("私人FM为空（该接口需登录：ncm login --session/--cookie）");
+            // 1) 收集播放队列：命令行目标 + 文件目标拼接
+            let mut targets: Vec<String> = target;
+            if let Some(fp) = &file {
+                let content = std::fs::read_to_string(fp)
+                    .with_context(|| format!("读取目标文件失败: {}", fp.display()))?;
+                for line in content.lines() {
+                    let t = line.trim();
+                    if !t.is_empty() && !t.starts_with('#') {
+                        targets.push(t.to_string());
+                    }
                 }
-                s
-            } else if target.eq_ignore_ascii_case("daily") || target.eq_ignore_ascii_case("today") {
-                desc = "每日推荐".to_string();
-                let s = ncm.daily_songs().await?;
-                if s.is_empty() {
-                    bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
-                }
-                s
-            } else if is_target_like(&target) {
-                let (found, d) = resolve_target(&ncm, &target, false).await?;
-                if found.is_empty() {
-                    bail!("“{d}” 没有可播放的曲目");
-                }
-                desc = d;
-                found
-            } else {
-                desc = format!("搜索 “{target}”");
-                let n = if limit > 0 { limit } else { 1 };
-                let found = ncm.search(&target, n).await?;
-                if found.is_empty() {
-                    bail!("未搜索到结果: {target}");
-                }
-                found
-            };
+            }
+            if targets.is_empty() {
+                bail!("未指定播放目标（可用参数或 -f 文件）");
+            }
+
+            let mut songs: Vec<Value> = Vec::new();
+            let mut descs: Vec<String> = Vec::new();
+            for t in &targets {
+                let batch: Vec<Value> = if t.eq_ignore_ascii_case("roam") {
+                    let s = ncm.radio_songs().await?;
+                    if s.is_empty() {
+                        bail!("私人FM为空（该接口需登录：ncm login --session/--cookie）");
+                    }
+                    descs.push("私人漫游".to_string());
+                    s
+                } else if t.eq_ignore_ascii_case("daily") || t.eq_ignore_ascii_case("today") {
+                    let s = ncm.daily_songs().await?;
+                    if s.is_empty() {
+                        bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
+                    }
+                    descs.push("每日推荐".to_string());
+                    s
+                } else if is_target_like(t) {
+                    let (found, d) = resolve_target(&ncm, t, false).await?;
+                    if found.is_empty() {
+                        bail!("“{d}” 没有可播放的曲目");
+                    }
+                    descs.push(d);
+                    found
+                } else {
+                    let n = if limit > 0 { limit } else { 1 };
+                    let found = ncm.search(t, n).await?;
+                    if found.is_empty() {
+                        bail!("未搜索到结果: {t}");
+                    }
+                    descs.push(format!("搜索 “{t}”"));
+                    found
+                };
+                songs.extend(batch);
+            }
+            let desc = descs.join(" + ");
             // 私人漫游模式默认开启无限续播（等效 --roam）
-            let roam = roam || target.eq_ignore_ascii_case("roam");
+            let roam = roam || targets.iter().any(|t| t.eq_ignore_ascii_case("roam"));
             if limit > 0 && songs.len() > limit as usize {
                 songs.truncate(limit as usize);
             }
@@ -2004,25 +2034,7 @@ async fn run(cli: Cli) -> Result<i32> {
             let n_play = entries.len();
             let n_queue = n_play + pending.len();
             ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
-            // 红心标记：登录时拉一次"我喜欢的音乐"的 trackIds 集合（尽力而为，失败不阻塞播放）
-            let liked_ids: std::collections::HashSet<u64> = if auth.is_some() {
-                let fetched = async {
-                    let (uid, _) = ncm.whoami().await.ok().flatten()?;
-                    let lists = ncm.user_playlists(uid).await.ok()?;
-                    let (pid, _) = resolve_playlist(&lists, None).ok()?;
-                    let (songs, _) = ncm.playlist(pid).await.ok()?;
-                    Some(
-                        songs
-                            .iter()
-                            .filter_map(|s| s["id"].as_u64())
-                            .collect::<std::collections::HashSet<u64>>(),
-                    )
-                };
-                fetched.await.unwrap_or_default()
-            } else {
-                Default::default()
-            };
-            // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告；已收藏曲标 ♥）
+            // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告；热度标 ★）
             let show_n = n_play.min(10);
             for (i, (label, _, source, br)) in entries.iter().take(show_n).enumerate() {
                 let br = *br;
@@ -2036,14 +2048,20 @@ async fn run(cli: Cli) -> Result<i32> {
                 } else {
                     String::new()
                 };
-                // 队列 label 对应 play_tracks[i]（entries 与 play_tracks 同步构造）
-                let heart = if liked_ids.contains(&play_tracks[i].id) {
-                    format!(" {}", ui::warn("♥"))
+                // 热度：like_count > 0 时显示 ★N（N 为喜欢人数，>1万缩写为 x.x万）
+                let lc = play_tracks[i].like_count;
+                let heat = if lc > 0 {
+                    let s = if lc >= 10_000 {
+                        format!("{:.1}万", lc as f64 / 10_000.0)
+                    } else {
+                        lc.to_string()
+                    };
+                    format!(" {}", ui::soft_blue(&format!("★{s}")))
                 } else {
                     String::new()
                 };
                 ui::info(&format!(
-                    "  {}. {label}{heart} · {source}{quality}{trial}",
+                    "  {}. {label}{heat} · {source}{quality}{trial}",
                     i + 1
                 ));
             }
