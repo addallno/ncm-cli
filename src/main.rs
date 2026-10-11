@@ -105,19 +105,11 @@ enum Commands {
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 列出我创建/收藏的歌单（需登录，下载用 ncm download list.<ID>）
-    Playlists {
-        /// 最多显示数量（0 = 全部）
-        #[arg(short = 'n', long, default_value_t = 50)]
-        limit: u32,
-        #[command(flatten)]
-        opts: ViewArgs,
-    },
-    /// 歌单管理（需登录；默认操作"我喜欢的音乐"）
+    /// 歌单管理（需登录；list=查看我的歌单，默认操作"我喜欢的音乐"）
     #[command(visible_alias = "pl")]
     Playlist {
         #[command(subcommand)]
-        action: PlaylistAction,
+        action: Option<PlaylistAction>,
     },
     /// 收藏/取消收藏歌曲到"我喜欢的音乐"（需登录）
     Like {
@@ -252,6 +244,14 @@ enum ConfigAction {
 /// 歌单管理子命令
 #[derive(Subcommand)]
 enum PlaylistAction {
+    /// 列出我创建/收藏的歌单（下载用 ncm download list.<ID>）
+    List {
+        /// 最多显示数量（0 = 全部）
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
     /// 新建歌单
     Create {
         /// 歌单名
@@ -1364,9 +1364,7 @@ fn section_of(cmd: Option<&Commands>) -> &'static str {
     match cmd {
         Some(Commands::Search { .. }) => "search",
         Some(Commands::Download { .. }) => "download",
-        Some(Commands::List { .. })
-        | Some(Commands::Playlists { .. })
-        | Some(Commands::Playlist { .. }) => "list",
+        Some(Commands::List { .. }) | Some(Commands::Playlist { .. }) => "list",
         Some(Commands::Daily { .. }) | Some(Commands::Recommend { .. }) => "recommend",
         Some(Commands::Play { target, .. }) => {
             if target.iter().any(|t| t.eq_ignore_ascii_case("roam")) {
@@ -1427,7 +1425,7 @@ fn resolve_playlist(lists: &[Value], target: Option<&str>) -> Result<(u64, Strin
             }
         }
     }
-    anyhow::bail!("未找到歌单「{t}」，可用 ncm playlists 查看")
+    anyhow::bail!("未找到歌单「{t}」，可用 ncm pl list 查看")
 }
 
 /// 歌曲 ID / 链接 → u64（纯数字或 URL 尾段）
@@ -2428,106 +2426,119 @@ async fn run(cli: Cli) -> Result<i32> {
             clap_complete::generate(shell, &mut cmd, "ncm", &mut std::io::stdout());
             Ok(0)
         }
-        Some(Commands::Playlists { limit, opts }) => {
-            ui::set_json(opts.json);
-            ui::set_quiet(opts.quiet);
-            let ncm = Ncm::with_cookie(auth.as_deref())?;
-            let uid = ncm
-                .whoami()
-                .await?
-                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?
-                .0;
-            let mut lists = ncm.user_playlists(uid).await?;
-            if limit > 0 {
-                lists.truncate(limit as usize);
-            }
-            if opts.json {
-                let arr: Vec<Value> = lists
-                    .iter()
-                    .map(|p| {
-                        json!({
-                            "id": p["id"],
-                            "name": p["name"],
-                            "track_count": p["trackCount"],
-                            "subscribed": p["subscribed"],
-                            "creator": p["creator"]["nickname"],
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&Value::Array(arr))?);
-                return Ok(0);
-            }
-            let rows: Vec<Vec<String>> = lists
-                .iter()
-                .enumerate()
-                .map(|(i, p)| {
-                    let mine = p["subscribed"].as_bool() == Some(false);
-                    vec![
-                        (i + 1).to_string(),
-                        p["name"].as_str().unwrap_or("").to_string(),
-                        p["trackCount"].as_u64().unwrap_or(0).to_string(),
-                        if mine { "创建" } else { "收藏" }.to_string(),
-                        p["id"].as_u64().unwrap_or(0).to_string(),
-                    ]
-                })
-                .collect();
-            ui::table(&["#", "歌单名", "曲数", "来源", "ID"], &rows);
-            if !opts.quiet {
-                ui::info("浏览: ncm list <ID>  ·  下载: ncm download list.<ID> -d 编号");
-            }
-            Ok(0)
-        }
         Some(Commands::Playlist { action }) => {
-            let ncm = Ncm::with_cookie(auth.as_deref())?;
-            let (uid, _) = ncm
-                .whoami()
-                .await?
-                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+            let action = action.unwrap_or(PlaylistAction::List {
+                limit: 50,
+                opts: ViewArgs {
+                    json: false,
+                    quiet: false,
+                },
+            });
             match action {
-                PlaylistAction::Create { name } => {
-                    let id = ncm.playlist_create(&name).await?;
-                    ui::ok(&format!("已创建歌单「{name}」 id={id}"));
-                    Ok(0)
-                }
-                PlaylistAction::Delete { target, force } => {
-                    let lists = ncm.user_playlists(uid).await?;
-                    let (id, name) = resolve_playlist(&lists, target.as_deref())?;
-                    if name == "我喜欢的音乐" {
-                        anyhow::bail!("不能删除「我喜欢的音乐」");
+                PlaylistAction::List { limit, opts } => {
+                    ui::set_json(opts.json);
+                    ui::set_quiet(opts.quiet);
+                    let ncm = Ncm::with_cookie(auth.as_deref())?;
+                    let uid = ncm
+                        .whoami()
+                        .await?
+                        .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?
+                        .0;
+                    let mut lists = ncm.user_playlists(uid).await?;
+                    if limit > 0 {
+                        lists.truncate(limit as usize);
                     }
-                    if !force && !ui::confirm(&format!("确认删除歌单「{name}」（含全部歌曲）？"))
-                    {
-                        ui::info("已取消");
-                        return Ok(1);
+                    if opts.json {
+                        let arr: Vec<Value> = lists
+                            .iter()
+                            .map(|p| {
+                                json!({
+                                    "id": p["id"],
+                                    "name": p["name"],
+                                    "track_count": p["trackCount"],
+                                    "subscribed": p["subscribed"],
+                                    "creator": p["creator"]["nickname"],
+                                })
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&Value::Array(arr))?);
+                        return Ok(0);
                     }
-                    ncm.playlist_delete(id).await?;
-                    ui::ok(&format!("已删除歌单「{name}」"));
-                    Ok(0)
-                }
-                PlaylistAction::Rename { target, name } => {
-                    let lists = ncm.user_playlists(uid).await?;
-                    let (id, old) = resolve_playlist(&lists, target.as_deref())?;
-                    ncm.playlist_rename(id, &name).await?;
-                    ui::ok(&format!("「{old}」已改名为「{name}」"));
-                    Ok(0)
-                }
-                PlaylistAction::Add { ids, playlist } => {
-                    let lists = ncm.user_playlists(uid).await?;
-                    let (pid, pname) = resolve_playlist(&lists, playlist.as_deref())?;
-                    let mut track_ids = Vec::new();
-                    for s in &ids {
-                        track_ids.push(parse_id_or_url(s)?);
+                    let rows: Vec<Vec<String>> = lists
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| {
+                            let mine = p["subscribed"].as_bool() == Some(false);
+                            vec![
+                                (i + 1).to_string(),
+                                p["name"].as_str().unwrap_or("").to_string(),
+                                p["trackCount"].as_u64().unwrap_or(0).to_string(),
+                                if mine { "创建" } else { "收藏" }.to_string(),
+                                p["id"].as_u64().unwrap_or(0).to_string(),
+                            ]
+                        })
+                        .collect();
+                    ui::table(&["#", "歌单名", "曲数", "来源", "ID"], &rows);
+                    if !opts.quiet {
+                        ui::info("浏览: ncm list <ID>  ·  下载: ncm download list.<ID> -d 编号");
                     }
-                    ncm.playlist_tracks_op("add", pid, &track_ids).await?;
-                    ui::ok(&format!("已添加 {} 首到「{pname}」", track_ids.len()));
                     Ok(0)
                 }
-                PlaylistAction::Remove { ids, playlist } => {
-                    let lists = ncm.user_playlists(uid).await?;
-                    let (pid, pname) = resolve_playlist(&lists, playlist.as_deref())?;
-                    ncm.playlist_tracks_op("del", pid, &ids).await?;
-                    ui::ok(&format!("已从「{pname}」移除 {} 首", ids.len()));
-                    Ok(0)
+                _ => {
+                    let ncm = Ncm::with_cookie(auth.as_deref())?;
+                    let (uid, _) = ncm
+                        .whoami()
+                        .await?
+                        .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+                    match action {
+                        PlaylistAction::Create { name } => {
+                            let id = ncm.playlist_create(&name).await?;
+                            ui::ok(&format!("已创建歌单「{name}」 id={id}"));
+                            Ok(0)
+                        }
+                        PlaylistAction::Delete { target, force } => {
+                            let lists = ncm.user_playlists(uid).await?;
+                            let (id, name) = resolve_playlist(&lists, target.as_deref())?;
+                            if name == "我喜欢的音乐" {
+                                anyhow::bail!("不能删除「我喜欢的音乐」");
+                            }
+                            if !force
+                                && !ui::confirm(&format!("确认删除歌单「{name}」（含全部歌曲）？"))
+                            {
+                                ui::info("已取消");
+                                return Ok(1);
+                            }
+                            ncm.playlist_delete(id).await?;
+                            ui::ok(&format!("已删除歌单「{name}」"));
+                            Ok(0)
+                        }
+                        PlaylistAction::Rename { target, name } => {
+                            let lists = ncm.user_playlists(uid).await?;
+                            let (id, old) = resolve_playlist(&lists, target.as_deref())?;
+                            ncm.playlist_rename(id, &name).await?;
+                            ui::ok(&format!("「{old}」已改名为「{name}」"));
+                            Ok(0)
+                        }
+                        PlaylistAction::Add { ids, playlist } => {
+                            let lists = ncm.user_playlists(uid).await?;
+                            let (pid, pname) = resolve_playlist(&lists, playlist.as_deref())?;
+                            let mut track_ids = Vec::new();
+                            for s in &ids {
+                                track_ids.push(parse_id_or_url(s)?);
+                            }
+                            ncm.playlist_tracks_op("add", pid, &track_ids).await?;
+                            ui::ok(&format!("已添加 {} 首到「{pname}」", track_ids.len()));
+                            Ok(0)
+                        }
+                        PlaylistAction::Remove { ids, playlist } => {
+                            let lists = ncm.user_playlists(uid).await?;
+                            let (pid, pname) = resolve_playlist(&lists, playlist.as_deref())?;
+                            ncm.playlist_tracks_op("del", pid, &ids).await?;
+                            ui::ok(&format!("已从「{pname}」移除 {} 首", ids.len()));
+                            Ok(0)
+                        }
+                        PlaylistAction::List { .. } => unreachable!("已在上方处理"),
+                    }
                 }
             }
         }

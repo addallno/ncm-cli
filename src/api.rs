@@ -389,7 +389,7 @@ impl Ncm {
             .collect::<Vec<_>>()
             .join(",");
         self.post_form(
-            "/api/playlist/tracks",
+            "/api/playlist/manipulate/tracks",
             &[
                 ("op", op.into()),
                 ("pid", playlist_id.to_string()),
