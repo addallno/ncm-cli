@@ -200,7 +200,7 @@ enum Commands {
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
         /// 音质
-        #[arg(long, default_value = "exhigh", value_parser = ["lossless", "standard", "exhigh", "hires"])]
+        #[arg(long, default_value = "lossless", value_parser = ["lossless", "standard", "exhigh", "hires"])]
         quality: String,
         /// 只输出播放队列 JSON（不调用播放器）
         #[arg(long)]
