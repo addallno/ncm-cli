@@ -19,11 +19,13 @@ const LEGACY_MARK: &str = "36cd479b6b5";
 /// 解析登录凭据，返回可直接放进 Cookie 头的字符串（不含 os=pc 等固定项）
 ///
 /// 优先级：`--session` > `--cookie` > `NCM_SESSION`/`NCM_COOKIE`（调用方已合并到参数）>
-/// 板块绑定的 profile 凭据（`ncm config set profile.<板块> <名>`）> 默认持久化文件
+/// `--user <profile>` 显式指定 > 板块绑定的 profile 凭据（`ncm config set profile.<板块> <名>`）>
+/// 默认持久化文件
 pub fn resolve_auth_for(
     section: &str,
     session: Option<&Path>,
     cookie: Option<&str>,
+    user: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(path) = session {
         let raw = std::fs::read(path)
@@ -38,6 +40,12 @@ pub fn resolve_auth_for(
             bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
         }
         return Ok(Some(c.to_string()));
+    }
+    // --user 显式指定 profile
+    if let Some(prof) = user {
+        return load_profile(Some(prof)).map(Some).ok_or_else(|| {
+            anyhow::anyhow!("profile `{prof}` 不存在或凭据无效，先 ncm login --profile {prof}")
+        });
     }
     // 板块 → profile 映射（如 download 绑 vip）→ 该 profile 凭据
     if let Some(prof) = crate::config::profile_for(section) {
@@ -122,6 +130,27 @@ pub fn saved_cookie_path() -> std::path::PathBuf {
 /// 读取默认 profile 凭据（不存在或损坏返回 None）
 pub fn load_saved() -> Option<String> {
     load_profile(None)
+}
+
+/// 列举全部已保存 profile 名（default 表示默认 cookie 文件）；按名排序
+pub fn list_profiles() -> Vec<String> {
+    let mut out = Vec::new();
+    if load_saved().is_some() {
+        out.push("default".to_string());
+    }
+    if let Ok(rd) = std::fs::read_dir(config_dir()) {
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().into_owned();
+            if let Some(name) = fname.strip_prefix("cookie.") {
+                if !name.is_empty() && load_profile(Some(name)).is_some() {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// 解析 session dump 字节流 → cookie 字符串
@@ -294,13 +323,21 @@ mod persist_tests {
         );
         // profile 回退 resolve：CLI/env 缺省时按板块映射取 cookie
         crate::config::set("profile.download", "vip").unwrap();
-        let auth = resolve_auth_for("download", None, None).unwrap();
+        let auth = resolve_auth_for("download", None, None, None).unwrap();
         assert_eq!(auth.as_deref(), Some("MUSIC_U=vip2; y=2"));
-        let auth = resolve_auth_for("play", None, None).unwrap();
+        let auth = resolve_auth_for("play", None, None, None).unwrap();
         assert_eq!(auth.as_deref(), Some("MUSIC_U=alias; z=3"));
         // CLI 显式参数优先于板块映射
-        let auth = resolve_auth_for("download", None, Some("MUSIC_U=cli; a=1")).unwrap();
+        let auth = resolve_auth_for("download", None, Some("MUSIC_U=cli; a=1"), None).unwrap();
         assert_eq!(auth.as_deref(), Some("MUSIC_U=cli; a=1"));
+        // --user 显式指定优先于板块绑定
+        let auth = resolve_auth_for("download", None, None, Some("vip")).unwrap();
+        assert_eq!(auth.as_deref(), Some("MUSIC_U=vip2; y=2"));
+        // list_profiles 枚举
+        let mut profs = list_profiles();
+        profs.sort();
+        assert!(profs.contains(&"default".to_string()));
+        assert!(profs.contains(&"vip".to_string()));
         let _ = clear_profile(None);
         let _ = clear_profile(Some("vip"));
         let _ = crate::config::unset("profile.download");

@@ -105,6 +105,21 @@ pub fn info(msg: &str) {
     println!("  {}", dim(msg));
 }
 
+/// 交互确认（y/N）；非 TTY 或 quiet/json 模式下直接返回 false（安全默认）
+pub fn confirm(msg: &str) -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || json_mode() || quiet() {
+        return false;
+    }
+    print!("  {} [y/N] ", msg);
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
 /// 中文/全角按 2 列计算的显示宽度
 pub fn display_width(text: &str) -> usize {
     // 剥离 ANSI 转义序列（\x1b[...m），带色单元格也能正确对齐

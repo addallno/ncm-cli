@@ -1,5 +1,5 @@
 //! 歌词：多类型获取、多路径写入、yrc → ASS 转换
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -59,15 +59,21 @@ fn field_of(kind: &str) -> &'static str {
         .unwrap_or("lrc")
 }
 
-/// 拉取并筛选歌词
+/// 拉取并筛选歌词；接口失败（网络耗尽/HTTP错误）上抛，不再静默丢弃
 pub async fn fetch_lrcs(
     ncm: &Ncm,
     song_id: u64,
     wanted: &[&'static str],
-) -> HashMap<&'static str, String> {
+) -> Result<HashMap<&'static str, String>> {
     let data = match ncm.lyric(song_id).await {
         Ok(d) => d,
-        Err(_) => return HashMap::new(),
+        Err(e) => {
+            // 限频/抖动常见：get_json 内层重试后仍失败，退避一次再试
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            ncm.lyric(song_id)
+                .await
+                .with_context(|| format!("歌词接口失败(id={song_id}): {e}"))?
+        }
     };
     let mut got = HashMap::new();
     for kind in wanted {
@@ -78,7 +84,15 @@ pub async fn fetch_lrcs(
             got.insert(*kind, text.to_string());
         }
     }
-    got
+    Ok(got)
+}
+
+/// 选嵌入主歌词：按 lrc → tlyric → romalrc → yrc 固定优先级
+/// （HashMap 遍历顺序随机，不能用 values().next()，否则可能嵌入翻译/罗马音）
+pub fn pick_embed(got: &HashMap<&'static str, String>) -> Option<String> {
+    ["lrc", "tlyric", "romalrc", "yrc"]
+        .into_iter()
+        .find_map(|k| got.get(k).cloned())
 }
 
 /// 把选中歌词写入每个目标目录（每类型独立文件），返回写出的路径
@@ -287,8 +301,11 @@ pub fn parse_lrc_timeline(text: &str) -> Vec<(f64, String)> {
 }
 
 /// 把译文行并入原文时间轴：译文插到同刻原文之后且**沿用原文时间戳**
-/// （player::current_line 靠 `lines[i-1].0 == lines[i].0` 精确相等判配对）；
-/// 找不到同刻原文的译文行丢弃，避免错位成主行
+/// （player::current_line 靠 `lines[i-1].0 == lines[i].0` 精确相等判配对）
+///
+/// 容错：先按时间戳匹配（偏差 ≤0.5s 对齐最近原文，覆盖 tlyric 精度/整体偏移）；
+/// 若几乎全失败（匹配率 <20%）且行数与原文一致，按序配对兜底；
+/// 仍找不到归属的译文行丢弃，避免错位成主行
 pub fn merge_translation(
     orig: Vec<(f64, String)>,
     trans: Vec<(f64, String)>,
@@ -296,13 +313,38 @@ pub fn merge_translation(
     if trans.is_empty() {
         return orig;
     }
+    // 每个译文行找 |Δt| 最小且 ≤0.5s 的原文
+    let match_idx = |t: f64, lines: &[(f64, String)]| -> Option<usize> {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (ot, _))| (ot - t).abs() <= 0.5)
+            .min_by(|a, b| {
+                (a.1 .0 - t)
+                    .abs()
+                    .partial_cmp(&(b.1 .0 - t).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+    };
+    let matched: Vec<(usize, f64, String)> = trans
+        .iter()
+        .filter_map(|(t, text)| match_idx(*t, &orig).map(|i| (i, *t, text.clone())))
+        .collect();
+    // ② 时间戳几乎全错位（如 tlyric 时间戳全为 0 或乱序）且行数一致 → 按序配对
+    if matched.len() * 5 < trans.len() && orig.len() == trans.len() {
+        let mut out = Vec::with_capacity(orig.len() * 2);
+        for ((ts, otext), (_, ttext)) in orig.into_iter().zip(trans) {
+            out.push((ts, otext));
+            out.push((ts, ttext));
+        }
+        return out;
+    }
+    // ① 沿用原文时间戳，插到对应原文之后（后插不干扰先插的相邻判定）
     let mut out = orig;
-    for (t, text) in trans {
-        let Some(idx) = out.iter().rposition(|(ot, _)| (ot - t).abs() <= 0.05) else {
-            continue;
-        };
-        let ts = out[idx].0;
-        out.insert(idx + 1, (ts, text));
+    for (i, _t, text) in matched.into_iter().rev() {
+        let ts = out[i].0;
+        out.insert(i + 1, (ts, text));
     }
     out
 }
@@ -393,13 +435,56 @@ mod timeline_tests {
         assert_eq!(m[0].0, m[1].0);
     }
 
-    /// tlyric 时间戳与原文有微小偏差（≤0.05s）时对齐到原文时间戳
+    /// tlyric 时间戳与原文有微小偏差（≤0.5s）时对齐到最近的原文时间戳
     #[test]
     fn merge_translation_snaps_slight_offset() {
         let orig = vec![(12.5, "原文".into())];
-        let trans = vec![(12.52, "译文".into())];
+        let trans = vec![(12.9, "译文".into())];
         let m = merge_translation(orig, trans);
         assert_eq!(m, vec![(12.5, "原文".into()), (12.5, "译文".into())]);
+    }
+
+    /// tlyric 时间戳整体错位（全 >0.5s）但行数一致 → 按序配对兜底
+    #[test]
+    fn merge_translation_index_fallback_when_all_misaligned() {
+        let orig = vec![(1.0, "A".into()), (5.0, "B".into()), (9.0, "C".into())];
+        let trans = vec![(3.0, "甲".into()), (7.0, "乙".into()), (11.0, "丙".into())];
+        let m = merge_translation(orig, trans);
+        assert_eq!(
+            m,
+            vec![
+                (1.0, "A".into()),
+                (1.0, "甲".into()),
+                (5.0, "B".into()),
+                (5.0, "乙".into()),
+                (9.0, "C".into()),
+                (9.0, "丙".into()),
+            ]
+        );
+    }
+
+    /// 大部分可按时间戳匹配时不用按序兜底（避免孤儿译文错位成主行）
+    #[test]
+    fn merge_translation_prefers_timestamp_when_mostly_matched() {
+        let orig = vec![(1.0, "A".into()), (5.0, "B".into()), (9.0, "C".into())];
+        // 2/3 匹配，1 行孤儿
+        let trans = vec![
+            (1.1, "甲".into()),
+            (5.05, "乙".into()),
+            (99.0, "孤儿".into()),
+        ];
+        let m = merge_translation(orig, trans);
+        assert_eq!(
+            m,
+            vec![
+                (1.0, "A".into()),
+                (1.0, "甲".into()),
+                (5.0, "B".into()),
+                (5.0, "乙".into()),
+                (9.0, "C".into()),
+            ],
+            "孤儿译文丢弃，不按序错位"
+        );
     }
 
     /// 无 tlyric 字段时按纯原文返回
@@ -432,5 +517,24 @@ mod timeline_tests {
     fn timeline_from_lyric_missing_lrc() {
         let v: serde_json::Value = serde_json::json!({"nolyric": true});
         assert!(timeline_from_lyric(&v).is_empty());
+    }
+
+    /// 嵌入优先级：lrc > tlyric > romalrc > yrc（HashMap 顺序无关）
+    #[test]
+    fn pick_embed_priority() {
+        let mut got = HashMap::new();
+        got.insert("yrc", "逐词".to_string());
+        got.insert("tlyric", "翻译".to_string());
+        got.insert("romalrc", "罗马音".to_string());
+        got.insert("lrc", "源语言".to_string());
+        assert_eq!(pick_embed(&got).as_deref(), Some("源语言"));
+        got.remove("lrc");
+        assert_eq!(pick_embed(&got).as_deref(), Some("翻译"));
+        got.remove("tlyric");
+        assert_eq!(pick_embed(&got).as_deref(), Some("罗马音"));
+        got.remove("romalrc");
+        assert_eq!(pick_embed(&got).as_deref(), Some("逐词"));
+        got.remove("yrc");
+        assert!(pick_embed(&got).is_none());
     }
 }

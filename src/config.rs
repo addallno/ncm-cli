@@ -57,7 +57,7 @@ fn save(m: &Map<String, Value>) -> Result<()> {
 /// 键白名单校验
 fn validate_key(key: &str) -> Result<()> {
     match key {
-        "download-dir" | "play.download-key" => Ok(()),
+        "download-dir" | "play.download-key" | "play.like-key" => Ok(()),
         _ => {
             if let Some(sec) = key.strip_prefix("profile.") {
                 if SECTIONS.contains(&sec) {
@@ -65,7 +65,7 @@ fn validate_key(key: &str) -> Result<()> {
                 }
             }
             bail!(
-                "未知配置键 {key}；可用: download-dir, play.download-key, profile.<{}>",
+                "未知配置键 {key}；可用: download-dir, play.download-key, play.like-key, profile.<{}>",
                 SECTIONS.join("|")
             )
         }
@@ -80,6 +80,9 @@ pub fn set(key: &str, value: &str) -> Result<()> {
         bail!("配置值不能为空");
     }
     if key == "play.download-key" && v.chars().any(char::is_whitespace) {
+        bail!("按键名不能含空白");
+    }
+    if key == "play.like-key" && v.chars().any(char::is_whitespace) {
         bail!("按键名不能含空白");
     }
     let mut m = load_all();
@@ -130,6 +133,14 @@ pub fn play_download_key() -> String {
         .unwrap_or_else(|| "d".to_string())
 }
 
+/// 播放快捷收藏键（未配置默认 `l`，mpv 中该键未被占用）
+pub fn play_like_key() -> String {
+    get("play.like-key")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "l".to_string())
+}
+
 /// 板块绑定的会话 profile 名（未绑定返回 None → 回退默认凭据）
 pub fn profile_for(section: &str) -> Option<String> {
     get(&format!("profile.{section}")).ok().flatten()
@@ -169,6 +180,8 @@ pub(crate) mod tests {
         assert!(set("download-dir", "  ").is_err());
         set("play.download-key", "x").unwrap();
         assert!(set("play.download-key", "a b").is_err());
+        set("play.like-key", "x").unwrap();
+        assert!(set("play.like-key", "a b").is_err());
     }
 
     #[test]

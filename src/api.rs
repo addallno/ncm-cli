@@ -59,6 +59,24 @@ impl Ncm {
         Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
     }
 
+    /// form-urlencoded POST（歌单增删改等写操作）；校验 code==200
+    async fn post_form(&self, path: &str, form: &[(&str, String)]) -> Result<Value> {
+        let url = format!("{BASE}{path}");
+        let resp = crate::retry::retry_reqwest(|| self.client.post(&url).form(form).send())
+            .await?
+            .error_for_status()?;
+        let v: Value = resp.json().await.unwrap_or(Value::Null);
+        let code = v["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            let msg = v["message"]
+                .as_str()
+                .or_else(|| v["msg"].as_str())
+                .unwrap_or("");
+            anyhow::bail!("{path} 失败 code={code} {msg}");
+        }
+        Ok(v)
+    }
+
     /// 按 type 搜索；返回 (最终type, 条目)。type=1018 综合：按 result.order 展开各子类
     pub async fn search_typed(
         &self,
@@ -242,8 +260,7 @@ impl Ncm {
         .await
     }
 
-    /// 当前登录用户 uid（未登录返回 None）
-    /// 当前登录用户（uid + 昵称），未登录返回 None
+    /// 当前登录用户（uid + 昵称 + VIP），未登录返回 None
     pub async fn whoami(&self) -> Result<Option<(u64, String)>> {
         let data = self.get_json("/api/nuser/account/get", &[]).await?;
         let uid = match data["profile"]["userId"]
@@ -259,6 +276,12 @@ impl Ncm {
             .unwrap_or("(未知)")
             .to_string();
         Ok(Some((uid, name)))
+    }
+
+    /// 当前登录用户是否 VIP（vipType：0=无 11=黑胶 100=年费）；未登录按非 VIP
+    pub async fn vip_status(&self) -> Result<bool> {
+        let data = self.get_json("/api/nuser/account/get", &[]).await?;
+        Ok(data["profile"]["vipType"].as_i64().unwrap_or(0) != 0)
     }
 
     /// 我的歌单列表（含"我喜欢的音乐"红心歌单，通常为首项）
@@ -319,6 +342,63 @@ impl Ncm {
             anyhow::bail!("私人FM失败 code={code}");
         }
         Ok(data["data"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// 新建歌单；返回新歌单 id
+    pub async fn playlist_create(&self, name: &str) -> Result<u64> {
+        let v = self
+            .post_form("/api/playlist/create", &[("name", name.into())])
+            .await?;
+        v["id"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("创建歌单成功但未返回 id"))
+    }
+
+    /// 删除歌单（含其中全部歌曲，不可恢复）
+    pub async fn playlist_delete(&self, id: u64) -> Result<()> {
+        self.post_form("/api/playlist/delete", &[("id", id.to_string())])
+            .await?;
+        Ok(())
+    }
+
+    /// 歌单改名（只传 name，不动描述/标签）
+    pub async fn playlist_rename(&self, id: u64, name: &str) -> Result<()> {
+        self.post_form(
+            "/api/playlist/update",
+            &[
+                ("id", id.to_string()),
+                ("name", name.into()),
+                ("desc", String::new()),
+                ("tags", String::new()),
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 歌单增删曲目；op = "add" | "del"，trackIds 逗号分隔
+    pub async fn playlist_tracks_op(
+        &self,
+        op: &str,
+        playlist_id: u64,
+        track_ids: &[u64],
+    ) -> Result<()> {
+        let ids = track_ids
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.post_form(
+            "/api/playlist/tracks",
+            &[
+                ("op", op.into()),
+                ("pid", playlist_id.to_string()),
+                ("trackIds", ids),
+                ("imme", "true".into()),
+            ],
+        )
+        .await?;
+        Ok(())
     }
 }
 

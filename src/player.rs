@@ -20,12 +20,13 @@ pub struct LyricTrack {
     pub lines: Vec<(f64, String)>,
 }
 
-/// 播放中按快捷键请求下载当前曲的计数（overlay/消息监听置位，guard_loop 消费）
-#[cfg(unix)]
+/// 快捷下载请求计数（mpv input-conf 绑键触发，guard_loop 消费）
 pub static DOWNLOAD_REQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// 快捷收藏请求计数（mpv input-conf 绑键触发，guard_loop 消费）
+pub static LIKE_REQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// 连接 mpv IPC 并只监听 script-message 快捷下载请求（mpv input-conf 绑键
-/// `script-message ncm-download`）；mpv 退出（EOF）自然结束
+/// 连接 mpv IPC 并只监听 script-message 快捷下载/收藏请求（mpv input-conf 绑键
+/// `script-message ncm-download` / `script-message ncm-like`）；mpv 退出（EOF）自然结束
 ///
 /// 与歌词 overlay 是两个独立客户端，mpv 支持多客户端连接同一 socket
 #[cfg(unix)]
@@ -51,12 +52,24 @@ pub fn spawn_msg_listener(sock: std::path::PathBuf) -> tokio::task::JoinHandle<(
             let Ok(ev) = serde_json::from_str::<Value>(&raw) else {
                 continue;
             };
-            if ev["event"] == "client-message" && ev["args"][0].as_str() == Some("ncm-download") {
-                std::sync::atomic::AtomicUsize::fetch_add(
-                    &DOWNLOAD_REQ,
-                    1,
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+            if ev["event"] == "client-message" {
+                match ev["args"][0].as_str() {
+                    Some("ncm-download") => {
+                        std::sync::atomic::AtomicUsize::fetch_add(
+                            &DOWNLOAD_REQ,
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    Some("ncm-like") => {
+                        std::sync::atomic::AtomicUsize::fetch_add(
+                            &LIKE_REQ,
+                            1,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
     })

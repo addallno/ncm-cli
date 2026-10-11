@@ -44,6 +44,9 @@ struct Cli {
     /// 解锁音源服务地址（UnblockNeteaseMusic-utils；NCM_MIRROR 同效，none=禁用）
     #[arg(long, global = true, value_name = "URL")]
     mirror: Option<String>,
+    /// 指定本次命令使用的 profile 名（优先级高于板块绑定；需已 ncm login --profile 保存）
+    #[arg(short = 'u', long = "user", global = true, value_name = "NAME")]
+    user: Option<String>,
     #[command(subcommand)]
     cmd: Option<Commands>,
 }
@@ -109,6 +112,20 @@ enum Commands {
         limit: u32,
         #[command(flatten)]
         opts: ViewArgs,
+    },
+    /// 歌单管理（需登录；默认操作"我喜欢的音乐"）
+    #[command(visible_alias = "pl")]
+    Playlist {
+        #[command(subcommand)]
+        action: PlaylistAction,
+    },
+    /// 收藏/取消收藏歌曲到"我喜欢的音乐"（需登录）
+    Like {
+        /// 歌曲 ID / 链接，可多个
+        ids: Vec<String>,
+        /// 取消收藏（从红心歌单移除）
+        #[arg(long)]
+        unlike: bool,
     },
     /// 每日推荐歌曲（需登录；下载: ncm download daily · 播放: ncm play daily）
     Daily {
@@ -229,6 +246,47 @@ enum ConfigAction {
     },
 }
 
+/// 歌单管理子命令
+#[derive(Subcommand)]
+enum PlaylistAction {
+    /// 新建歌单
+    Create {
+        /// 歌单名
+        name: String,
+    },
+    /// 删除歌单（含全部歌曲，不可恢复）
+    Delete {
+        /// 歌单名或 ID（默认"我喜欢的音乐"）
+        target: Option<String>,
+        /// 跳过确认直接删除
+        #[arg(long)]
+        force: bool,
+    },
+    /// 歌单改名
+    Rename {
+        /// 歌单名或 ID（默认"我喜欢的音乐"）
+        target: Option<String>,
+        /// 新名称
+        name: String,
+    },
+    /// 添加歌曲到歌单（ID 或链接，可多个）
+    Add {
+        /// 歌曲 ID / 链接，可多个
+        ids: Vec<String>,
+        /// 目标歌单名或 ID（默认"我喜欢的音乐"）
+        #[arg(short = 'p', long = "playlist", value_name = "名或ID")]
+        playlist: Option<String>,
+    },
+    /// 从歌单移除歌曲（ID，可多个）
+    Remove {
+        /// 歌曲 ID，可多个
+        ids: Vec<u64>,
+        /// 目标歌单名或 ID（默认"我喜欢的音乐"）
+        #[arg(short = 'p', long = "playlist", value_name = "名或ID")]
+        playlist: Option<String>,
+    },
+}
+
 /// 浏览类命令（search/list/daily/playlists）的通用输出选项
 #[derive(Args, Clone)]
 struct ViewArgs {
@@ -318,6 +376,8 @@ struct ItemResult {
     bytes: u64,
     skipped: Option<String>,
     error: Option<String>,
+    /// 歌词接口失败原因（音频成功时也报告）
+    lrc_err: Option<String>,
     source: String,
 }
 
@@ -496,6 +556,7 @@ async fn download_one(
         bytes: 0,
         skipped: None,
         error: None,
+        lrc_err: None,
         source: "—".into(),
     };
 
@@ -662,8 +723,18 @@ async fn download_one(
     // 歌词
     if !lrc_kinds.is_empty() {
         let spin = ui::Spinner::start(format!("歌词 · {} 类型", lrc_kinds.len()));
-        let got = lrc::fetch_lrcs(ncm, track.id, lrc_kinds).await;
-        spin.stop();
+        let got = match lrc::fetch_lrcs(ncm, track.id, lrc_kinds).await {
+            Ok(g) => {
+                spin.stop();
+                g
+            }
+            Err(e) => {
+                spin.stop();
+                ui::info(&format!("歌词获取失败（不影响音频）: {e:#}"));
+                result.lrc_err = Some(format!("{e:#}"));
+                std::collections::HashMap::new()
+            }
+        };
         let base = match &result.audio {
             Some(p) => PathBuf::from(p).with_file_name(sanitize(&name)),
             None => output.join(sanitize(&name)),
@@ -678,10 +749,7 @@ async fn download_one(
         };
         let written = lrc::write_lrcs(&got, &base, &dirs);
         result.lrc = written.len();
-        embed_lyrics = got
-            .get("lrc")
-            .cloned()
-            .or_else(|| got.values().next().cloned());
+        embed_lyrics = lrc::pick_embed(&got);
         if got.is_empty() && result.audio.is_none() && result.error.is_none() {
             result.error = Some("无可用歌词".into());
         }
@@ -1130,6 +1198,7 @@ fn report(
                     "source": i.source,
                     "skipped": i.skipped,
                     "error": i.error,
+                    "lrc_error": i.lrc_err,
                 })
             })
             .collect();
@@ -1163,6 +1232,8 @@ fn report(
                 };
                 let note = if let Some(e) = &r.error {
                     ui::truncate_width(e, 30)
+                } else if let Some(e) = &r.lrc_err {
+                    ui::warn(&format!("歌词失败: {}", ui::truncate_width(e, 20)))
                 } else if let Some(s) = &r.skipped {
                     s.clone()
                 } else if r.lrc > 0 {
@@ -1248,6 +1319,30 @@ fn report(
 // 播放在线地址预取窗口：网易直链约 10 分钟过期，只先喂前 N 首，其余随播随取
 const PLAY_PREFETCH: usize = 6;
 
+/// 并发检测已存各 profile 的 VIP，返回第一个 VIP 的 profile 名；全非 VIP/仅 default → None
+async fn detect_vip_profile() -> Option<String> {
+    let profiles = session::list_profiles();
+    if profiles.len() <= 1 {
+        return None;
+    }
+    let checks: Vec<_> = profiles
+        .iter()
+        .map(|p| {
+            let p = p.clone();
+            async move {
+                let cookie = session::load_profile(Some(&p))?;
+                let ncm = api::Ncm::with_cookie(Some(&cookie)).ok()?;
+                let vip = ncm.vip_status().await.unwrap_or(false);
+                vip.then_some(p)
+            }
+        })
+        .collect();
+    let found = futures_util::future::join_all(checks).await;
+    let hit = found.into_iter().flatten().next()?;
+    ui::info(&format!("检测到 profile `{hit}` 为 VIP，自动选用"));
+    Some(hit)
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -1266,7 +1361,9 @@ fn section_of(cmd: Option<&Commands>) -> &'static str {
     match cmd {
         Some(Commands::Search { .. }) => "search",
         Some(Commands::Download { .. }) => "download",
-        Some(Commands::List { .. }) | Some(Commands::Playlists { .. }) => "list",
+        Some(Commands::List { .. })
+        | Some(Commands::Playlists { .. })
+        | Some(Commands::Playlist { .. }) => "list",
         Some(Commands::Daily { .. }) | Some(Commands::Recommend { .. }) => "recommend",
         Some(Commands::Play { target, .. }) => match target.as_str() {
             "roam" => "roam",
@@ -1277,10 +1374,86 @@ fn section_of(cmd: Option<&Commands>) -> &'static str {
     }
 }
 
+/// 歌单目标解析：名称或 ID → (id, name)；target 为 None 时取"我喜欢的音乐"
+fn resolve_playlist(lists: &[Value], target: Option<&str>) -> Result<(u64, String)> {
+    let Some(t) = target else {
+        // 默认红心歌单（subscribed=false 且名称匹配）
+        for p in lists {
+            if p["name"].as_str() == Some("我喜欢的音乐") {
+                return Ok((p["id"].as_u64().unwrap_or(0), "我喜欢的音乐".to_string()));
+            }
+        }
+        // 兜底：第一个自己创建的歌单
+        for p in lists {
+            if p["subscribed"].as_bool() == Some(false) {
+                let name = p["name"].as_str().unwrap_or("").to_string();
+                return Ok((p["id"].as_u64().unwrap_or(0), name));
+            }
+        }
+        anyhow::bail!("未找到歌单，请用 -p 指定");
+    };
+    // 纯数字 → 按 ID 匹配
+    if t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty() {
+        let id: u64 = t.parse()?;
+        for p in lists {
+            if p["id"].as_u64() == Some(id) {
+                let name = p["name"].as_str().unwrap_or("").to_string();
+                return Ok((id, name));
+            }
+        }
+        return Ok((id, t.to_string())); // 不在列表也允许（收藏的歌单等）
+    }
+    // 名称匹配（精确优先，再前缀）
+    for p in lists {
+        if p["name"].as_str() == Some(t) {
+            let name = p["name"].as_str().unwrap_or("").to_string();
+            return Ok((p["id"].as_u64().unwrap_or(0), name));
+        }
+    }
+    for p in lists {
+        if let Some(n) = p["name"].as_str() {
+            if n.starts_with(t) {
+                return Ok((p["id"].as_u64().unwrap_or(0), n.to_string()));
+            }
+        }
+    }
+    anyhow::bail!("未找到歌单「{t}」，可用 ncm playlists 查看")
+}
+
+/// 歌曲 ID / 链接 → u64（纯数字或 URL 尾段）
+fn parse_id_or_url(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty() {
+        return s.parse().map_err(|_| anyhow::anyhow!("无效 ID: {s}"));
+    }
+    if s.starts_with("http") {
+        if let Some(pos) = s.find("?id=") {
+            let id = &s[pos + 4..];
+            let id = id.split(['&', '#']).next().unwrap_or("");
+            if !id.is_empty() {
+                return id
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("无法从链接解析 ID: {s}"));
+            }
+        }
+        let path = s.split('?').next().unwrap_or("");
+        let tail = path.trim_end_matches('/');
+        if let Some((_, last)) = tail.rsplit_once('/') {
+            if !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
+                return last
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("无法从链接解析 ID: {s}"));
+            }
+        }
+    }
+    anyhow::bail!("无法识别的歌曲目标: {s}")
+}
+
 async fn run(cli: Cli) -> Result<i32> {
     ui::set_color(!cli.no_color && std::env::var_os("NO_COLOR").is_none());
     mirror::init(cli.mirror.as_deref());
-    // 登录凭据：--session/--cookie 优先，回退 NCM_SESSION/NCM_COOKIE 环境变量，再按板块绑的 profile
+    // 登录凭据：--session/--cookie 优先，回退 NCM_SESSION/NCM_COOKIE 环境变量，
+    // 再 --user 显式指定，再按板块绑的 profile
     let session = cli
         .session
         .clone()
@@ -1289,10 +1462,21 @@ async fn run(cli: Cli) -> Result<i32> {
         .cookie
         .clone()
         .or_else(|| std::env::var("NCM_COOKIE").ok());
+    // download 且未显式指定凭据时，自动检测已存 profile 的 VIP 并优先
+    let user = if cli.user.is_some()
+        || session.is_some()
+        || cookie.is_some()
+        || !matches!(cli.cmd, Some(Commands::Download { .. }))
+    {
+        cli.user.clone()
+    } else {
+        detect_vip_profile().await
+    };
     let auth = session::resolve_auth_for(
         section_of(cli.cmd.as_ref()),
         session.as_deref(),
         cookie.as_deref(),
+        user.as_deref(),
     )?;
     match cli.cmd {
         Some(Commands::Search {
@@ -1577,8 +1761,13 @@ async fn run(cli: Cli) -> Result<i32> {
             // 快捷下载用 download 板块凭据（可与播放板块不同，如 VIP 下载号）
             #[cfg(unix)]
             let dl_ncm = Ncm::with_cookie(
-                session::resolve_auth_for("download", session.as_deref(), cookie.as_deref())?
-                    .as_deref(),
+                session::resolve_auth_for(
+                    "download",
+                    session.as_deref(),
+                    cookie.as_deref(),
+                    user.as_deref(),
+                )?
+                .as_deref(),
             )?;
 
             // 1) 收集播放队列
@@ -1815,7 +2004,25 @@ async fn run(cli: Cli) -> Result<i32> {
             let n_play = entries.len();
             let n_queue = n_play + pending.len();
             ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
-            // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告）
+            // 红心标记：登录时拉一次"我喜欢的音乐"的 trackIds 集合（尽力而为，失败不阻塞播放）
+            let liked_ids: std::collections::HashSet<u64> = if auth.is_some() {
+                let fetched = async {
+                    let (uid, _) = ncm.whoami().await.ok().flatten()?;
+                    let lists = ncm.user_playlists(uid).await.ok()?;
+                    let (pid, _) = resolve_playlist(&lists, None).ok()?;
+                    let (songs, _) = ncm.playlist(pid).await.ok()?;
+                    Some(
+                        songs
+                            .iter()
+                            .filter_map(|s| s["id"].as_u64())
+                            .collect::<std::collections::HashSet<u64>>(),
+                    )
+                };
+                fetched.await.unwrap_or_default()
+            } else {
+                Default::default()
+            };
+            // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告；已收藏曲标 ♥）
             let show_n = n_play.min(10);
             for (i, (label, _, source, br)) in entries.iter().take(show_n).enumerate() {
                 let br = *br;
@@ -1829,7 +2036,16 @@ async fn run(cli: Cli) -> Result<i32> {
                 } else {
                     String::new()
                 };
-                ui::info(&format!("  {}. {label} · {source}{quality}{trial}", i + 1));
+                // 队列 label 对应 play_tracks[i]（entries 与 play_tracks 同步构造）
+                let heart = if liked_ids.contains(&play_tracks[i].id) {
+                    format!(" {}", ui::warn("♥"))
+                } else {
+                    String::new()
+                };
+                ui::info(&format!(
+                    "  {}. {label}{heart} · {source}{quality}{trial}",
+                    i + 1
+                ));
             }
             if n_queue > show_n {
                 ui::info(&format!("  … 共 {n_queue} 首"));
@@ -1840,8 +2056,9 @@ async fn run(cli: Cli) -> Result<i32> {
             if is_mpv {
                 #[cfg(unix)]
                 ui::info(&format!(
-                    "mpv 键位: 空格 暂停 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · {} 下载当前曲 · q 退出",
-                    config::play_download_key()
+                    "mpv 键位: 空格 暂停 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · {} 下载当前曲 · {} 收藏当前曲 · q 退出",
+                    config::play_download_key(),
+                    config::play_like_key()
                 ));
                 #[cfg(not(unix))]
                 ui::info("mpv 键位: 空格 暂停 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · q 退出");
@@ -1870,12 +2087,16 @@ async fn run(cli: Cli) -> Result<i32> {
             let guard_needed = is_mpv;
             #[cfg(not(unix))]
             let guard_needed = false;
-            // 快捷下载键写入临时 input-conf（mpv 仅取文件中列出的绑定，不影响默认键）
+            // 快捷下载/收藏键写入临时 input-conf（mpv 仅取文件中列出的绑定，不影响默认键）
             #[cfg(unix)]
             let input_conf = if guard_needed {
-                let key = config::play_download_key();
+                let dl_key = config::play_download_key();
+                let like_key = config::play_like_key();
                 let p = std::env::temp_dir().join(format!("ncm-input-{}.conf", std::process::id()));
-                if std::fs::write(&p, format!("{key} script-message ncm-download\n")).is_ok() {
+                let content = format!(
+                    "{dl_key} script-message ncm-download\n{like_key} script-message ncm-like\n"
+                );
+                if std::fs::write(&p, content).is_ok() {
                     args.push(format!("--input-conf={}", p.display()));
                     Some(p)
                 } else {
@@ -2238,6 +2459,81 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Playlist { action }) => {
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let (uid, _) = ncm
+                .whoami()
+                .await?
+                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+            match action {
+                PlaylistAction::Create { name } => {
+                    let id = ncm.playlist_create(&name).await?;
+                    ui::ok(&format!("已创建歌单「{name}」 id={id}"));
+                    Ok(0)
+                }
+                PlaylistAction::Delete { target, force } => {
+                    let lists = ncm.user_playlists(uid).await?;
+                    let (id, name) = resolve_playlist(&lists, target.as_deref())?;
+                    if name == "我喜欢的音乐" {
+                        anyhow::bail!("不能删除「我喜欢的音乐」");
+                    }
+                    if !force && !ui::confirm(&format!("确认删除歌单「{name}」（含全部歌曲）？"))
+                    {
+                        ui::info("已取消");
+                        return Ok(1);
+                    }
+                    ncm.playlist_delete(id).await?;
+                    ui::ok(&format!("已删除歌单「{name}」"));
+                    Ok(0)
+                }
+                PlaylistAction::Rename { target, name } => {
+                    let lists = ncm.user_playlists(uid).await?;
+                    let (id, old) = resolve_playlist(&lists, target.as_deref())?;
+                    ncm.playlist_rename(id, &name).await?;
+                    ui::ok(&format!("「{old}」已改名为「{name}」"));
+                    Ok(0)
+                }
+                PlaylistAction::Add { ids, playlist } => {
+                    let lists = ncm.user_playlists(uid).await?;
+                    let (pid, pname) = resolve_playlist(&lists, playlist.as_deref())?;
+                    let mut track_ids = Vec::new();
+                    for s in &ids {
+                        track_ids.push(parse_id_or_url(s)?);
+                    }
+                    ncm.playlist_tracks_op("add", pid, &track_ids).await?;
+                    ui::ok(&format!("已添加 {} 首到「{pname}」", track_ids.len()));
+                    Ok(0)
+                }
+                PlaylistAction::Remove { ids, playlist } => {
+                    let lists = ncm.user_playlists(uid).await?;
+                    let (pid, pname) = resolve_playlist(&lists, playlist.as_deref())?;
+                    ncm.playlist_tracks_op("del", pid, &ids).await?;
+                    ui::ok(&format!("已从「{pname}」移除 {} 首", ids.len()));
+                    Ok(0)
+                }
+            }
+        }
+        Some(Commands::Like { ids, unlike }) => {
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let (uid, _) = ncm
+                .whoami()
+                .await?
+                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+            if ids.is_empty() {
+                anyhow::bail!("请至少指定一首歌曲 ID");
+            }
+            let mut track_ids = Vec::new();
+            for s in &ids {
+                track_ids.push(parse_id_or_url(s)?);
+            }
+            let lists = ncm.user_playlists(uid).await?;
+            let (pid, _) = resolve_playlist(&lists, None)?;
+            let op = if unlike { "del" } else { "add" };
+            ncm.playlist_tracks_op(op, pid, &track_ids).await?;
+            let verb = if unlike { "取消收藏" } else { "收藏" };
+            ui::ok(&format!("{verb} {} 首到「我喜欢的音乐」", track_ids.len()));
+            Ok(0)
+        }
         // 无子命令（纯 flags 或空参数）：打印帮助
         None => {
             Cli::command().print_help()?;
@@ -2415,6 +2711,32 @@ async fn guard_loop(
                     dl_dir.clone(),
                     quality.clone(),
                 ));
+            }
+        }
+        // 快捷收藏请求：取当前曲加入"我喜欢的音乐"（多次按下合并为一次）
+        if player::LIKE_REQ.swap(0, Ordering::Relaxed) > 0 {
+            let hit = queue
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(pos as usize)
+                .cloned();
+            if let Some((id, label)) = hit {
+                let like_ncm = dl_ncm.clone();
+                tokio::spawn(async move {
+                    if let Ok(Some((uid, _))) = like_ncm.whoami().await {
+                        if let Ok(lists) = like_ncm.user_playlists(uid).await {
+                            if let Ok((pid, _)) = resolve_playlist(&lists, None) {
+                                let _ = like_ncm
+                                    .playlist_tracks_op("add", pid, std::slice::from_ref(&id))
+                                    .await;
+                            }
+                        }
+                    }
+                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                        player::clear_overlay_rows();
+                    }
+                    ui::ok(&format!("已收藏「{label}」到我喜欢的音乐"));
+                });
             }
         }
         if pos + 3 < count {
