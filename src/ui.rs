@@ -8,6 +8,13 @@ pub fn is_tty() -> bool {
     std::io::stdout().is_terminal()
 }
 
+/// 终端列宽；取不到（非 TTY/异常）回退 80
+fn term_width() -> usize {
+    terminal_size::terminal_size_of(std::io::stdout())
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80)
+}
+
 /// JSON 模式：静默全部人类可读输出与动画，保证 stdout 是纯 JSON
 static JSON_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -141,21 +148,42 @@ fn char_width(c: char) -> usize {
     }
 }
 
-/// 按显示宽度截断，超出补省略号
+/// 按显示宽度截断，超出补省略号；ANSI 转义原样保留且不计宽，截断处补重置防串色
 pub fn truncate_width(text: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     if display_width(text) <= max {
         return text.to_string();
     }
     let mut out = String::new();
     let mut w = 0;
+    let mut esc = false;
+    let mut had_esc = false;
+    let budget = max - 1; // 预留 1 列给省略号
     for c in text.chars() {
-        let cw = char_width(c);
-        if w + cw > max - 1 {
+        if esc {
+            out.push(c);
+            if c.is_ascii_alphabetic() {
+                esc = false;
+            }
+            continue;
+        }
+        if c == '\x1b' {
+            esc = true;
+            had_esc = true;
+            out.push(c);
+            continue;
+        }
+        if w + char_width(c) > budget {
             out.push('…');
+            if had_esc {
+                out.push_str("\x1b[0m"); // 截断可能切掉原重置码，补一个
+            }
             return out;
         }
         out.push(c);
-        w += cw;
+        w += char_width(c);
     }
     out
 }
@@ -165,7 +193,32 @@ fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width.saturating_sub(w)))
 }
 
-/// 对齐表格（中文算 2 列）
+/// 把列宽总预算压进 budget（每列至少 4、至少保留 1 列给省略号空间时的下限 4）
+/// 返回是否发生了收缩。纯函数便于测试。
+fn fit_widths(widths: &mut [usize], budget: usize) -> bool {
+    const MIN: usize = 4;
+    let total = |ws: &[usize]| -> usize { ws.iter().map(|w| w + 2).sum() };
+    let mut shrunk = false;
+    while total(widths) > budget {
+        // 缩最宽的一列（无符号，存在性由循环条件保证）
+        let Some(i) = widths
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, &w)| w)
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        if widths[i] <= MIN {
+            break;
+        }
+        widths[i] -= 1;
+        shrunk = true;
+    }
+    shrunk
+}
+
+/// 对齐表格（中文算 2 列）；列宽超出终端宽时按比例收缩 + 单元格截断
 pub fn table(headers: &[&str], rows: &[Vec<String>]) {
     if rows.is_empty() || json_mode() {
         return;
@@ -176,10 +229,14 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) {
             widths[i] = widths[i].max(display_width(cell));
         }
     }
+    // 终端感知：仅 TTY 收缩到屏宽内（管道/重定向保持全宽不截内容），单元格随之截断
+    if is_tty() {
+        fit_widths(&mut widths, term_width().saturating_sub(4)); // 留余量防自动换行
+    }
     let header_line: String = headers
         .iter()
         .enumerate()
-        .map(|(i, h)| format!("  {}", pad(h, widths[i])))
+        .map(|(i, h)| format!("  {}", pad(&truncate_width(h, widths[i]), widths[i])))
         .collect();
     println!("{}", dim(&header_line));
     let rule: String = widths.iter().map(|w| "─".repeat(w + 2)).collect();
@@ -188,7 +245,7 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) {
         let line: String = row
             .iter()
             .enumerate()
-            .map(|(i, cell)| format!("  {}", pad(cell, widths[i])))
+            .map(|(i, cell)| format!("  {}", pad(&truncate_width(cell, widths[i]), widths[i])))
             .collect();
         println!("{line}");
     }
@@ -233,8 +290,10 @@ impl Live {
             return;
         }
         if self.tty {
+            // 按终端列宽截断：整行不换行，\r+\x1b[K 单行刷新才有效（窄屏不刷屏）
+            let clipped = truncate_width(text, term_width().saturating_sub(1));
             let mut out = std::io::stdout();
-            let _ = write!(out, "\r\x1b[K{text}");
+            let _ = write!(out, "\r\x1b[K{clipped}");
             let _ = out.flush();
             self.shown = true;
         } else if force {
@@ -263,6 +322,7 @@ impl Drop for Live {
 }
 
 /// 进度条文本：`██░░ 45.7% · 14.6/30.5 MB · 4.1 MB/s`
+/// bar 宽度随终端列宽自适应（窄屏缩 bar，优先保百分比/大小/速率）
 pub fn progress_line(done: u64, total: u64, started: Instant) -> String {
     let elapsed = started.elapsed().as_secs_f64().max(0.001);
     let ratio = if total > 0 {
@@ -271,12 +331,20 @@ pub fn progress_line(done: u64, total: u64, started: Instant) -> String {
         0.0
     };
     let speed = (done as f64 / elapsed) as u64;
-    let mut parts = vec![render_bar(ratio, 20), format!("{:5.1}%", ratio * 100.0)];
+    let mut parts = vec![format!("{:5.1}%", ratio * 100.0)];
     if total > 0 {
         parts.push(format!("{}/{}", human_size(done), human_size(total)));
     }
     parts.push(format!("{}/s", human_size(speed)));
-    format!("  {}", parts.join(" "))
+    let tail = parts.join(" ");
+    // 预算 = 终端宽 - 1(Live 截断预留) - 2(前导) - tail宽 - 1(空格)；bar 封顶 20
+    let avail = term_width().saturating_sub(1 + 2 + display_width(&tail) + 1);
+    if avail >= 4 {
+        format!("  {} {}", render_bar(ratio, avail.min(20)), tail)
+    } else {
+        // 极窄屏：丢 bar 保数据，超宽由 Live 截断兜底
+        format!("  {tail}")
+    }
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -313,7 +381,9 @@ impl Spinner {
                         frame.to_string()
                     };
                     let mut out = std::io::stdout();
-                    let _ = write!(out, "\r\x1b[K  {painted} {label}");
+                    let line = format!("  {painted} {label}");
+                    let line = truncate_width(&line, term_width().saturating_sub(1));
+                    let _ = write!(out, "\r\x1b[K{line}");
                     let _ = out.flush();
                     i += 1;
                     std::thread::sleep(std::time::Duration::from_millis(90));
@@ -348,5 +418,55 @@ impl Spinner {
 impl Drop for Spinner {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_ansi_keeps_width_and_reset() {
+        let colored = format!("{}{}", accent("你好世界，很长的中文标题"), "的尾巴");
+        let out = truncate_width(&colored, 8);
+        assert!(display_width(&out) <= 8, "截断后显示宽超限: {out:?}");
+        assert!(
+            out.ends_with("\x1b[0m") || !out.contains('\x1b'),
+            "截断色串需补重置码"
+        );
+    }
+
+    #[test]
+    fn truncate_plain_no_change_within_limit() {
+        assert_eq!(truncate_width("short", 10), "short");
+        assert_eq!(truncate_width("x", 0), "");
+    }
+
+    #[test]
+    fn fit_widths_shrinks_widest_to_budget() {
+        let mut ws = vec![2usize, 60, 8];
+        // 总宽 = Σ(w+2) = 4+62+10 = 76 → 压到 40
+        fit_widths(&mut ws, 40);
+        let total: usize = ws.iter().map(|w| w + 2).sum();
+        assert!(total <= 40, "收缩后仍超预算: {ws:?}");
+        assert_eq!(ws[0], 2, "窄列不应被改");
+        assert!(ws[1] >= 4, "最宽列不应低于下限");
+    }
+
+    #[test]
+    fn fit_widths_noop_when_fits() {
+        let mut ws = vec![6usize, 10];
+        assert!(!fit_widths(&mut ws, 100));
+        assert_eq!(ws, vec![6, 10]);
+    }
+
+    #[test]
+    fn progress_line_fits_narrow_terminal() {
+        // 非 TTY 环境 term_width 回退 80；构造大文件进度文本
+        let started = Instant::now();
+        let line = progress_line(3 * (1 << 30), 4 * (1 << 30), started);
+        let w = display_width(&line);
+        assert!(w <= 80, "进度行超 80 列: {w} — {line:?}");
+        assert!(line.contains('%'));
     }
 }

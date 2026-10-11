@@ -2372,6 +2372,15 @@ async fn guard_loop(
     let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
     let mut req_id: u64 = 9000;
     let mut fails: u32 = 0; // 启动期 socket 未就绪的容忍计数
+                            // 会话内已入队曲 id：FM 批次跨次拉取会重复回推已播曲，入队前去重
+    let mut seen: std::collections::HashSet<u64> = queue
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    seen.extend(pending.iter().map(|p| p.track.id));
+    let mut dup_streak: u32 = 0; // 连续整批重复计数（防服务端只回同一批时卡死）
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         // 查询失败 = mpv 未就绪或已退出（连续 3 次才认定退出）
@@ -2421,13 +2430,37 @@ async fn guard_loop(
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 continue;
             }
-            for song in fm {
-                let t = Track::from_json(&song);
-                pending.push_back(PendingItem {
-                    label: format!("{} - {}", t.title, t.artists),
-                    src: PlaySrc::Url(String::new()),
-                    track: t,
-                });
+            let mut added = 0usize;
+            for song in &fm {
+                let t = Track::from_json(song);
+                if seen.insert(t.id) {
+                    pending.push_back(PendingItem {
+                        label: format!("{} - {}", t.title, t.artists),
+                        src: PlaySrc::Url(String::new()),
+                        track: t,
+                    });
+                    added += 1;
+                }
+            }
+            if added == 0 {
+                dup_streak += 1;
+                if dup_streak < 3 {
+                    // 整批与已入队重复：隔 10s 换一批，连 3 批全重复才降级接受防卡死
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    continue;
+                }
+                dup_streak = 0;
+                for song in fm {
+                    let t = Track::from_json(&song);
+                    seen.insert(t.id);
+                    pending.push_back(PendingItem {
+                        label: format!("{} - {}", t.title, t.artists),
+                        src: PlaySrc::Url(String::new()),
+                        track: t,
+                    });
+                }
+            } else {
+                dup_streak = 0;
             }
         }
         // 预追到前方余量 ≥8 首；取址失败的曲跳过换下一首
