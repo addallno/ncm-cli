@@ -21,6 +21,8 @@ thiserror = "2"
 aes = "0.8"
 base64 = "0.22"
 flate2 = "1"
+md5 = "0.7"
+num-bigint = "0.4"
 terminal_size = "0.4"
 # 封面压缩（嵌入前缩放到 ≤1000px 并转 JPEG，防大图导致播放器加载失败）
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

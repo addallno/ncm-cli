@@ -1,11 +1,13 @@
-//! 网易云明文接口封装（无需 weapi/eapi 加密）
+//! 网易云接口封装：读走明文 /api，写走 weapi/eapi 加密通道
 use anyhow::Result;
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::time::Duration;
 
 pub const BASE: &str = "https://music.163.com";
 pub const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+/// eapi 用桌面客户端 UA（pyncm 实测可写）
+const UA_EAPI: &str = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/2.10.2.200154";
 const BATCH: usize = 200;
 
 #[derive(Clone)]
@@ -13,6 +15,10 @@ pub struct Ncm {
     pub client: Client,
     /// 第三方源多为自签证书，单独一个跳过校验的 client
     pub insecure: Client,
+    /// weapi csrf_token（cookie 里的 __csrf，无则空串）
+    csrf: String,
+    /// 登录 cookie 原文（eapi 请求需拼设备指纹 cookie）
+    cookie: String,
 }
 
 impl Ncm {
@@ -23,10 +29,19 @@ impl Ncm {
             reqwest::header::REFERER,
             reqwest::header::HeaderValue::from_static(BASE),
         );
-        let cookie_val = match cookie {
-            Some(c) => format!("os=pc; appver=2.9.7; {c}"),
-            None => "os=pc; appver=2.9.7;".to_string(),
+        let raw = cookie.unwrap_or("").to_string();
+        let cookie_val = if raw.is_empty() {
+            "os=pc; appver=2.9.7;".to_string()
+        } else {
+            format!("os=pc; appver=2.9.7; {raw}")
         };
+        // weapi 需要 cookie 里的 __csrf 作 csrf_token
+        let csrf = raw
+            .split(';')
+            .filter_map(|kv| kv.trim().strip_prefix("__csrf="))
+            .next()
+            .unwrap_or("")
+            .to_string();
         headers.insert(
             reqwest::header::COOKIE,
             reqwest::header::HeaderValue::from_str(&cookie_val)?,
@@ -44,7 +59,12 @@ impl Ncm {
             .timeout(Duration::from_secs(15))
             .dns_resolver(std::sync::Arc::new(crate::dns::FallbackDns::default()))
             .build()?;
-        Ok(Self { client, insecure })
+        Ok(Self {
+            client,
+            insecure,
+            csrf,
+            cookie: raw,
+        })
     }
 
     async fn get_json(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
@@ -59,12 +79,28 @@ impl Ncm {
         Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
     }
 
-    /// form-urlencoded POST（歌单增删改等写操作）；校验 code==200
-    async fn post_form(&self, path: &str, form: &[(&str, String)]) -> Result<Value> {
-        let url = format!("{BASE}{path}");
-        let resp = crate::retry::retry_reqwest(|| self.client.post(&url).form(form).send())
-            .await?
-            .error_for_status()?;
+    /// weapi 写操作：payload 为业务参数（自动附 csrf_token），POST /weapi/<path>
+    async fn post_weapi(
+        &self,
+        path: &str,
+        mut payload: serde_json::Map<String, Value>,
+    ) -> Result<Value> {
+        payload.insert("csrf_token".into(), json!(self.csrf));
+        let (params, enc_sec_key) =
+            crate::crypto::weapi_encrypt(&Value::Object(payload).to_string());
+        let url = format!("{BASE}/weapi{path}");
+        let resp = crate::retry::retry_reqwest(|| {
+            self.client
+                .post(&url)
+                .query(&[("csrf_token", self.csrf.as_str())])
+                .form(&[
+                    ("params", params.as_str()),
+                    ("encSecKey", enc_sec_key.as_str()),
+                ])
+                .send()
+        })
+        .await?
+        .error_for_status()?;
         let v: Value = resp.json().await.unwrap_or(Value::Null);
         let code = v["code"].as_i64().unwrap_or(-1);
         if code != 200 {
@@ -72,7 +108,54 @@ impl Ncm {
                 .as_str()
                 .or_else(|| v["msg"].as_str())
                 .unwrap_or("");
-            anyhow::bail!("{path} 失败 code={code} {msg}");
+            anyhow::bail!("/weapi{path} 失败 code={code} {msg}");
+        }
+        Ok(v)
+    }
+
+    /// eapi 写操作：payload 为业务参数（自动附 header 指纹），POST /eapi/<path>
+    /// 响应可能是明文 JSON 或 AES 密文，均尝试解析
+    async fn post_eapi(
+        &self,
+        path: &str,
+        business: serde_json::Map<String, Value>,
+    ) -> Result<Value> {
+        let mut payload = business;
+        payload.insert("header".into(), json!(crate::crypto::eapi_header_json()));
+        let api_path = format!("/api{path}");
+        let params = crate::crypto::eapi_encrypt(&api_path, &Value::Object(payload).to_string());
+        let url = format!("{BASE}/eapi{path}");
+        // eapi 要求桌面 UA + 设备指纹 cookie（pyncm eapi_config）
+        let eapi_cookie = format!(
+            "os=iPhone OS; appver=10.0.0; osver=16.2; channel=distribution; deviceId=pyncm!; {}",
+            self.cookie
+        );
+        let resp = crate::retry::retry_reqwest(|| {
+            self.client
+                .post(&url)
+                .header(reqwest::header::USER_AGENT, UA_EAPI)
+                .header(reqwest::header::REFERER, "")
+                .header(reqwest::header::COOKIE, &eapi_cookie)
+                .form(&[("params", params.as_str())])
+                .send()
+        })
+        .await?
+        .error_for_status()?;
+        let bytes = resp.bytes().await?;
+        let v: Value = serde_json::from_slice(&bytes)
+            .ok()
+            .or_else(|| {
+                crate::crypto::eapi_decrypt(&bytes)
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            })
+            .unwrap_or(Value::Null);
+        let code = v["code"].as_i64().unwrap_or(-1);
+        if code != 200 {
+            let msg = v["message"]
+                .as_str()
+                .or_else(|| v["msg"].as_str())
+                .unwrap_or("");
+            anyhow::bail!("/eapi{path} 失败 code={code} {msg}");
         }
         Ok(v)
     }
@@ -344,58 +427,68 @@ impl Ncm {
         Ok(data["data"].as_array().cloned().unwrap_or_default())
     }
 
-    /// 新建歌单；返回新歌单 id
+    /// 新建歌单（eapi，pyncm SetCreatePlaylist）；返回新歌单 id
     pub async fn playlist_create(&self, name: &str) -> Result<u64> {
         let v = self
-            .post_form("/api/playlist/create", &[("name", name.into())])
+            .post_eapi(
+                "/playlist/create",
+                serde_json::Map::from_iter([
+                    ("name".into(), json!(name)),
+                    ("privacy".into(), json!("0")),
+                ]),
+            )
             .await?;
         v["id"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("创建歌单成功但未返回 id"))
     }
 
-    /// 删除歌单（含其中全部歌曲，不可恢复）
+    /// 删除歌单（eapi，pyncm SetRemovePlaylist；含其中全部歌曲，不可恢复）
     pub async fn playlist_delete(&self, id: u64) -> Result<()> {
-        self.post_form("/api/playlist/delete", &[("id", id.to_string())])
-            .await?;
-        Ok(())
-    }
-
-    /// 歌单改名（只传 name，不动描述/标签）
-    pub async fn playlist_rename(&self, id: u64, name: &str) -> Result<()> {
-        self.post_form(
-            "/api/playlist/update",
-            &[
-                ("id", id.to_string()),
-                ("name", name.into()),
-                ("desc", String::new()),
-                ("tags", String::new()),
-            ],
+        self.post_eapi(
+            "/playlist/remove",
+            serde_json::Map::from_iter([
+                ("ids".into(), json!(format!("[{id}]"))),
+                ("self".into(), json!("True")),
+            ]),
         )
         .await?;
         Ok(())
     }
 
-    /// 歌单增删曲目；op = "add" | "del"，trackIds 逗号分隔
+    /// 歌单改名（weapi update；只传 name，不动描述/标签）
+    pub async fn playlist_rename(&self, id: u64, name: &str) -> Result<()> {
+        self.post_weapi(
+            "/v1/playlist/update",
+            serde_json::Map::from_iter([
+                ("id".into(), json!(id.to_string())),
+                ("name".into(), json!(name)),
+                ("desc".into(), json!("")),
+                ("tags".into(), json!("")),
+            ]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 歌单增删曲目（weapi，pyncm SetManipulatePlaylistTrack）；op = "add" | "del"
     pub async fn playlist_tracks_op(
         &self,
         op: &str,
         playlist_id: u64,
         track_ids: &[u64],
     ) -> Result<()> {
-        let ids = track_ids
-            .iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        self.post_form(
-            "/api/playlist/manipulate/tracks",
-            &[
-                ("op", op.into()),
-                ("pid", playlist_id.to_string()),
-                ("trackIds", ids),
-                ("imme", "true".into()),
-            ],
+        // pyncm 传 JSON 数组字符串（元素为字符串 id）
+        let ids_json =
+            serde_json::to_string(&track_ids.iter().map(|x| x.to_string()).collect::<Vec<_>>())?;
+        self.post_weapi(
+            "/v1/playlist/manipulate/tracks",
+            serde_json::Map::from_iter([
+                ("trackIds".into(), json!(ids_json)),
+                ("pid".into(), json!(playlist_id.to_string())),
+                ("op".into(), json!(op)),
+                ("imme".into(), json!("true")),
+            ]),
         )
         .await?;
         Ok(())
