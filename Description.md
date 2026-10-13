@@ -15,8 +15,10 @@ CLI 选项与 Python 原型 `ncmt-local` 同名兼容。
 src/
 ├── main.rs      CLI 定义（clap derive）+ 命令分支 + run_batch（download 统一入口）+ 播放队列编排
 ├── searchtype.rs search/recommend 的 type 解析（英文别名表、配额 quotas、统一表行提取 extract_row）
-├── api.rs       明文接口封装（search/detail/playlist/lyric/player_url/daily/user_playlists/whoami），
-│                Ncm::with_cookie 注入登录 Cookie
+├── api.rs       接口封装（读走明文 /api/，写走 weapi/eapi 加密通道），
+│                Ncm::with_cookie 注入登录 Cookie 并解析 __csrf
+├── crypto.rs    weapi/eapi 加密（AES-128-CBC/ECB 手写、RSA 教科书加密、
+│                eapi 响应解密；参数对齐 pyncm 1.8.1）
 ├── session.rs   pyncm session 双格式解析 + 多 profile 凭据持久化（~/.config/ncm/cookie[.<名>]，0600；
 │                resolve_auth_for 优先级 --session --cookie > 板块绑定 profile > 默认文件）
 ├── config.rs    持久化配置（~/.config/ncm/config.json 白名单：download-dir / play.download-key /
