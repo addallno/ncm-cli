@@ -1,11 +1,10 @@
 # ncm — 网易云音乐统一命令行工具
 
-Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`（30+ 依赖包）。
-行为规格源自 Python 原型（`ncmt-local`）的实测验证，CLI 选项同名兼容。
+单二进制网易云客户端：搜索、下载、播放、歌词、歌单管理一站搞定，登录一次全命令复用。
 
 ## 功能
 
-- **浏览 / 下载分工**：`search` `list` `daily` `playlists` `recommend` 只负责看
+- **浏览 / 下载分工**：`search` `list` `daily` `pl list` `recommend` 只负责看
   （表格 / `--json`），`download`（别名 `dl`）是唯一下载入口；
   `-d 1,3,5-8/all/1-` 选择器只在 `download` 出现，TTY 下没给 `-d` 会交互选编号
   （回车仅列出）
@@ -22,7 +21,9 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
   `ncm-id`**（FLAC 为 Vorbis 键，MP3 为 TXXX 帧，凭此可反查歌 ID）；进度条 /
   spinner / 完整性防线（Range → `.part` → 魔数/时长校验 → 全过才落盘）；完成后出结果一览表（`#`/状态/曲目/来源/大小/备注）
   与耗时汇总，管道/脚本下输出干净无 ANSI 裸序列
-- **播放**：`ncm play <ID/链接/关键词|daily|roam>`，队列喂给 mpv（`<`/`>` 切曲、
+- **播放**：`ncm play <ID/链接/关键词|daily|roam>`，支持多目标按序连播
+  （`ncm play "晴天" "七里香" daily`）与 `-f playlist.txt` 文件列表（每行一个目标，
+  `#` 开头跳过，可与命令行目标混用）；队列喂给 mpv（`<`/`>` 切曲、
   `←/→` 快退进、空格暂停、`/` 搜索、`q` 退出；开 `--prefetch-playlist`
   预开下一首，跳过时新曲已就绪不用等缓冲），歌词随播放滚动并按终端宽度
   自适应截行（窄屏不换行叠影）；原文与译文分两行显示（line1 时间+原文，
@@ -41,12 +42,15 @@ Rust 重写版，替代远端 `pyncm`（8.3 MB aarch64 二进制）与 `musicdl`
   `ncm login --profile vip --cookie "..."` + `ncm config set profile.download vip`
 - **持久化配置**：`ncm config set <键> <值>`（不改文件，0600 白名单键）：
   `download-dir` 默认下载目录、`play.download-key` 播放快捷下载键（默认 `d`）、
+  `play.like-key` 播放收藏键（默认 `l`）、
   `profile.<板块>` 会话绑定；`ncm config get/list/unset` 查改删
 - **歌词下载**：`--lrcs lrc,tlyric,romalrc,yrc,ass` 多类型（yrc 转 ASS），
   `--lrc-dir A --lrc-dir B` 多路径，`--only-lrc` 只下歌词（无版权歌照样可用）
 - **信息 / 补全**：`ncm info <ID/链接/关键词>` 看详情（歌名/歌手/专辑/时长/费用/版权），
   `ncm completions bash|zsh|fish|powershell` 生成自动补全脚本
-- **登录后专属**：`ncm playlists`（我的歌单）、`ncm daily`（每日推荐）
+- **登录后专属**：`ncm pl list`（我的歌单）、`ncm daily`（每日推荐）、
+  `ncm pl create/delete/rename/add/remove`（歌单管理）、
+  `ncm like <ID...> [--unlike]`（收藏到红心歌单，播放中 mpv 按 `l` 同效）
 - **VIP / 无版权解锁**：官方取址失败（`-110` 需 VIP / 404 无版权）或仅给 30s 试听时，
   自动回退本机解锁服务（UnblockNeteaseMusic-utils）拿完整直链，来源标 `mirror·xxx`；
   `--mirror <URL|none>` / `NCM_MIRROR` 配置地址（默认 `http://127.0.0.1:3000`）
@@ -66,12 +70,17 @@ ncm download 晴天 -n 20 -d 3        # 扩大候选到 20 首再选第 3 首
 ncm download <歌单链接> -o ~/music  # 歌单批量（TTY 交互选编号，管道下全量）
 ncm list 24381616 -n 30             # 浏览歌单前 30 首（看，不下载）
 ncm daily                           # 浏览每日推荐
+ncm pl list                         # 我的歌单（ncm pl 省略 list 同效）
+ncm pl add 123456 -p 我喜欢的音乐    # 歌单加歌（pl create/delete/rename/remove 同族）
+ncm like 123456                     # 收藏到红心歌单（--unlike 取消）
 ncm download daily -d all           # 每日推荐全部下载
 ncm recommend                       # 首页推荐（默认只列每日推荐歌曲）
 ncm recommend -t toplist,fm -n 20   # 追加榜单与私人FM（见推荐位表）
 ncm play daily --shuffle            # 随机队列播每日推荐
 ncm play roam                       # 私人漫游：FM 歌单 + 无限续播
 ncm play 晴天 -n 5                  # 搜索最相关 5 首连播
+ncm play "晴天" "七里香" daily      # 多目标按序拼接
+ncm play -f queue.txt --shuffle     # 文件列表（每行一个目标，# 注释）
 ncm play 401722227 --quality lossless --save -o ~/music
 ncm play <歌单链接> --json          # 只输出播放队列 JSON
 ncm info 晴天                       # 歌曲详情
@@ -137,7 +146,7 @@ ncm recommend -t fm,radar
 ### `-n` 总条数语义
 
 `-n/--limit` 统一表示**该命令输出的总条数**（多类型 / 多推荐位按类平分，余数给
-前几类）；`0` = 全部（适用处：`search`/`recommend`/`list`/`daily`/`playlists`/
+前几类）；`0` = 全部（适用处：`search`/`recommend`/`list`/`daily`/`pl list`/
 `play`；其中 `search` 单类单次请求上限 100，`recommend` 各源无 limit 参数，
 `0`/大值受服务端单次返回量限制）。`download` 的 `-n`
 是关键词候选取前 N 首（默认 10）。
@@ -167,6 +176,7 @@ ncm recommend -t fm,radar
 | `n` / `p` | 下一首 / 上一首 |
 | `/` | 跳转搜索 |
 | `d` | 下载当前曲（键可改：`ncm config set play.download-key <键>`） |
+| `l` | 收藏/取消收藏当前曲到红心歌单（键可改：`ncm config set play.like-key <键>`） |
 | `q` | 退出 |
 
 歌词同步：`ncm play` 自动拉 LRC 并通过 mpv IPC socket 跟随进度滚动显示
@@ -218,4 +228,4 @@ CI（GitHub Actions）：push 即 fmt/clippy/test，随后产出
 
 `clap` + `clap_complete` + `tokio` + `reqwest(rustls)` + `lofty` + `serde_json` +
 `aes/base64/flate2`（session 解析），无 jq、无 Python；登录可选（不登录也能
-搜索/下载/播放，`daily`/`playlists` 需要登录）。
+搜索/下载/播放，`daily`/`pl list` 需要登录）。
