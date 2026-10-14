@@ -120,7 +120,14 @@ pub fn sanitize(name: &str) -> String {
         })
         .collect();
     let trimmed = cleaned.trim().trim_matches('.').to_string();
-    let mut out: String = trimmed.chars().take(150).collect();
+    // 按字节截断（ext4/NTFS 单文件名上限 255 字节；CJK 每字 3 字节，字符数上限兜不住）
+    let mut out: String = String::new();
+    for c in trimmed.chars().take(150) {
+        if out.len() + c.len_utf8() > 200 {
+            break;
+        }
+        out.push(c);
+    }
     if out.is_empty() {
         out = "unknown".into();
     }
@@ -256,4 +263,25 @@ pub fn first_artist(v: &Value) -> String {
         .and_then(|x| x["name"].as_str())
         .unwrap_or("")
         .to_string()
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    /// CJK 文件名按字节截断：150 个汉字 = 450 字节，必须 <= 255 字节文件名上限
+    #[test]
+    fn sanitize_cjk_respects_byte_limit() {
+        let long: String = "汉".repeat(150);
+        let out = sanitize(&long);
+        assert!(out.len() <= 200, "截断后 {} 字节仍超限", out.len());
+        assert!(!out.is_empty());
+    }
+
+    /// 非法字符替换与全符号名兜底
+    #[test]
+    fn sanitize_replaces_illegal_chars() {
+        assert_eq!(sanitize("a/b:c*"), "a_b_c_");
+        assert_eq!(sanitize("..."), "unknown");
+    }
 }

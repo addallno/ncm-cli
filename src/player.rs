@@ -32,45 +32,42 @@ pub static LIKE_REQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 #[cfg(unix)]
 pub fn spawn_msg_listener(sock: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // mpv 启动后才创建 socket，重试等待（同 overlay，~5s）
-        let stream = {
-            let mut ok = None;
-            for _ in 0..50 {
+        // 持续重连：mpv 启动晚/中途重启/首次 5s 内没起来都不放弃，
+        // 否则首个窗口错过就永久收不到快捷键（mpv 侧按键照发但没人听）
+        loop {
+            let stream = loop {
                 match UnixStream::connect(&sock).await {
-                    Ok(s) => {
-                        ok = Some(s);
-                        break;
-                    }
-                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                    Ok(s) => break s,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
                 }
-            }
-            ok
-        };
-        let Some(stream) = stream else { return };
-        let mut lines = TokioBufReader::new(stream).lines();
-        while let Ok(Some(raw)) = lines.next_line().await {
-            let Ok(ev) = serde_json::from_str::<Value>(&raw) else {
-                continue;
             };
-            if ev["event"] == "client-message" {
-                match ev["args"][0].as_str() {
-                    Some("ncm-download") => {
-                        std::sync::atomic::AtomicUsize::fetch_add(
-                            &DOWNLOAD_REQ,
-                            1,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+            let mut lines = TokioBufReader::new(stream).lines();
+            while let Ok(Some(raw)) = lines.next_line().await {
+                let Ok(ev) = serde_json::from_str::<Value>(&raw) else {
+                    continue;
+                };
+                if ev["event"] == "client-message" {
+                    match ev["args"][0].as_str() {
+                        Some("ncm-download") => {
+                            std::sync::atomic::AtomicUsize::fetch_add(
+                                &DOWNLOAD_REQ,
+                                1,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        Some("ncm-like") => {
+                            std::sync::atomic::AtomicUsize::fetch_add(
+                                &LIKE_REQ,
+                                1,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        _ => {}
                     }
-                    Some("ncm-like") => {
-                        std::sync::atomic::AtomicUsize::fetch_add(
-                            &LIKE_REQ,
-                            1,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                    _ => {}
                 }
             }
+            // EOF：mpv 退出或 socket 被重建，稍等后重连（任务由调用方 abort 收尾）
+            tokio::time::sleep(Duration::from_millis(300)).await;
         }
     })
 }
@@ -135,23 +132,31 @@ pub async fn ipc_send(sock: &Path, cmd: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 漫游用：查询单个属性（按 request_id 匹配回应）；连接失败或属性错误返回 None
+/// 漫游用：查询单个属性（按 request_id 匹配回应）；连接失败、超时或属性错误返回 None
+/// 全程 2s 超时兜底：mpv 卡死/不回包时 guard 不能无限挂在 next_line 上
 #[cfg(unix)]
 pub async fn ipc_get(sock: &Path, prop: &str, req_id: u64) -> Option<Value> {
-    let mut s = UnixStream::connect(sock).await.ok()?;
-    let cmd = format!("{{\"command\":[\"get_property\",\"{prop}\"],\"request_id\":{req_id}}}\n");
-    s.write_all(cmd.as_bytes()).await.ok()?;
-    s.flush().await.ok()?;
-    let mut lines = TokioBufReader::new(s).lines();
-    // mpv 可能先回无关行，最多读 8 条找匹配的 request_id
-    for _ in 0..8 {
-        let raw = lines.next_line().await.ok()??;
-        let v: Value = serde_json::from_str(&raw).ok()?;
-        if v["request_id"].as_u64() == Some(req_id) {
-            return (v["error"].as_str() == Some("success")).then(|| v["data"].clone());
+    let fut = async move {
+        let mut s = UnixStream::connect(sock).await.ok()?;
+        let cmd =
+            format!("{{\"command\":[\"get_property\",\"{prop}\"],\"request_id\":{req_id}}}\n");
+        s.write_all(cmd.as_bytes()).await.ok()?;
+        s.flush().await.ok()?;
+        let mut lines = TokioBufReader::new(s).lines();
+        // mpv 可能先回无关行，最多读 8 条找匹配的 request_id
+        for _ in 0..8 {
+            let raw = lines.next_line().await.ok()??;
+            let v: Value = serde_json::from_str(&raw).ok()?;
+            if v["request_id"].as_u64() == Some(req_id) {
+                return (v["error"].as_str() == Some("success")).then(|| v["data"].clone());
+            }
         }
-    }
-    None
+        None
+    };
+    tokio::time::timeout(Duration::from_secs(2), fut)
+        .await
+        .ok()
+        .flatten()
 }
 
 #[cfg(unix)]

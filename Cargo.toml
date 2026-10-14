@@ -1,6 +1,6 @@
 [package]
 name = "ncm"
-version = "0.3.19"
+version = "0.3.20"
 edition = "2021"
 description = "网易云音乐统一命令行工具（搜索 / 下载 / 歌词 / TUI）"
 license = "MIT"
@@ -8,7 +8,7 @@ license = "MIT"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "sync", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "sync", "net", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip", "brotli"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }

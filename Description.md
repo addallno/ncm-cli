@@ -41,7 +41,7 @@ src/
 | 命令 | 说明 |
 |------|------|
 | `ncm search <kw>` | 纯浏览：表格 / `--json`（下载走 download）；`-t/--type` 逗号分隔多类型（数字与别名混用，如 `1,1000`/`song,playlist`），统一表 + 「类型」列，`-n` 总条数按类平分（0 = 全部，单次上限 100/类）；单 type JSON 为数组、多 type 为 `{"1":[…],"1000":[…]}` 对象 |
-| `ncm download <目标>`（别名 `ncm dl`） | 唯一下载入口：单曲/歌单/专辑/歌手/关键词/`daily`；`-d` 选择器、TTY 交互、`-n` 候选数；完成出结果一览表（状态/来源/大小/失败原因）+ 耗时汇总 |
+| `ncm download <目标>`（别名 `ncm dl`） | 唯一下载入口：单曲/歌单/专辑/歌手/关键词/`daily`；`-d` 选择器、TTY 交互、`-n` 候选数、`-j/--jobs 2..16` 并发下载（>1 关闭逐曲动画）、`--m3u <文件>` 导出 M3U（成功曲目，路径相对列表）；完成出结果一览表（状态/来源/大小/失败原因）+ 耗时汇总；多目标部分解析失败只报该目标并继续，全部失败才整体报错 |
 | `ncm list <目标>` | 纯浏览歌单/专辑/歌手作品列表 |
 | `ncm pl list` | 我创建/收藏的歌单（需登录） |
 | `ncm daily` | 每日推荐浏览（需登录） |
@@ -53,6 +53,12 @@ src/
 | `ncm like [IDS...] [--unlike]` | 收藏/取消收藏歌曲到"我喜欢的音乐"（需登录；ID/链接均可，可多个） |
 | `ncm pl create/delete/rename/add/remove` | 歌单管理（需登录；create 新建、delete 删除含全部歌曲不可恢复、rename 改名、add 添加歌曲、remove 移除歌曲） |
 | `ncm info <目标>` | 歌曲详情（标题行/歌名/歌手/专辑/时长/费用着色/版权），VIP 曲提示 mirror 解锁，`--json` |
+| `ncm comment <ID>` | 歌曲热门评论（明文读接口可匿名；`-n` 条数、`--json`），含昵称/时间/赞数 |
+| `ncm sign [--web]` | 每日签到（需登录；默认移动端 +4 经验，`--web` 网页端 +1） |
+| `ncm subs [-t album,artist]` | 收藏的专辑/歌手列表（需登录；`-t` 逗号分隔选类型，默认两类、`-n` 每类条数） |
+| `ncm mv <ID> [--res 1080] [--play]` | MV 详情 + 播放地址（240/480/720/1080）；`--play` 交 mpv 播放，`--json` 取链接 |
+| `ncm cloud [-n] [--offset]` | 云盘歌曲列表（需登录；标准表，下载用 `ncm download <ID>`，暂不支持上传） |
+| `ncm fm like/trash/skip/get` | 私人FM 操作（需登录）：`like <ID> [--unlike]` 红心、`trash <ID>` 踩、`skip <ID>` 跳过并拉下批、`get -n` 拉取 |
 | `ncm completions <shell>` | 生成 bash/zsh/fish/powershell 补全 |
 
 严格子命令：未知首参由 clap 报 `unrecognized subcommand 'xxx'`（`ncm 123` 不再
@@ -62,6 +68,7 @@ src/
 
 登录凭据优先级：`--session <file>` / `--cookie <str>` > 环境变量 `NCM_SESSION`/`NCM_COOKIE` >
 `-u/--user <名>` 指定 profile（优先级高于板块绑定）> 板块绑定的 profile（`ncm config set profile.<板块> <名>`）> `ncm login` 默认持久化文件。
+板块绑定的 profile 无凭据时报错（不静默回退默认账号）；profile 名仅限 `[A-Za-z0-9._-]`（防路径穿越）；凭据文件以 0600 直接创建。
 播放时自动检测 VIP 账号（若已配置多个 profile）。
 板块判定（`section_of`）：download（别名 dl）=download、play roam=roam、play daily/daily/recommend=recommend、
 search=search、list/playlist=list、其余=default；播放中按下载键用 download 板块凭据下载，按收藏键用当前播放凭据。

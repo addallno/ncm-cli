@@ -37,6 +37,17 @@ pub fn quiet() -> bool {
     QUIET.load(Ordering::Relaxed)
 }
 
+/// 并发下载模式：多任务并行时转圈/行内进度会互相覆盖，整批关闭动画（结果行照常输出）
+static CONCURRENT: AtomicBool = AtomicBool::new(false);
+
+pub fn set_concurrent(v: bool) {
+    CONCURRENT.store(v, Ordering::Relaxed);
+}
+
+pub fn concurrent() -> bool {
+    CONCURRENT.load(Ordering::Relaxed)
+}
+
 /// 颜色开关（--no-color / NO_COLOR）
 static COLOR: AtomicBool = AtomicBool::new(true);
 
@@ -301,7 +312,7 @@ impl Live {
     }
 
     pub fn update(&mut self, text: &str, force: bool) {
-        if json_mode() || quiet() {
+        if json_mode() || quiet() || concurrent() {
             return;
         }
         if self.tty {
@@ -378,9 +389,9 @@ impl Spinner {
             label: label.into(),
             stop: Arc::new(AtomicBool::new(false)),
             handle: None,
-            tty: is_tty() && !json_mode() && !quiet(),
+            tty: is_tty() && !json_mode() && !quiet() && !concurrent(),
         };
-        if json_mode() || quiet() {
+        if json_mode() || quiet() || concurrent() {
             return s;
         }
         if s.tty {

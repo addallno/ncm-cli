@@ -50,7 +50,13 @@
   `ncm completions bash|zsh|fish|powershell` 生成自动补全脚本
 - **登录后专属**：`ncm pl list`（我的歌单）、`ncm daily`（每日推荐）、
   `ncm pl create/delete/rename/add/remove`（歌单管理）、
-  `ncm like <ID...> [--unlike]`（收藏到红心歌单，播放中 mpv 按 `l` 同效）
+  `ncm like <ID...> [--unlike]`（收藏到红心歌单，播放中 mpv 按 `l` 同效）、
+  `ncm sign`（每日签到，移动端 +4 经验，`--web` 网页端 +1）、
+  `ncm subs`（收藏的专辑/歌手列表，`-t album,artist` 选类型）
+- **评论 / 私人FM / 云盘 / MV**：`ncm comment <歌曲ID>` 热门评论（可匿名，
+  `-n` 条数）；`ncm fm like/trash/skip/get` 私人FM 红心/踩/跳过/拉取；
+  `ncm cloud` 云盘歌曲列表（`--offset` 翻页，下载用 `ncm download <ID>`）；
+  `ncm mv <ID>` MV 详情 + 各清晰度地址（`--play` 交给 mpv，`--json` 取链接）
 - **VIP / 无版权解锁**：官方取址失败（`-110` 需 VIP / 404 无版权）或仅给 30s 试听时，
   自动回退本机解锁服务（UnblockNeteaseMusic-utils）拿完整直链，来源标 `mirror·xxx`；
   `--mirror <URL|none>` / `NCM_MIRROR` 配置地址（默认 `http://127.0.0.1:3000`）
@@ -68,11 +74,18 @@ ncm search 晴天 -q -n 3 --json      # 静默 JSON（管道友好）
 ncm download 晴天 -d 1              # 按编号下载搜索结果（别名 ncm dl）
 ncm download 晴天 -n 20 -d 3        # 扩大候选到 20 首再选第 3 首
 ncm download <歌单链接> -o ~/music  # 歌单批量（TTY 交互选编号，管道下全量）
+ncm download daily -j 4 --m3u list.m3u  # 4 路并发下载并导出 M3U 播放列表
 ncm list 24381616 -n 30             # 浏览歌单前 30 首（看，不下载）
 ncm daily                           # 浏览每日推荐
 ncm pl list                         # 我的歌单（ncm pl 省略 list 同效）
 ncm pl add 123456 -p 我喜欢的音乐    # 歌单加歌（pl create/delete/rename/remove 同族）
 ncm like 123456                     # 收藏到红心歌单（--unlike 取消）
+ncm sign                            # 每日签到（+4 经验，--web 网页端 +1）
+ncm comment 27536479                # 歌曲热门评论（可匿名）
+ncm fm get -n 10                    # 私人FM 拉一批（fm like/trash/skip 操作）
+ncm subs                            # 收藏的专辑 + 歌手（-t album 只看一类）
+ncm cloud -n 30                     # 云盘歌曲列表（--offset 翻页）
+ncm mv 5432915 --play               # MV 详情并交给 mpv 播放
 ncm download daily -d all           # 每日推荐全部下载
 ncm recommend                       # 首页推荐（默认只列每日推荐歌曲）
 ncm recommend -t toplist,fm -n 20   # 追加榜单与私人FM（见推荐位表）
@@ -166,6 +179,8 @@ ncm recommend -t fm,radar
 | `-t, --template` | `{artists} - {track}` | 文件名模板 |
 | `--skip-existing` | 关 | 跳过已存在文件 |
 | `--allow-trial` | 关 | 放行 30 秒试听 |
+| `-j, --jobs` | `1` | 并发下载数（2-16；>1 关闭逐曲动画） |
+| `--m3u` | — | 完成后导出 M3U（成功曲目，路径相对列表文件） |
 | `--json` | 关 | 机器可读输出 |
 
 ### mpv 播放键位（`ncm play`）

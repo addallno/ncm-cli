@@ -179,6 +179,68 @@ enum Commands {
         /// 目标 shell
         shell: clap_complete::Shell,
     },
+    /// 歌曲热门评论（需登录；ID / 链接）
+    Comment {
+        /// 歌曲 ID / 链接
+        target: String,
+        /// 显示前 N 条热门评论
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
+    /// 每日签到（需登录；移动端 +4 经验）
+    Sign {
+        /// 网页端签到（+1 经验；默认移动端 +4）
+        #[arg(long)]
+        web: bool,
+    },
+    /// 收藏的专辑 / 歌手列表（需登录）
+    Subs {
+        /// 类型，逗号分隔：album 专辑 / artist 歌手（默认两者）
+        #[arg(
+            short = 't',
+            long = "type",
+            value_delimiter = ',',
+            default_value = "album,artist"
+        )]
+        types: Vec<String>,
+        /// 每类最多条数
+        #[arg(short = 'n', long, default_value_t = 30)]
+        limit: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
+    /// MV 详情与播放地址（--play 直接交给 mpv 播放）
+    Mv {
+        /// MV ID
+        id: u64,
+        /// 清晰度：240/480/720/1080
+        #[arg(long, default_value_t = 1080, value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(["240", "480", "720", "1080"]), |s: String| s.parse::<u32>().unwrap()))]
+        res: u32,
+        /// 用 mpv 播放该 MV
+        #[arg(long)]
+        play: bool,
+        /// 机器可读的 JSON 输出
+        #[arg(long)]
+        json: bool,
+    },
+    /// 云盘歌曲列表（需登录；下载用 ncm download <ID>）
+    Cloud {
+        /// 最多条数
+        #[arg(short = 'n', long, default_value_t = 30)]
+        limit: u32,
+        /// 偏移（翻页）
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
+    /// 私人FM 操作：红心 / 踩 / 跳过（需登录）
+    Fm {
+        #[command(subcommand)]
+        action: FmAction,
+    },
     /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 </> 切曲、←/→ 快退进、歌词同步滚动）
     Play {
         /// 歌曲 ID / 链接 / 关键词（可多个，按序拼接）；daily = 每日推荐，roam = 仅私人漫游（FM 无限续播）
@@ -291,6 +353,38 @@ enum PlaylistAction {
     },
 }
 
+/// 私人FM 操作子命令
+#[derive(Subcommand)]
+enum FmAction {
+    /// 红心当前 FM 歌曲（推荐算法会多推同类）
+    Like {
+        /// 歌曲 ID
+        id: u64,
+        /// 取消红心
+        #[arg(long)]
+        unlike: bool,
+    },
+    /// 踩：移除并少推同类
+    Trash {
+        /// 歌曲 ID
+        id: u64,
+    },
+    /// 跳过：拉下一批 FM 歌曲并列出
+    Skip {
+        /// 当前歌曲 ID（0 = 不上报）
+        #[arg(default_value_t = 0)]
+        id: u64,
+    },
+    /// 拉取一批 FM 歌曲
+    Get {
+        /// 拉取条数
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
+}
+
 /// 浏览类命令（search/list/daily/playlists）的通用输出选项
 #[derive(Args, Clone)]
 struct ViewArgs {
@@ -349,6 +443,12 @@ struct DownloadArgs {
     /// 按编号选择要下载的项：1,3 / 5-8 / 1- / all（download 结果统一生效）
     #[arg(short = 'd', long)]
     download: Option<String>,
+    /// 并发下载数（>1 时关闭逐曲转圈/行内进度，仅保留结果行）
+    #[arg(short = 'j', long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=16))]
+    jobs: u32,
+    /// 下载完成后导出 M3U 播放列表（含成功曲目，路径相对播放列表所在目录）
+    #[arg(long, value_name = "文件")]
+    m3u: Option<PathBuf>,
 }
 
 fn quality_br(q: &str) -> Result<u64> {
@@ -383,6 +483,8 @@ struct ItemResult {
     /// 歌词接口失败原因（音频成功时也报告）
     lrc_err: Option<String>,
     source: String,
+    /// 曲长（毫秒，M3U EXTINF 用）
+    duration_ms: u64,
 }
 
 /// 取播放地址：lossless 先第三方，再回退官方；返回 (row, source, reason, kind)
@@ -562,6 +664,7 @@ async fn download_one(
         error: None,
         lrc_err: None,
         source: "—".into(),
+        duration_ms: track.duration_ms,
     };
 
     let mut row = Value::Null;
@@ -606,7 +709,7 @@ async fn download_one(
     if !opts.only_lrc {
         let audio_base = output.join(sanitize(&name));
         if opts.skip_existing
-            && ["mp3", "flac", "m4a", "wav"]
+            && ["mp3", "flac", "m4a", "wav", "ogg"]
                 .iter()
                 .any(|e| crate::download::append_ext(&audio_base, e).exists())
         {
@@ -849,38 +952,53 @@ async fn run_batch(ncm: &Ncm, targets: Vec<String>, opts: DownloadArgs) -> Resul
     let tty = !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin());
     let interactive = tty && opts.download.is_none();
 
+    // 多目标逐个解析：单个失败记录并继续（全部失败才整体报错），不再一错全盘放弃
+    let mut target_errs: Vec<String> = Vec::new();
     for target in &targets {
-        if target.eq_ignore_ascii_case("daily") || target.eq_ignore_ascii_case("today") {
-            let s = ncm.daily_songs().await?;
-            if s.is_empty() {
-                bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
-            }
-            scope.push(format!("每日推荐({})", s.len()));
-            songs.extend(s);
-        } else if is_target_like(target) {
-            let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
-            scope.push(format!("{desc}({})", found.len()));
-            songs.extend(found);
-        } else {
-            // 关键词：交互或显式 -d 时保留全部候选，否则只取最相关 1 首
-            let n = if interactive || opts.download.is_some() {
-                opts.limit
+        let step: Result<()> =
+            if target.eq_ignore_ascii_case("daily") || target.eq_ignore_ascii_case("today") {
+                let s = ncm.daily_songs().await?;
+                if s.is_empty() {
+                    bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
+                }
+                scope.push(format!("每日推荐({})", s.len()));
+                songs.extend(s);
+                Ok(())
+            } else if is_target_like(target) {
+                let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
+                scope.push(format!("{desc}({})", found.len()));
+                songs.extend(found);
+                Ok(())
             } else {
-                1
+                // 关键词：交互或显式 -d 时保留全部候选，否则只取最相关 1 首
+                let n = if interactive || opts.download.is_some() {
+                    opts.limit
+                } else {
+                    1
+                };
+                if !opts.json {
+                    ui::step(&format!("搜索 “{target}”"));
+                }
+                let found = ncm.search(target, n).await?;
+                if found.is_empty() {
+                    bail!("未搜索到结果: {target}");
+                }
+                scope.push(format!("搜索 “{target}”({})", found.len()));
+                songs.extend(found);
+                Ok(())
             };
-            if !opts.json {
-                ui::step(&format!("搜索 “{target}”"));
-            }
-            let found = ncm.search(target, n).await?;
-            if found.is_empty() {
-                bail!("未搜索到结果: {target}");
-            }
-            scope.push(format!("搜索 “{target}”({})", found.len()));
-            songs.extend(found);
+        if let Err(e) = step {
+            target_errs.push(format!("{target}: {e:#}"));
         }
+    }
+    for e in &target_errs {
+        ui::fail(&format!("目标解析失败 · {e}"));
     }
 
     if songs.is_empty() {
+        if scope.is_empty() && !target_errs.is_empty() {
+            bail!("全部目标解析失败: {}", target_errs.join("；"));
+        }
         if scope.is_empty() {
             bail!("没有可下载的曲目");
         }
@@ -977,29 +1095,23 @@ async fn download_songs(
     let mut items: Vec<ItemResult> = Vec::new();
     let total = songs.len();
     let json_flag = opts.json;
-    for (i, song) in songs.iter().enumerate() {
-        let r = download_one(
-            ncm,
-            song,
-            &opts,
-            &lrc_kinds,
-            &quality,
-            &output,
-            &lrc_dirs,
-            i + 1,
-            total,
-        )
-        .await;
+    // 结果行打印（两分支共用）：按完成顺序输出，编号取自原下标
+    let show = |idx: usize, r: &ItemResult| {
         if json_flag {
             // JSON 模式逐条静默，最后统一输出
         } else if opts.dry_run {
             // dry-run 行已在 download_one 打印
         } else if let Some(s) = &r.skipped {
-            ui::skip(&format!("{}/{} {} · {s}", i + 1, total, truncate(&r.title)));
+            ui::skip(&format!(
+                "{}/{} {} · {s}",
+                idx + 1,
+                total,
+                truncate(&r.title)
+            ));
         } else if let Some(e) = &r.error {
             ui::fail(&format!(
                 "{}/{} {} · {}",
-                i + 1,
+                idx + 1,
                 total,
                 truncate(&r.title),
                 ui::truncate_width(e, 64)
@@ -1022,21 +1134,131 @@ async fn download_songs(
             }
             ui::ok(&format!(
                 "{}/{} {} · {}",
-                i + 1,
+                idx + 1,
                 total,
                 truncate(&r.title),
                 parts.join(" · ")
             ));
         }
-        items.push(r);
+    };
+
+    if opts.jobs > 1 {
+        // 并发分支：--jobs N 限流，结果行按完成顺序即时输出，最后按原下标排序出报告
+        // 注：future 在 for 循环里直接构造（闭包写法会触发 spawn 的 HRTB 泛型提升失败）
+        use futures_util::StreamExt;
+        ui::set_concurrent(true);
+        // 预绑定引用：async move 块内直接用会逐次 move 外层拥有的值
+        let opts_r = &opts;
+        let lrc_kinds_r = &lrc_kinds;
+        let quality_r = &quality;
+        let output_r = &output;
+        let lrc_dirs_r = &lrc_dirs;
+        let mut futs = Vec::with_capacity(songs.len());
+        for (i, song) in songs.iter().enumerate() {
+            let fut = async move {
+                let r = download_one(
+                    ncm,
+                    song,
+                    opts_r,
+                    lrc_kinds_r,
+                    quality_r,
+                    output_r,
+                    lrc_dirs_r,
+                    i + 1,
+                    total,
+                )
+                .await;
+                (i, r)
+            };
+            futs.push(fut);
+        }
+        let mut paired: Vec<(usize, ItemResult)> = Vec::new();
+        let mut stream = futures_util::stream::iter(futs).buffer_unordered(opts.jobs as usize);
+        while let Some((i, r)) = stream.next().await {
+            show(i, &r);
+            paired.push((i, r));
+        }
+        ui::set_concurrent(false);
+        paired.sort_by_key(|(i, _)| *i);
+        items = paired.into_iter().map(|(_, r)| r).collect();
+    } else {
+        for (i, song) in songs.iter().enumerate() {
+            let r = download_one(
+                ncm,
+                song,
+                &opts,
+                &lrc_kinds,
+                &quality,
+                &output,
+                &lrc_dirs,
+                i + 1,
+                total,
+            )
+            .await;
+            show(i, &r);
+            items.push(r);
+        }
+    }
+
+    if let Some(m3u) = &opts.m3u {
+        write_m3u(m3u, &items)?;
     }
 
     let code = report(&items, &opts, &output, started.elapsed())?;
     Ok((code, items))
 }
 
+/// 导出 M3U 播放列表：仅成功下载的曲目，路径相对播放列表所在目录（无法相对时用绝对路径）
+fn write_m3u(path: &std::path::Path, items: &[ItemResult]) -> Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir)?;
+        }
+    }
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let mut out = String::from("#EXTM3U\n");
+    let mut n = 0usize;
+    for it in items.iter().filter(|i| i.audio.is_some()) {
+        let audio = std::path::Path::new(it.audio.as_deref().unwrap_or(""));
+        let rel = audio.strip_prefix(&base).unwrap_or(audio);
+        out.push_str(&format!(
+            "#EXTINF:{},{title} - {artists}\n{file}\n",
+            (it.duration_ms / 1000).min(i64::MAX as u64),
+            title = it.title,
+            artists = it.artists,
+            file = rel.display(),
+        ));
+        n += 1;
+    }
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(out.as_bytes())?;
+    ui::ok(&format!("M3U 导出 {n} 首 → {}", path.display()));
+    Ok(())
+}
+
 fn truncate(s: &str) -> String {
     ui::truncate_width(s, 30)
+}
+
+/// Unix 秒 → "YYYY-MM-DD"（Howard Hinnant 民用历算法，无 chrono 依赖）
+fn fmt_unix_date(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn print_search_table(songs: &[Value]) {
@@ -1915,6 +2137,8 @@ async fn run(cli: Cli) -> Result<i32> {
                     artist: false,
                     json: false,
                     download: None,
+                    jobs: 1,
+                    m3u: None,
                 };
                 let (_code, items) = download_songs(
                     &ncm,
@@ -2427,6 +2651,278 @@ async fn run(cli: Cli) -> Result<i32> {
             clap_complete::generate(shell, &mut cmd, "ncm", &mut std::io::stdout());
             Ok(0)
         }
+        Some(Commands::Comment {
+            target,
+            limit,
+            opts,
+        }) => {
+            ui::set_json(opts.json);
+            ui::set_quiet(opts.quiet);
+            let id = parse_id_or_url(&target)?;
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let (hot, total) = ncm.song_comments(id, limit).await?;
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "id": id, "total": total, "hot_comments": hot
+                    }))?
+                );
+                return Ok(0);
+            }
+            if hot.is_empty() {
+                ui::info(&format!("歌曲 {id} 暂无热门评论（总评论 {total} 条）"));
+                return Ok(0);
+            }
+            for (i, c) in hot.iter().enumerate() {
+                let user = c["user"]["nickname"].as_str().unwrap_or("匿名");
+                let liked = c["likedCount"].as_u64().unwrap_or(0);
+                let time = c["time"].as_i64().unwrap_or(0);
+                let date = if time > 0 {
+                    fmt_unix_date(time / 1000)
+                } else {
+                    String::new()
+                };
+                let content = c["content"].as_str().unwrap_or("");
+                println!(
+                    "{}. {} {} 赞{}",
+                    ui::accent(&(i + 1).to_string()),
+                    ui::accent(user),
+                    ui::dim(&date),
+                    ui::dim(&liked.to_string())
+                );
+                println!("   {content}");
+            }
+            if !opts.quiet {
+                ui::info(&format!(
+                    "热门 {}/{total} 条 · 查看全部: ncm comment {id} -n 20",
+                    hot.len()
+                ));
+            }
+            Ok(0)
+        }
+        Some(Commands::Sign { web }) => {
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let (uid, _) = ncm
+                .whoami()
+                .await?
+                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+            let dtype = if web { 1 } else { 0 };
+            let point = ncm.daily_signin(dtype).await?;
+            let kind = if web { "网页端" } else { "移动端" };
+            ui::ok(&format!("{kind}签到成功 uid={uid} +{point} 经验"));
+            Ok(0)
+        }
+        Some(Commands::Subs { types, limit, opts }) => {
+            ui::set_json(opts.json);
+            ui::set_quiet(opts.quiet);
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            ncm.whoami()
+                .await?
+                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+            let want_album = types.iter().any(|t| t.eq_ignore_ascii_case("album"));
+            let want_artist = types.iter().any(|t| t.eq_ignore_ascii_case("artist"));
+            let (albums, artists) = tokio::try_join!(
+                async {
+                    if want_album {
+                        ncm.album_subs(limit).await
+                    } else {
+                        Ok(vec![])
+                    }
+                },
+                async {
+                    if want_artist {
+                        ncm.artist_subs(limit).await
+                    } else {
+                        Ok(vec![])
+                    }
+                },
+            )?;
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "albums": albums, "artists": artists
+                    }))?
+                );
+                return Ok(0);
+            }
+            if !albums.is_empty() {
+                println!("{}", ui::accent("收藏的专辑"));
+                let rows: Vec<Vec<String>> = albums
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        vec![
+                            (i + 1).to_string(),
+                            a["name"].as_str().unwrap_or("").to_string(),
+                            a["artist"]["name"].as_str().unwrap_or("").to_string(),
+                            a["size"].as_u64().unwrap_or(0).to_string(),
+                            a["id"].as_u64().unwrap_or(0).to_string(),
+                        ]
+                    })
+                    .collect();
+                ui::table(&["#", "专辑名", "歌手", "曲数", "ID"], &rows);
+                println!();
+            }
+            if !artists.is_empty() {
+                println!("{}", ui::accent("收藏的歌手"));
+                let rows: Vec<Vec<String>> = artists
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        vec![
+                            (i + 1).to_string(),
+                            a["name"].as_str().unwrap_or("").to_string(),
+                            a["musicSize"].as_u64().unwrap_or(0).to_string(),
+                            a["albumSize"].as_u64().unwrap_or(0).to_string(),
+                            a["id"].as_u64().unwrap_or(0).to_string(),
+                        ]
+                    })
+                    .collect();
+                ui::table(&["#", "歌手名", "歌曲数", "专辑数", "ID"], &rows);
+            }
+            if albums.is_empty() && artists.is_empty() {
+                ui::info("没有收藏的专辑/歌手");
+            }
+            Ok(0)
+        }
+        Some(Commands::Mv {
+            id,
+            res,
+            play,
+            json,
+        }) => {
+            ui::set_json(json);
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let detail = ncm.mv_detail(id).await?;
+            let url_v = ncm.mv_url(id, res).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({"detail": detail, "url": url_v}))?
+                );
+                return Ok(0);
+            }
+            let name = detail["name"].as_str().unwrap_or("");
+            let artist = detail["artistName"]
+                .as_str()
+                .or_else(|| detail["artists"][0]["name"].as_str())
+                .unwrap_or("");
+            let dur = detail["duration"].as_u64().unwrap_or(0);
+            println!("{} - {} {}", ui::accent(name), artist, ui::dim(&hms(dur)));
+            let url = url_v["url"].as_str().unwrap_or("");
+            if url.is_empty() {
+                ui::fail("该 MV 无可用播放地址（版权/地区限制）");
+                return Ok(1);
+            }
+            if play {
+                let (prog, extra) =
+                    find_player(None).context("未找到 mpv/ffplay，可用 --json 拿地址手动播放")?;
+                let status = tokio::process::Command::new(&prog)
+                    .args(&extra)
+                    .arg("--no-video=never")
+                    .arg(url)
+                    .status()
+                    .await
+                    .with_context(|| format!("启动播放器 {prog} 失败"))?;
+                if !status.success() {
+                    ui::fail("MV 播放器异常退出");
+                    return Ok(1);
+                }
+            } else {
+                println!("{}", ui::accent(url));
+                if !ui::quiet() {
+                    ui::info("播放: ncm mv <ID> --play");
+                }
+            }
+            Ok(0)
+        }
+        Some(Commands::Cloud {
+            limit,
+            offset,
+            opts,
+        }) => {
+            ui::set_json(opts.json);
+            ui::set_quiet(opts.quiet);
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            ncm.whoami()
+                .await?
+                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+            let (songs, count) = ncm.cloud_songs(limit, offset).await?;
+            if opts.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({"count": count, "songs": songs}))?
+                );
+                return Ok(0);
+            }
+            if songs.is_empty() {
+                ui::info("云盘为空");
+                return Ok(0);
+            }
+            print_search_table(&songs);
+            if !opts.quiet {
+                ui::info(&format!(
+                    "云盘 {}/{} 条 · 翻页: --offset {} · 下载: ncm download <ID>",
+                    songs.len(),
+                    count,
+                    offset + limit
+                ));
+            }
+            Ok(0)
+        }
+        Some(Commands::Fm { action }) => match action {
+            FmAction::Like { id, unlike } => {
+                let ncm = Ncm::with_cookie(auth.as_deref())?;
+                ncm.whoami()
+                    .await?
+                    .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+                ncm.fm_like(id, !unlike).await?;
+                let verb = if unlike { "取消红心" } else { "红心" };
+                ui::ok(&format!("FM {verb} 曲目 {id}"));
+                Ok(0)
+            }
+            FmAction::Trash { id } => {
+                let ncm = Ncm::with_cookie(auth.as_deref())?;
+                ncm.whoami()
+                    .await?
+                    .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+                ncm.fm_trash(id).await?;
+                ui::ok(&format!("已踩曲目 {id}，将少推同类"));
+                Ok(0)
+            }
+            FmAction::Skip { id } => {
+                let ncm = Ncm::with_cookie(auth.as_deref())?;
+                ncm.whoami()
+                    .await?
+                    .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+                if id > 0 {
+                    ncm.fm_skip(id).await?;
+                }
+                let songs = ncm.radio_songs().await?;
+                print_search_table(&songs);
+                Ok(0)
+            }
+            FmAction::Get { limit, opts } => {
+                ui::set_json(opts.json);
+                ui::set_quiet(opts.quiet);
+                let ncm = Ncm::with_cookie(auth.as_deref())?;
+                ncm.whoami()
+                    .await?
+                    .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
+                let mut songs = ncm.radio_songs().await?;
+                if limit > 0 {
+                    songs.truncate(limit as usize);
+                }
+                if opts.json {
+                    println!("{}", serde_json::to_string_pretty(&Value::Array(songs))?);
+                    return Ok(0);
+                }
+                print_search_table(&songs);
+                Ok(0)
+            }
+        },
         Some(Commands::Playlist { action }) => {
             let action = action.unwrap_or(PlaylistAction::List {
                 limit: 50,
@@ -2617,6 +3113,7 @@ impl PlaySrc {
 }
 
 /// 并发批量取播放地址；返回与输入等长的 Ok(url, br, source) / Err(原因)
+/// 信号量限 8 并发：无上限 join_all 会瞬间打满接口触发风控
 async fn fetch_urls(
     ncm: &Ncm,
     tracks: &[Track],
@@ -2624,7 +3121,10 @@ async fn fetch_urls(
 ) -> Vec<Result<(String, u64, String), String>> {
     use futures_util::future::join_all;
     let wanted_flac = matches!(quality, "lossless" | "hires");
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+    let sem = &sem;
     join_all(tracks.iter().map(|t| async move {
+        let _permit = sem.acquire().await.expect("信号量未关闭");
         let (row, source, reason, _) = fetch_row(ncm, t.id, quality, true, wanted_flac, true).await;
         let row = row.ok_or(reason)?;
         let url = row["url"]
@@ -2684,6 +3184,8 @@ async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, qual
         artist: false,
         json: false,
         download: None,
+        jobs: 1,
+        m3u: None,
     };
     if let Err(e) = download_songs(&ncm, songs, vec![format!("快捷下载 · {label}")], opts).await
     {
@@ -2726,15 +3228,12 @@ async fn guard_loop(
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         // 查询失败 = mpv 未就绪或已退出（连续 3 次才认定退出）
+        // 注意：仅 ipc 调用 Err 计失败；pos=-1 是 mpv 空闲/空队列的合法值，不当断连
         req_id += 1;
-        let pos = player::ipc_get(&sock, "playlist-pos", req_id)
-            .await
-            .and_then(|v| v.as_u64());
+        let pos_v = player::ipc_get(&sock, "playlist-pos", req_id).await;
         req_id += 1;
-        let count = player::ipc_get(&sock, "playlist-count", req_id)
-            .await
-            .and_then(|v| v.as_u64());
-        let (Some(pos), Some(mut count)) = (pos, count) else {
+        let count_v = player::ipc_get(&sock, "playlist-count", req_id).await;
+        let (Some(pos_v), Some(count_v)) = (pos_v, count_v) else {
             fails += 1;
             if fails >= 3 {
                 return;
@@ -2742,6 +3241,10 @@ async fn guard_loop(
             continue;
         };
         fails = 0;
+        let Some(pos) = pos_v.as_i64().filter(|&p| p >= 0).map(|p| p as u64) else {
+            continue; // 队列空/空闲：mpv 还活着，等下轮
+        };
+        let mut count = count_v.as_u64().unwrap_or(0);
         // 快捷下载请求：取当前曲 spawn 独立下载，不阻塞续曲轮询（多次按下合并为一次）
         if player::DOWNLOAD_REQ.swap(0, Ordering::Relaxed) > 0 {
             let hit = queue
@@ -2916,6 +3419,15 @@ fn shuffle_by_time(v: &mut [Value]) {
 mod cli_tests {
     use super::*;
     use clap::Parser;
+
+    /// Unix 秒 → 日期：已知时间点与闰年边界
+    #[test]
+    fn fmt_unix_date_known_points() {
+        assert_eq!(fmt_unix_date(0), "1970-01-01");
+        assert_eq!(fmt_unix_date(1_760_000_000), "2025-10-09");
+        assert_eq!(fmt_unix_date(1_709_164_800), "2024-02-29"); // 闰日
+        assert_eq!(fmt_unix_date(-86_400), "1969-12-31"); // 负数（1970 前）
+    }
 
     /// 未知首参不再注入 dl，由 clap 报 unrecognized subcommand
     #[test]

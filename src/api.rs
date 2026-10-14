@@ -452,9 +452,148 @@ impl Ncm {
         let data = self.get_json("/api/v1/radio/get", &[]).await?;
         let code = data["code"].as_i64().unwrap_or(-1);
         if code != 200 {
-            anyhow::bail!("私人FM失败 code={code}");
+            anyhow::bail!("私人FM失败 code={code}（需登录：ncm login）");
         }
         Ok(data["data"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// 歌曲评论（明文读接口，可匿名）；返回 (热门评论列表, 总数)
+    pub async fn song_comments(&self, song_id: u64, limit: u32) -> Result<(Vec<Value>, u64)> {
+        let v = self
+            .get_json(
+                &format!("/api/v1/resource/comments/R_SO_4_{song_id}"),
+                &[
+                    ("rid", song_id.to_string()),
+                    ("offset", "0".into()),
+                    ("total", "true".into()),
+                    ("limit", limit.to_string()),
+                    ("beforeTime", "0".into()),
+                ],
+            )
+            .await?;
+        let total = v["total"].as_u64().unwrap_or(0);
+        let hot = v["hotComments"].as_array().cloned().unwrap_or_default();
+        Ok((hot, total))
+    }
+
+    /// 私人FM 跳过（eapi，pyncm SetSkipRadioContent）
+    pub async fn fm_skip(&self, song_id: u64) -> Result<()> {
+        self.post_eapi(
+            "/v1/radio/get",
+            serde_json::Map::from_iter([
+                ("e_r".into(), json!("true")),
+                ("songId".into(), json!(song_id.to_string())),
+                ("alg".into(), json!("itembased")),
+                ("time".into(), json!("0")),
+            ]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 私人FM 红心/取消红心（eapi，pyncm SetLikeRadioContent）
+    pub async fn fm_like(&self, track_id: u64, like: bool) -> Result<()> {
+        self.post_eapi(
+            "/v1/radio/like",
+            serde_json::Map::from_iter([
+                ("e_r".into(), json!("true")),
+                ("like".into(), json!(like.to_string().to_lowercase())),
+                ("trackId".into(), json!(track_id.to_string())),
+                ("alg".into(), json!("itembased")),
+                ("time".into(), json!("0")),
+            ]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 私人FM 踩/移除（eapi，pyncm SetTrashRadioContent）
+    pub async fn fm_trash(&self, song_id: u64) -> Result<()> {
+        self.post_eapi(
+            "/v1/radio/trash/add",
+            serde_json::Map::from_iter([
+                ("e_r".into(), json!("true")),
+                ("songId".into(), json!(song_id.to_string())),
+                ("alg".into(), json!("itembased")),
+                ("time".into(), json!("0")),
+            ]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 每日签到（weapi，pyncm SetSignin）；type 0=移动端+4经验 1=网页端+1经验；返回获得经验数
+    pub async fn daily_signin(&self, dtype: u8) -> Result<i64> {
+        let v = self
+            .post_weapi(
+                "/point/dailyTask",
+                serde_json::Map::from_iter([("type".into(), json!(dtype.to_string()))]),
+            )
+            .await?;
+        Ok(v["point"].as_i64().unwrap_or(0))
+    }
+
+    /// 收藏的专辑列表（weapi，pyncm GetUserAlbumSubs）
+    pub async fn album_subs(&self, limit: u32) -> Result<Vec<Value>> {
+        let v = self
+            .post_weapi(
+                "/album/sublist",
+                serde_json::Map::from_iter([("limit".into(), json!(limit.to_string()))]),
+            )
+            .await?;
+        Ok(v["data"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// 收藏的歌手列表（weapi，pyncm GetUserArtistSubs）
+    pub async fn artist_subs(&self, limit: u32) -> Result<Vec<Value>> {
+        let v = self
+            .post_weapi(
+                "/artist/sublist",
+                serde_json::Map::from_iter([("limit".into(), json!(limit.to_string()))]),
+            )
+            .await?;
+        Ok(v["data"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// MV 详情（weapi，pyncm GetMVDetail）
+    pub async fn mv_detail(&self, mv_id: u64) -> Result<Value> {
+        let v = self
+            .post_weapi(
+                "/v1/mv/detail",
+                serde_json::Map::from_iter([("id".into(), json!(mv_id.to_string()))]),
+            )
+            .await?;
+        Ok(v["data"].clone())
+    }
+
+    /// MV 播放地址（weapi，pyncm GetMVResource）；res = 240/480/720/1080
+    pub async fn mv_url(&self, mv_id: u64, res: u32) -> Result<Value> {
+        let v = self
+            .post_weapi(
+                "/song/enhance/play/mv/url",
+                serde_json::Map::from_iter([
+                    ("id".into(), json!(mv_id.to_string())),
+                    ("r".into(), json!(res.to_string())),
+                ]),
+            )
+            .await?;
+        Ok(v["data"].clone())
+    }
+
+    /// 云盘歌曲列表（weapi，pyncm GetCloudDriveInfo）；返回 (歌曲列表, 总数)
+    pub async fn cloud_songs(&self, limit: u32, offset: u32) -> Result<(Vec<Value>, u64)> {
+        let v = self
+            .post_weapi(
+                "/v1/cloud/get",
+                serde_json::Map::from_iter([
+                    ("limit".into(), json!(limit.to_string())),
+                    ("offset".into(), json!(offset.to_string())),
+                ]),
+            )
+            .await?;
+        let count = v["count"].as_u64().unwrap_or(0);
+        let songs = v["data"].as_array().cloned().unwrap_or_default();
+        Ok((songs, count))
     }
 
     /// 新建歌单（eapi，pyncm SetCreatePlaylist）；返回新歌单 id

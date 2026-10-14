@@ -52,9 +52,27 @@ pub fn resolve_auth_for(
         if let Some(c) = load_profile(Some(&prof)) {
             return Ok(Some(c));
         }
+        // 绑定的 profile 没有凭据：显式报错，不能静默回退默认账号
+        // （否则会用错账号继续跑，排查成本远高于失败本身）
+        bail!(
+            "板块 `{section}` 绑定的 profile `{prof}` 无凭据（profile.{section}={prof}），\
+             先 `ncm login --profile {prof}`，或 ncm config set profile.{section} 换绑"
+        );
     }
     // 回退：ncm login 持久化的默认凭据
     Ok(load_saved())
+}
+
+/// profile 名合法性：仅 [A-Za-z0-9._-] 且非 `.`/`..`、非空、≤64 字符
+/// （cookie.{name} 会拼进文件路径，放行 `/`、`\`、`..` 等可路径穿越出配置目录）
+fn valid_profile_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// 某 profile 的凭据文件路径；`None`/`default` 即默认 profile（兼容旧 `cookie` 文件）
@@ -65,8 +83,13 @@ pub fn cookie_path(profile: Option<&str>) -> std::path::PathBuf {
     }
 }
 
-/// 读取指定 profile 凭据（不存在或损坏返回 None）
+/// 读取指定 profile 凭据（不存在、损坏或非法名返回 None）
 pub fn load_profile(profile: Option<&str>) -> Option<String> {
+    if let Some(name) = profile {
+        if name != "default" && !valid_profile_name(name) {
+            return None;
+        }
+    }
     let txt = std::fs::read_to_string(cookie_path(profile)).ok()?;
     let t = txt.trim();
     if t.contains('=') {
@@ -82,6 +105,11 @@ pub fn save_profile(profile: Option<&str>, cookie: &str) -> Result<std::path::Pa
     if !c.contains('=') {
         bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
     }
+    if let Some(name) = profile {
+        if name != "default" && !valid_profile_name(name) {
+            bail!("非法 profile 名 \"{name}\"（仅限字母/数字/._-，不能含路径分隔符）");
+        }
+    }
     let dir = config_dir();
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("创建配置目录失败: {}", dir.display()))?;
@@ -91,13 +119,26 @@ pub fn save_profile(profile: Option<&str>, cookie: &str) -> Result<std::path::Pa
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
     let path = cookie_path(profile);
-    std::fs::write(&path, format!("{c}\n"))
-        .with_context(|| format!("写入凭据失败: {}", path.display()))?;
+    // 新建文件直接以 0600 创建（避免"先写后 chmod"期间以默认权限裸奔）；
+    // 已存在的旧文件再补一次 chmod 覆盖历史权限
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let payload = format!("{c}\n");
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("写入凭据失败: {}", path.display()))?;
+        std::io::Write::write_all(&mut f, payload.as_bytes())
+            .with_context(|| format!("写入凭据失败: {}", path.display()))?;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(not(unix))]
+    std::fs::write(&path, format!("{c}\n"))
+        .with_context(|| format!("写入凭据失败: {}", path.display()))?;
     Ok(path)
 }
 
@@ -300,6 +341,25 @@ mod persist_tests {
         assert!(save_profile(None, "bad").is_err());
         assert!(clear_profile(None).unwrap());
         assert!(!clear_profile(None).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 非法 profile 名拒绝写入/读取（路径穿越防护）
+    #[test]
+    fn rejects_path_traversal_profile_names() {
+        let _g = crate::config::tests::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ncm-trav-test-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        for bad in ["../evil", "a/b", "a\\b", "..", ".", ""] {
+            assert!(
+                save_profile(Some(bad), "MUSIC_U=x; y=1").is_err(),
+                "应拒绝 {bad:?}"
+            );
+            assert!(load_profile(Some(bad)).is_none(), "{bad:?} 不应读到内容");
+        }
+        assert!(valid_profile_name("vip-2_a.b"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
