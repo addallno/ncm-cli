@@ -608,7 +608,7 @@ async fn download_one(
         if opts.skip_existing
             && ["mp3", "flac", "m4a", "wav"]
                 .iter()
-                .any(|e| audio_base.with_extension(e).exists())
+                .any(|e| crate::download::append_ext(&audio_base, e).exists())
         {
             result.skipped = Some("文件已存在".into());
             return result;
@@ -2493,6 +2493,9 @@ async fn run(cli: Cli) -> Result<i32> {
                         .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
                     match action {
                         PlaylistAction::Create { name } => {
+                            if name.trim().is_empty() {
+                                anyhow::bail!("歌单名不能为空");
+                            }
                             let id = ncm.playlist_create(&name).await?;
                             ui::ok(&format!("已创建歌单「{name}」 id={id}"));
                             Ok(0)
@@ -2521,6 +2524,9 @@ async fn run(cli: Cli) -> Result<i32> {
                             Ok(0)
                         }
                         PlaylistAction::Add { ids, playlist } => {
+                            if ids.is_empty() {
+                                anyhow::bail!("请至少指定一首歌曲 ID 或链接");
+                            }
                             let lists = ncm.user_playlists(uid).await?;
                             let (pid, pname) = resolve_playlist(&lists, playlist.as_deref())?;
                             let mut track_ids = Vec::new();
@@ -2532,6 +2538,9 @@ async fn run(cli: Cli) -> Result<i32> {
                             Ok(0)
                         }
                         PlaylistAction::Remove { ids, playlist } => {
+                            if ids.is_empty() {
+                                anyhow::bail!("请至少指定一首歌曲 ID");
+                            }
                             let lists = ncm.user_playlists(uid).await?;
                             let (pid, pname) = resolve_playlist(&lists, playlist.as_deref())?;
                             ncm.playlist_tracks_op("del", pid, &ids).await?;
@@ -2544,24 +2553,31 @@ async fn run(cli: Cli) -> Result<i32> {
             }
         }
         Some(Commands::Like { ids, unlike }) => {
-            let ncm = Ncm::with_cookie(auth.as_deref())?;
-            let (uid, _) = ncm
-                .whoami()
-                .await?
-                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
             if ids.is_empty() {
-                anyhow::bail!("请至少指定一首歌曲 ID");
+                anyhow::bail!("请至少指定一首歌曲 ID 或链接");
             }
             let mut track_ids = Vec::new();
             for s in &ids {
                 track_ids.push(parse_id_or_url(s)?);
             }
+            track_ids.sort_unstable();
+            track_ids.dedup();
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let (uid, _) = ncm
+                .whoami()
+                .await?
+                .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
             let lists = ncm.user_playlists(uid).await?;
-            let (pid, _) = resolve_playlist(&lists, None)?;
+            let (pid, _) = resolve_playlist(&lists, None)
+                .context("账号下未找到「我喜欢的音乐」歌单（红心歌单），请先在网页端创建")?;
             let op = if unlike { "del" } else { "add" };
             ncm.playlist_tracks_op(op, pid, &track_ids).await?;
-            let verb = if unlike { "取消收藏" } else { "收藏" };
-            ui::ok(&format!("{verb} {} 首到「我喜欢的音乐」", track_ids.len()));
+            let msg = if unlike {
+                format!("从「我喜欢的音乐」取消收藏 {} 首", track_ids.len())
+            } else {
+                format!("收藏 {} 首到「我喜欢的音乐」", track_ids.len())
+            };
+            ui::ok(&msg);
             Ok(0)
         }
         // 无子命令（纯 flags 或空参数）：打印帮助
@@ -2753,19 +2769,27 @@ async fn guard_loop(
             if let Some((id, label)) = hit {
                 let like_ncm = dl_ncm.clone();
                 tokio::spawn(async move {
-                    if let Ok(Some((uid, _))) = like_ncm.whoami().await {
-                        if let Ok(lists) = like_ncm.user_playlists(uid).await {
-                            if let Ok((pid, _)) = resolve_playlist(&lists, None) {
-                                let _ = like_ncm
-                                    .playlist_tracks_op("add", pid, std::slice::from_ref(&id))
-                                    .await;
-                            }
-                        }
+                    // 逐级收集错误，失败不谎报成功
+                    let outcome: anyhow::Result<()> = async {
+                        let (uid, _) = like_ncm
+                            .whoami()
+                            .await?
+                            .context("未登录：ncm login 保存登录后重试")?;
+                        let lists = like_ncm.user_playlists(uid).await?;
+                        let (pid, _) =
+                            resolve_playlist(&lists, None).context("未找到「我喜欢的音乐」歌单")?;
+                        like_ncm
+                            .playlist_tracks_op("add", pid, std::slice::from_ref(&id))
+                            .await
                     }
+                    .await;
                     if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                         player::clear_overlay_rows();
                     }
-                    ui::ok(&format!("已收藏「{label}」到我喜欢的音乐"));
+                    match outcome {
+                        Ok(()) => ui::ok(&format!("已收藏「{label}」到我喜欢的音乐")),
+                        Err(e) => ui::fail(&format!("收藏失败：{e:#}")),
+                    }
                 });
             }
         }

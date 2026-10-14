@@ -136,10 +136,10 @@ pub fn yrc_to_ass(yrc: &str) -> String {
             let min: f64 = min.parse().ok()?;
             let sec: f64 = sec.parse().ok()?;
             Some(min * 60.0 + sec)
-        } else if let Ok(ms) = t.parse::<u64>() {
-            Some(ms as f64 / 1000.0)
         } else {
-            None
+            // YRC 毫秒对 "起,止" 取起始；单毫秒 "1234" 整体解析
+            let head = t.split(',').next().unwrap_or(t);
+            head.parse::<u64>().ok().map(|ms| ms as f64 / 1000.0)
         }
     }
 
@@ -150,12 +150,24 @@ pub fn yrc_to_ass(yrc: &str) -> String {
             continue;
         }
         let mut text = strip_time_tags(raw);
-        text = strip_k_tags(&text).trim().to_string();
+        text = strip_k_tags(&text);
+        // 真实 YRC 逐词标签 (起ms,止ms) 剥离，只留歌词文字
+        text = strip_paren_tags(&text).trim().to_string();
         if text.is_empty() {
             continue;
         }
-        let start = parse_ts(&format!("[{}]", stamps[0]));
-        let end = parse_ts(&format!("[{}]", stamps[1]));
+        // 真实 YRC 行首为 [起始ms,结束ms] 毫秒对；旧格式为 [mm:ss.xx] 单时间戳
+        let (start, end) = if let Some((a, b)) = stamps[0].split_once(',') {
+            (
+                parse_ts(&format!("[{a}]")),
+                b.parse::<u64>().ok().map(|ms| ms as f64 / 1000.0),
+            )
+        } else {
+            (
+                parse_ts(&format!("[{}]", stamps[0])),
+                stamps.get(1).and_then(|s| parse_ts(&format!("[{s}]"))),
+            )
+        };
         if let Some(start) = start {
             lines.push((start, end, text));
         }
@@ -189,9 +201,10 @@ fn extract_brackets(line: &str) -> Vec<String> {
             break;
         };
         let inner = &rest[start + 1..start + end];
+        // 时间戳 mm:ss.xx 或 YRC 毫秒对 ms1,ms2
         if inner
             .chars()
-            .all(|c| c.is_ascii_digit() || c == ':' || c == '.')
+            .all(|c| c.is_ascii_digit() || c == ':' || c == '.' || c == ',')
             && !inner.is_empty()
         {
             out.push(inner.to_string());
@@ -209,10 +222,12 @@ fn strip_time_tags(line: &str) -> String {
             out.push_str(rest);
             return out;
         };
+        // 标签前的正文先保留（YRC 中间可能夹时间标签）
+        out.push_str(&rest[..start]);
         let inner = &rest[start + 1..start + end];
         if !(inner
             .chars()
-            .all(|c| c.is_ascii_digit() || c == ':' || c == '.')
+            .all(|c| c.is_ascii_digit() || c == ':' || c == '.' || c == ',')
             && !inner.is_empty())
         {
             out.push('[');
@@ -233,11 +248,40 @@ fn strip_k_tags(text: &str) -> String {
             out.push_str(rest);
             break;
         };
+        out.push_str(&rest[..start]);
         let inner = &rest[start + 1..start + end];
         if !(inner.starts_with("k:") || inner.starts_with("t:")) {
             out.push('[');
             out.push_str(inner);
             out.push(']');
+        }
+        rest = &rest[start + end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 剥离 YRC 逐词时间标签 `(起ms,止ms)`
+fn strip_paren_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('(') {
+        let Some(end) = rest[start..].find(')') else {
+            out.push_str(rest);
+            break;
+        };
+        let inner = &rest[start + 1..start + end];
+        let is_ms_pair = inner.split_once(',').is_some_and(|(a, b)| {
+            !a.is_empty()
+                && !b.is_empty()
+                && a.chars().all(|c| c.is_ascii_digit())
+                && b.chars().all(|c| c.is_ascii_digit())
+        });
+        if is_ms_pair {
+            // 丢弃标签本身，保留标签前的正文
+            out.push_str(&rest[..start]);
+        } else {
+            out.push_str(&rest[..start + end + 1]);
         }
         rest = &rest[start + end + 1..];
     }
@@ -536,5 +580,26 @@ mod timeline_tests {
         assert_eq!(pick_embed(&got).as_deref(), Some("逐词"));
         got.remove("yrc");
         assert!(pick_embed(&got).is_none());
+    }
+
+    /// 真实网易 YRC 毫秒对格式 [起,止](起,止)词… 应产出非空 ASS
+    #[test]
+    fn yrc_ms_pair_to_ass() {
+        let yrc = "[2360,6759](2360,2769)作词(2760,3639)人海\n[7000,9000](7000,9000)副歌\n";
+        let ass = yrc_to_ass(yrc);
+        assert!(ass.contains("Dialogue:"), "应产出 Dialogue 行: {ass}");
+        assert!(ass.contains("作词人海"), "应保留歌词文本: {ass}");
+        assert!(ass.contains("副歌"));
+        // 起点 2360ms = 2.36s → ASS 时间 0:00:02.36
+        assert!(ass.contains("0:00:02.36"), "起点换算: {ass}");
+        // 止点 6759ms = 6.759s → 0:00:06.76（四舍五入到厘秒）
+        assert!(ass.contains("0:00:06.76"), "止点换算: {ass}");
+    }
+
+    /// 单时间戳 yrc 行不越界（曾因 stamps[1] panic）
+    #[test]
+    fn yrc_single_stamp_no_panic() {
+        let ass = yrc_to_ass("[00:10.00]孤行\n");
+        assert!(ass.contains("孤行"));
     }
 }

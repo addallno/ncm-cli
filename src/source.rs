@@ -36,7 +36,9 @@ pub fn dig_url(value: &Value) -> Option<String> {
                     match v {
                         Value::String(s)
                             if s.starts_with("http")
-                                && !s[..20].to_lowercase().contains("html") =>
+                                && !s
+                                    .get(..20)
+                                    .is_some_and(|x| x.to_lowercase().contains("html")) =>
                         {
                             return Some(s.clone())
                         }

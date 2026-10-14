@@ -2,7 +2,7 @@
 //!
 //! weapi：双重 AES-128-CBC + 教科书 RSA（无填充）；用于歌单曲目增删、改名
 //! eapi：单次 AES-128-ECB + md5 摘要；用于新建/删除歌单
-//! AES-CBC/ECB 用 aes 块加密手写（环境无 cbc/ecb crate），随机数用时间熵 xorshift
+//! AES 块加密用 aes crate，CBC/ECB 链式层手写；secKey 优先 /dev/urandom，失败退时间熵
 use aes::cipher::{generic_array::GenericArray, BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -73,7 +73,8 @@ fn aes_ecb_encrypt(data: &[u8], key: &[u8; 16]) -> Vec<u8> {
     out
 }
 
-/// eapi 响应解密（AES-128-ECB + PKCS7），非密文返回 None
+/// eapi 响应解密（AES-128-ECB + PKCS7）；非密文返回 None。
+/// pyncm 注释 "hack: data isn't padded"——去填充失败时回退按原始明文返回
 pub fn eapi_decrypt(data: &[u8]) -> Option<String> {
     if data.is_empty() || !data.len().is_multiple_of(16) {
         return None;
@@ -85,22 +86,30 @@ pub fn eapi_decrypt(data: &[u8]) -> Option<String> {
         cipher.decrypt_block(&mut ga);
         out.extend_from_slice(&ga);
     }
-    // PKCS7 去填充
-    let pad = *out.last()? as usize;
-    if pad == 0 || pad > 16 || pad > out.len() {
-        return None;
+    // PKCS7 去填充；校验失败视为未填充数据，直接用原文（对齐 pyncm hack）
+    let pad = *out.last().unwrap_or(&0) as usize;
+    if (1..=16).contains(&pad)
+        && pad <= out.len()
+        && out[out.len() - pad..].iter().all(|&b| b == pad as u8)
+    {
+        out.truncate(out.len() - pad);
     }
-    if !out[out.len() - pad..].iter().all(|&b| b == pad as u8) {
-        return None;
-    }
-    out.truncate(out.len() - pad);
     String::from_utf8(out).ok()
 }
 
-/// 16 位随机 secKey（字母数字）
+/// 16 位随机 secKey（字母数字）；getrandom OS 熵，失败退时间熵 xorshift
 fn random_sec_key() -> String {
     const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut seed = time_seed();
+    let mut seed = {
+        let mut buf = [0u8; 16];
+        match getrandom::getrandom(&mut buf) {
+            Ok(()) => {
+                u64::from_le_bytes(buf[0..8].try_into().expect("8 字节"))
+                    ^ u64::from_le_bytes(buf[8..16].try_into().expect("8 字节")).rotate_left(32)
+            }
+            Err(_) => time_seed(),
+        }
+    };
     (0..16)
         .map(|_| CHARS[(next_rand(&mut seed) % CHARS.len() as u64) as usize] as char)
         .collect()
@@ -148,6 +157,6 @@ pub fn eapi_header_json() -> String {
     let mut seed = time_seed().wrapping_add(0x9e37_79b9);
     let request_id = 20_000_000 + (next_rand(&mut seed) % 10_000_000);
     format!(
-        r#"{{"os":"iPhone OS","appver":"10.0.0","osver":"16.2","channel":"distribution","deviceId":"pyncm!","requestId":{request_id}}}"#
+        r#"{{"os":"iPhone OS","appver":"10.0.0","osver":"16.2","channel":"distribution","deviceId":"pyncm!","requestId":"{request_id}"}}"#
     )
 }

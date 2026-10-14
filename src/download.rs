@@ -205,6 +205,15 @@ pub fn verify_with_duration(
     Ok(())
 }
 
+/// 字面追加扩展名（Path::with_extension 会把名字里最后一个点后的内容当旧扩展名丢弃，
+/// 如 `G.E.M. - 光年之外` → `G.E.M.mp3`；歌名含点时必须显式拼接）
+pub fn append_ext(base: &Path, ext: &str) -> PathBuf {
+    let mut s = base.as_os_str().to_os_string();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
+}
+
 /// 下载单曲：探测 → 流式写 .part → 校验 → 落正式文件
 /// 返回 (最终路径, 实际时长 ms)
 pub async fn download_audio(
@@ -232,7 +241,9 @@ pub async fn download_audio(
         ncm.insecure
             .get(url)
             .headers(headers.clone())
-            .timeout(Duration::from_secs(60))
+            // 总时限放宽到 10 分钟（60s 会把慢网大 FLAC 整首掐死）；
+            // 建连超时由 client 级 connect 控制
+            .timeout(Duration::from_secs(600))
             .send()
     })
     .await
@@ -248,7 +259,7 @@ pub async fn download_audio(
         .unwrap_or(0);
     let total = if total > 0 { total } else { declared };
 
-    let tmp = dest_base.with_extension("part");
+    let tmp = append_ext(dest_base, "part");
     let mut file = std::fs::File::create(&tmp).map_err(|e| format!("创建临时文件失败: {e}"))?;
     let mut stream = resp.bytes_stream();
     let mut done: u64 = 0;
@@ -313,8 +324,12 @@ pub async fn download_audio(
         return Err(format!("校验失败: {e}"));
     }
 
-    let final_path = dest_base.with_extension(ext);
-    std::fs::rename(&tmp, &final_path).map_err(|e| format!("落盘失败: {e}"))?;
+    let final_path = append_ext(dest_base, ext);
+    std::fs::rename(&tmp, &final_path).map_err(|e| {
+        // rename 失败清掉 .part 防残留
+        let _ = std::fs::remove_file(&tmp);
+        format!("落盘失败: {e}")
+    })?;
     Ok((final_path, actual_ms.unwrap_or(expect_ms)))
 }
 

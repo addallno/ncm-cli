@@ -161,7 +161,8 @@ ncm recommend -t fm,radar
 | `--lrc-dir` | 随音频 | 歌词目录，可重复 |
 | `--lrcs` | `lrc,tlyric,romalrc` | 歌词类型 |
 | `--only-lrc` | 关 | 只下歌词 |
-| `-q, --quality` | `lossless` | standard/exhigh/lossless/hires |
+| `-q, --quiet` | 关 | 静默输出 |
+| `--quality` | `lossless` | standard/exhigh/lossless/hires |
 | `-t, --template` | `{artists} - {track}` | 文件名模板 |
 | `--skip-existing` | 关 | 跳过已存在文件 |
 | `--allow-trial` | 关 | 放行 30 秒试听 |

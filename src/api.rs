@@ -8,7 +8,55 @@ pub const BASE: &str = "https://music.163.com";
 pub const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
 /// eapi 用桌面客户端 UA（pyncm 实测可写）
 const UA_EAPI: &str = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/91.0.4472.164 NeteaseMusicDesktop/2.10.2.200154";
+/// pyncm eapi_config 设备指纹（weapi/eapi 写通道共用）
+const EAPI_FINGERPRINT: &str =
+    "os=iPhone OS; appver=10.0.0; osver=16.2; channel=distribution; deviceId=pyncm!";
 const BATCH: usize = 200;
+
+/// 写通道响应统一解析：明文 JSON / 尾部 \\x10 填充 / AES 密文依次尝试；
+/// HTTP 非 2xx 或解析失败时带状态码与 body 前缀报错（不打印完整 body 防泄漏）
+fn parse_write_body(
+    ns: &str,
+    path: &str,
+    status: reqwest::StatusCode,
+    bytes: &[u8],
+) -> Result<Value> {
+    // pyncm EapiDecrypt 有 strip("\\x10") 兜底，weapi 偶发同款填充
+    let trimmed: &[u8] = bytes.strip_suffix(b"\x10").unwrap_or(bytes);
+    let v: Option<Value> = serde_json::from_slice(trimmed).ok().or_else(|| {
+        crate::crypto::eapi_decrypt(bytes).and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    });
+    let Some(v) = v else {
+        let head: String = bytes
+            .iter()
+            .take(64)
+            .map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' {
+                    *b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        anyhow::bail!(
+            "{ns}{path} 响应无法解析（HTTP {status}，{} 字节，前缀「{head}」），可能加密参数不被服务端接受",
+            bytes.len()
+        );
+    };
+    let code = v["code"].as_i64().unwrap_or(-1);
+    if code != 200 {
+        let msg = v["message"]
+            .as_str()
+            .or_else(|| v["msg"].as_str())
+            .unwrap_or("");
+        let hint = match code {
+            301 => "（未登录或 csrf 失效，请重新 ncm login）",
+            _ => "",
+        };
+        anyhow::bail!("{ns}{path} 失败 code={code} {msg}{hint}");
+    }
+    Ok(v)
+}
 
 #[derive(Clone)]
 pub struct Ncm {
@@ -85,31 +133,30 @@ impl Ncm {
         path: &str,
         mut payload: serde_json::Map<String, Value>,
     ) -> Result<Value> {
+        if self.csrf.is_empty() {
+            anyhow::bail!("cookie 缺少 __csrf 字段，无法执行写操作；请复制完整 Cookie（含 __csrf）重新 ncm login --cookie ...");
+        }
         payload.insert("csrf_token".into(), json!(self.csrf));
         let (params, enc_sec_key) =
             crate::crypto::weapi_encrypt(&Value::Object(payload).to_string());
         let url = format!("{BASE}/weapi{path}");
-        let resp = crate::retry::retry_reqwest(|| {
-            self.client
-                .post(&url)
-                .query(&[("csrf_token", self.csrf.as_str())])
-                .form(&[
-                    ("params", params.as_str()),
-                    ("encSecKey", enc_sec_key.as_str()),
-                ])
-                .send()
-        })
-        .await?
-        .error_for_status()?;
-        let v: Value = resp.json().await.unwrap_or(Value::Null);
-        let code = v["code"].as_i64().unwrap_or(-1);
-        if code != 200 {
-            let msg = v["message"]
-                .as_str()
-                .or_else(|| v["msg"].as_str())
-                .unwrap_or("");
-            anyhow::bail!("/weapi{path} 失败 code={code} {msg}");
-        }
+        // pyncm weapi 也带设备指纹 cookie（eapi_config）
+        let weapi_cookie = format!("{}; {}", EAPI_FINGERPRINT, self.cookie);
+        // 写操作不重试：超时后服务端可能已执行，重试会重复建歌单等
+        let resp = self
+            .client
+            .post(&url)
+            .query(&[("csrf_token", self.csrf.as_str())])
+            .header(reqwest::header::COOKIE, &weapi_cookie)
+            .form(&[
+                ("params", params.as_str()),
+                ("encSecKey", enc_sec_key.as_str()),
+            ])
+            .send()
+            .await?;
+        let status = resp.status();
+        let bytes = resp.bytes().await?;
+        let v = parse_write_body("/weapi", path, status, &bytes)?;
         Ok(v)
     }
 
@@ -126,37 +173,20 @@ impl Ncm {
         let params = crate::crypto::eapi_encrypt(&api_path, &Value::Object(payload).to_string());
         let url = format!("{BASE}/eapi{path}");
         // eapi 要求桌面 UA + 设备指纹 cookie（pyncm eapi_config）
-        let eapi_cookie = format!(
-            "os=iPhone OS; appver=10.0.0; osver=16.2; channel=distribution; deviceId=pyncm!; {}",
-            self.cookie
-        );
-        let resp = crate::retry::retry_reqwest(|| {
-            self.client
-                .post(&url)
-                .header(reqwest::header::USER_AGENT, UA_EAPI)
-                .header(reqwest::header::REFERER, "")
-                .header(reqwest::header::COOKIE, &eapi_cookie)
-                .form(&[("params", params.as_str())])
-                .send()
-        })
-        .await?
-        .error_for_status()?;
+        let eapi_cookie = format!("{}; {}", EAPI_FINGERPRINT, self.cookie);
+        // 写操作不重试（同 post_weapi）
+        let resp = self
+            .client
+            .post(&url)
+            .header(reqwest::header::USER_AGENT, UA_EAPI)
+            .header(reqwest::header::REFERER, "")
+            .header(reqwest::header::COOKIE, &eapi_cookie)
+            .form(&[("params", params.as_str())])
+            .send()
+            .await?;
+        let status = resp.status();
         let bytes = resp.bytes().await?;
-        let v: Value = serde_json::from_slice(&bytes)
-            .ok()
-            .or_else(|| {
-                crate::crypto::eapi_decrypt(&bytes)
-                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            })
-            .unwrap_or(Value::Null);
-        let code = v["code"].as_i64().unwrap_or(-1);
-        if code != 200 {
-            let msg = v["message"]
-                .as_str()
-                .or_else(|| v["msg"].as_str())
-                .unwrap_or("");
-            anyhow::bail!("/eapi{path} 失败 code={code} {msg}");
-        }
+        let v = parse_write_body("/eapi", path, status, &bytes)?;
         Ok(v)
     }
 
@@ -456,15 +486,36 @@ impl Ncm {
         Ok(())
     }
 
-    /// 歌单改名（weapi update；只传 name，不动描述/标签）
+    /// 歌单元信息（改名前回填简介/标签用；/v1/playlist/update 是全量更新）
+    pub async fn playlist_meta(&self, id: u64) -> Result<(String, String)> {
+        let data = self
+            .get_json("/api/v6/playlist/detail", &[("id", id.to_string())])
+            .await?;
+        let p = &data["playlist"];
+        Ok((
+            p["description"].as_str().unwrap_or("").to_string(),
+            p["tags"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default(),
+        ))
+    }
+
+    /// 歌单改名（weapi update 全量提交；先查原简介/标签防清空）
     pub async fn playlist_rename(&self, id: u64, name: &str) -> Result<()> {
+        let (desc, tags) = self.playlist_meta(id).await.unwrap_or_default();
         self.post_weapi(
             "/v1/playlist/update",
             serde_json::Map::from_iter([
                 ("id".into(), json!(id.to_string())),
                 ("name".into(), json!(name)),
-                ("desc".into(), json!("")),
-                ("tags".into(), json!("")),
+                ("desc".into(), json!(desc)),
+                ("tags".into(), json!(tags)),
             ]),
         )
         .await?;
