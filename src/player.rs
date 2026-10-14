@@ -87,6 +87,47 @@ pub fn cleanup_socket(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// 在歌词底行之上打一行提示（先清底行避免插行打乱，提示行留在滚动历史可回翻）
+pub fn toast(msg: &str) {
+    use std::io::IsTerminal;
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    clear_overlay_rows();
+    eprintln!("{}", crate::ui::dim(msg));
+}
+
+/// 捕获 mpv/ffplay stderr：终端不再直接受其输出（底行歌词不会被插行打乱），
+/// 过滤后把有用的行（错误/音频设备/解码等）以 toast 打出
+pub fn spawn_stderr_filter(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(msg) = useful_log(&line) {
+                toast(&msg);
+            }
+        }
+    })
+}
+
+/// 从播放器日志行提取值得展示的内容；噪声/正常信息返回 None
+fn useful_log(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.is_empty() {
+        return None;
+    }
+    // 我们自己的 IPC/memfd 杂散日志（高频且无意义）
+    if t.contains("memfd") || t.contains("[ipc") || t.contains("ipc_") {
+        return None;
+    }
+    // 正常播放信息（已有 ▶ 切曲行/队列表接管）；比较用 trim 后文本
+    if t.starts_with("Playing:") || t.starts_with("(+)") || t.starts_with("AV:") {
+        return None;
+    }
+    Some(t.to_string())
+}
+
 /// 启动歌词同步任务；mpv 退出（socket EOF）后自动结束并换行收尾
 ///
 /// `tracks[i]` 对应 mpv 播放列表第 i 项；超出范围的 playlist-pos 显示歌名占位。
@@ -395,7 +436,24 @@ fn fmt_t(s: f64) -> String {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{current_line, LyricTrack};
+    use super::{current_line, useful_log, LyricTrack};
+
+    // mpv stderr 过滤：噪声丢弃、错误/设备行保留
+    #[test]
+    fn useful_log_filters_noise_keeps_errors() {
+        assert!(useful_log("[ao/alsa] device unavailable").is_some());
+        assert!(useful_log("failed to open audio device").is_some());
+        assert!(useful_log("").is_none());
+        assert!(useful_log("  ").is_none());
+        assert!(useful_log("memfd_create failed").is_none());
+        assert!(useful_log("[ipc_1] Write error").is_none());
+        assert!(useful_log("Playing: https://x/1.flac").is_none());
+        assert!(useful_log(" (+) Audio --aid=1").is_none());
+        assert_eq!(
+            useful_log("  [ao/pulse] cannot open  ").as_deref(),
+            Some("[ao/pulse] cannot open")
+        );
+    }
 
     fn track(lines: Vec<(f64, String)>) -> LyricTrack {
         LyricTrack {

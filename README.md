@@ -14,15 +14,16 @@
   `ncm download list.<ID>` 下载
 - **严格子命令**：`ncm <未知命令>` 直接报 `unrecognized subcommand`，
   不再把未知参数悄悄当成下载
-- **播放漫游**：`ncm play roam` 单开私人FM漫游歌单（首曲开播，队列将尽自动
+- **播放漫游**：`ncm play --roam` 单开私人FM漫游歌单（首曲开播，队列将尽自动
   接FM无限续播）；普通队列加 `--roam` 同样开启续播（mpv 下无感接力）
-- **下载**：单曲 / 歌单 / 专辑 / 歌手链接 / `list.123` / `daily` / 关键词，
+- **下载**：单曲 / 歌单 / 专辑 / 歌手链接 / `list.123` / `--daily` / 关键词，
   **默认 FLAC + 歌词 + 保留音频**；标签写入标题/歌手/专辑/歌词/封面外，**嵌入
   `ncm-id`**（FLAC 为 Vorbis 键，MP3 为 TXXX 帧，凭此可反查歌 ID）；进度条 /
   spinner / 完整性防线（Range → `.part` → 魔数/时长校验 → 全过才落盘）；完成后出结果一览表（`#`/状态/曲目/来源/大小/备注）
   与耗时汇总，管道/脚本下输出干净无 ANSI 裸序列
-- **播放**：`ncm play <ID/链接/关键词|daily|roam>`，支持多目标按序连播
-  （`ncm play "晴天" "七里香" daily`）与 `-f playlist.txt` 文件列表（每行一个目标，
+- **播放**：`ncm play <ID/链接/关键词>` + `--daily`（每日推荐）/ `--roam`（FM
+  续播），支持多目标按序连播
+  （`ncm play "晴天" "七里香"`、`ncm play --daily`）与 `-f playlist.txt` 文件列表（每行一个目标，
   `#` 开头跳过，可与命令行目标混用）；队列喂给 mpv（`<`/`>` 切曲、
   `←/→` 快退进、空格暂停、`/` 搜索、`q` 退出；开 `--prefetch-playlist`
   预开下一首，跳过时新曲已就绪不用等缓冲），歌词随播放滚动并按终端宽度
@@ -31,7 +32,8 @@
   （网易直链约 10 分钟过期，全量预取会导致长队列后段 403 雪崩）；`--save -o 目录`
   先下载到本地再播本地文件；`--shuffle` 洗牌、`-n` 队列长度、`--json` 输出队列；
   播放器参数经 `--` 透传（mpv 需 `=` 形式）：`ncm play 晴天 -- --volume=60 --ao=alsa`；
-  mpv 非 fatal 日志全静默（杂散 stderr 不再打乱歌词底行），`播放完毕 · N 首` 含续喂数
+  mpv 日志经管道过滤：error/音频设备等有用行打成 dim toast（`♪ 音量 60%`/`♪ 速度 1.50x`
+  经 IPC 轮询），memfd/ipc 杂散与 info 行不打乱歌词底行，`播放完毕 · N 首` 含续喂数
 - **登录持久化**：`ncm login --session <pyncm dump>`（兼容 PYNCM/legacy）或
   `--cookie "MUSIC_U=...; __csrf=..."`（浏览器 F12 直接粘），凭据保存到
   `~/.config/ncm/cookie`（0600），之后所有命令自动加载；`ncm whoami` 看状态、
@@ -74,7 +76,7 @@ ncm search 晴天 -q -n 3 --json      # 静默 JSON（管道友好）
 ncm download 晴天 -d 1              # 按编号下载搜索结果（别名 ncm dl）
 ncm download 晴天 -n 20 -d 3        # 扩大候选到 20 首再选第 3 首
 ncm download <歌单链接> -o ~/music  # 歌单批量（TTY 交互选编号，管道下全量）
-ncm download daily -j 4 --m3u list.m3u  # 4 路并发下载并导出 M3U 播放列表
+ncm download --daily -j 4 --m3u list.m3u  # 4 路并发下载并导出 M3U 播放列表
 ncm list 24381616 -n 30             # 浏览歌单前 30 首（看，不下载）
 ncm daily                           # 浏览每日推荐
 ncm pl list                         # 我的歌单（ncm pl 省略 list 同效）
@@ -86,13 +88,13 @@ ncm fm get -n 10                    # 私人FM 拉一批（fm like/trash/skip �
 ncm subs                            # 收藏的专辑 + 歌手（-t album 只看一类）
 ncm cloud -n 30                     # 云盘歌曲列表（--offset 翻页）
 ncm mv 5432915 --play               # MV 详情并交给 mpv 播放
-ncm download daily -d all           # 每日推荐全部下载
+ncm download --daily -d all           # 每日推荐全部下载
 ncm recommend                       # 首页推荐（默认只列每日推荐歌曲）
 ncm recommend -t toplist,fm -n 20   # 追加榜单与私人FM（见推荐位表）
-ncm play daily --shuffle            # 随机队列播每日推荐
-ncm play roam                       # 私人漫游：FM 歌单 + 无限续播
+ncm play --daily --shuffle            # 随机队列播每日推荐
+ncm play --roam                       # 私人漫游：FM 歌单 + 无限续播
 ncm play 晴天 -n 5                  # 搜索最相关 5 首连播
-ncm play "晴天" "七里香" daily      # 多目标按序拼接
+ncm play "晴天" "七里香"              # 多目标按序拼接（daily/roam 现为 --daily/--roam 标志）
 ncm play -f queue.txt --shuffle     # 文件列表（每行一个目标，# 注释）
 ncm play 401722227 --quality lossless --save -o ~/music
 ncm play <歌单链接> --json          # 只输出播放队列 JSON
@@ -221,7 +223,7 @@ npx @neteasecloudmusicapienhanced/unblockmusic-utils
 
 ncm play 2088507144                      # 试听曲自动走第三方直连（无需本地服务）
 ncm --mirror http://127.0.0.1:3100 download 186016   # 显式指定本地服务
-NCM_MIRROR=http://127.0.0.1:3000,http://127.0.0.1:3100 ncm play daily  # 多候选
+NCM_MIRROR=http://127.0.0.1:3000,http://127.0.0.1:3100 ncm play --daily  # 多候选
 NCM_MIRROR=none ncm download 186016            # 禁用本地 mirror（第三方直连仍生效）
 ```
 

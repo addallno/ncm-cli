@@ -88,11 +88,14 @@ enum Commands {
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 下载（唯一下载入口，别名 dl）：歌曲 ID / 歌单·专辑链接 / 关键词 / daily（每日推荐）
+    /// 下载（唯一下载入口，别名 dl）：歌曲 ID / 歌单·专辑链接 / 关键词；--daily 下每日推荐
     #[command(name = "download", visible_alias = "dl")]
     Download {
-        /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / daily（每日推荐）/ 关键词
+        /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / 关键词
         targets: Vec<String>,
+        /// 下载每日推荐（需登录；可与其它目标叠加）
+        #[arg(long)]
+        daily: bool,
         #[command(flatten)]
         opts: DownloadArgs,
     },
@@ -120,7 +123,7 @@ enum Commands {
         #[arg(long)]
         unlike: bool,
     },
-    /// 每日推荐歌曲（需登录；下载: ncm download daily · 播放: ncm play daily）
+    /// 每日推荐歌曲（需登录；下载: ncm download --daily · 播放: ncm play --daily）
     Daily {
         /// 只列出前 N 首（0 = 全部）
         #[arg(short = 'n', long, default_value_t = 0)]
@@ -243,8 +246,11 @@ enum Commands {
     },
     /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 </> 切曲、←/→ 快退进、歌词同步滚动）
     Play {
-        /// 歌曲 ID / 链接 / 关键词（可多个，按序拼接）；daily = 每日推荐，roam = 仅私人漫游（FM 无限续播）
+        /// 歌曲 ID / 链接 / 关键词（可多个，按序拼接）
         target: Vec<String>,
+        /// 播放每日推荐队列（需登录；可与其它目标叠加，置于最前）
+        #[arg(long)]
+        daily: bool,
         /// 从文件读取目标列表（每行一个，与命令行目标拼接）
         #[arg(short = 'f', long, value_name = "FILE")]
         file: Option<PathBuf>,
@@ -272,7 +278,7 @@ enum Commands {
         /// 不显示滚动歌词
         #[arg(long = "no-lyric")]
         no_lyric: bool,
-        /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv；目标为 roam 时已默认开启）
+        /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv；单独 --roam 即纯 FM 开播）
         #[arg(long)]
         roam: bool,
         /// 透传给播放器的参数（经 `--` 分隔，置于最后同名以用户为准；mpv 需 `=` 形式，如 -- --volume=60 --ao=alsa）
@@ -944,51 +950,57 @@ fn find_player(spec: Option<&str>) -> Option<(String, Vec<String>)> {
     None
 }
 
-/// download 的批量编排：收集曲目（ID/链接/关键词/daily）→ TTY 交互选号 → 下载
+/// download 的批量编排：收集曲目（--daily / ID / 链接 / 关键词）→ TTY 交互选号 → 下载
 ///
 /// 关键词取 `-n` 候选；非 TTY 且未给 `-d` 时取最相关 1 首（兼容旧用法），
 /// TTY 下列出候选表并交互选择（回车仅展示不下载）。
-async fn run_batch(ncm: &Ncm, targets: Vec<String>, opts: DownloadArgs) -> Result<i32> {
+async fn run_batch(
+    ncm: &Ncm,
+    targets: Vec<String>,
+    opts: DownloadArgs,
+    daily: bool,
+) -> Result<i32> {
     let mut songs: Vec<Value> = Vec::new();
     let mut scope: Vec<String> = Vec::new();
     let tty = !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin());
     let interactive = tty && opts.download.is_none();
 
+    // --daily：每日推荐置于最前（与其它目标叠加）
+    if daily {
+        let s = ncm.daily_songs().await?;
+        if s.is_empty() {
+            bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
+        }
+        scope.push(format!("每日推荐({})", s.len()));
+        songs.extend(s);
+    }
+
     // 多目标逐个解析：单个失败记录并继续（全部失败才整体报错），不再一错全盘放弃
     let mut target_errs: Vec<String> = Vec::new();
     for target in &targets {
-        let step: Result<()> =
-            if target.eq_ignore_ascii_case("daily") || target.eq_ignore_ascii_case("today") {
-                let s = ncm.daily_songs().await?;
-                if s.is_empty() {
-                    bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
-                }
-                scope.push(format!("每日推荐({})", s.len()));
-                songs.extend(s);
-                Ok(())
-            } else if is_target_like(target) {
-                let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
-                scope.push(format!("{desc}({})", found.len()));
-                songs.extend(found);
-                Ok(())
+        let step: Result<()> = if is_target_like(target) {
+            let (found, desc) = resolve_target(ncm, target, opts.artist).await?;
+            scope.push(format!("{desc}({})", found.len()));
+            songs.extend(found);
+            Ok(())
+        } else {
+            // 关键词：交互或显式 -d 时保留全部候选，否则只取最相关 1 首
+            let n = if interactive || opts.download.is_some() {
+                opts.limit
             } else {
-                // 关键词：交互或显式 -d 时保留全部候选，否则只取最相关 1 首
-                let n = if interactive || opts.download.is_some() {
-                    opts.limit
-                } else {
-                    1
-                };
-                if !opts.json {
-                    ui::step(&format!("搜索 “{target}”"));
-                }
-                let found = ncm.search(target, n).await?;
-                if found.is_empty() {
-                    bail!("未搜索到结果: {target}");
-                }
-                scope.push(format!("搜索 “{target}”({})", found.len()));
-                songs.extend(found);
-                Ok(())
+                1
             };
+            if !opts.json {
+                ui::step(&format!("搜索 “{target}”"));
+            }
+            let found = ncm.search(target, n).await?;
+            if found.is_empty() {
+                bail!("未搜索到结果: {target}");
+            }
+            scope.push(format!("搜索 “{target}”({})", found.len()));
+            songs.extend(found);
+            Ok(())
+        };
         if let Err(e) = step {
             target_errs.push(format!("{target}: {e:#}"));
         }
@@ -1591,13 +1603,11 @@ fn section_of(cmd: Option<&Commands>) -> &'static str {
         Some(Commands::Download { .. }) => "download",
         Some(Commands::List { .. }) | Some(Commands::Playlist { .. }) => "list",
         Some(Commands::Daily { .. }) | Some(Commands::Recommend { .. }) => "recommend",
-        Some(Commands::Play { target, .. }) => {
-            if target.iter().any(|t| t.eq_ignore_ascii_case("roam")) {
+        Some(Commands::Play { daily, roam, .. }) => {
+            // 板块优先级与目标一致：漫游 > 每日推荐 > 普通播放
+            if *roam {
                 "roam"
-            } else if target
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case("daily") || t.eq_ignore_ascii_case("today"))
-            {
+            } else if *daily {
                 "recommend"
             } else {
                 "play"
@@ -1770,16 +1780,20 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Download { targets, opts }) => {
+        Some(Commands::Download {
+            targets,
+            daily,
+            opts,
+        }) => {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
-            if targets.is_empty() {
+            if targets.is_empty() && !daily {
                 bail!(
-                    "请提供歌曲 ID / 歌单·专辑链接 / 关键词 / daily（ncm help download 查看用法）"
+                    "请提供歌曲 ID / 歌单·专辑链接 / 关键词，或加 --daily 下每日推荐（ncm help download）"
                 );
             }
             let ncm = Ncm::with_cookie(auth.as_deref())?;
-            run_batch(&ncm, targets, opts).await
+            run_batch(&ncm, targets, opts, daily).await
         }
         Some(Commands::List {
             target,
@@ -1818,7 +1832,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 print_search_json(&songs)?;
             } else {
                 print_search_table(&songs);
-                ui::info("下载: ncm download daily -d 编号  ·  播放: ncm play daily");
+                ui::info("下载: ncm download --daily -d 编号  ·  播放: ncm play --daily");
             }
             Ok(0)
         }
@@ -1959,6 +1973,7 @@ async fn run(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Play {
             target,
+            daily,
             file,
             limit,
             shuffle,
@@ -2016,28 +2031,23 @@ async fn run(cli: Cli) -> Result<i32> {
                     }
                 }
             }
-            if targets.is_empty() {
-                bail!("未指定播放目标（可用参数或 -f 文件）");
+            if targets.is_empty() && !daily && !roam {
+                bail!("未指定播放目标（歌曲 ID/链接/关键词、-f 文件，或 --daily 每日推荐 / --roam 私人漫游）");
             }
 
             let mut songs: Vec<Value> = Vec::new();
             let mut descs: Vec<String> = Vec::new();
+            // --daily：每日推荐置于队首（与其它目标叠加）
+            if daily {
+                let s = ncm.daily_songs().await?;
+                if s.is_empty() {
+                    bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
+                }
+                descs.push("每日推荐".to_string());
+                songs.extend(s);
+            }
             for t in &targets {
-                let batch: Vec<Value> = if t.eq_ignore_ascii_case("roam") {
-                    let s = ncm.radio_songs().await?;
-                    if s.is_empty() {
-                        bail!("私人FM为空（该接口需登录：ncm login --session/--cookie）");
-                    }
-                    descs.push("私人漫游".to_string());
-                    s
-                } else if t.eq_ignore_ascii_case("daily") || t.eq_ignore_ascii_case("today") {
-                    let s = ncm.daily_songs().await?;
-                    if s.is_empty() {
-                        bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie）");
-                    }
-                    descs.push("每日推荐".to_string());
-                    s
-                } else if is_target_like(t) {
+                let batch: Vec<Value> = if is_target_like(t) {
                     let (found, d) = resolve_target(&ncm, t, false).await?;
                     if found.is_empty() {
                         bail!("“{d}” 没有可播放的曲目");
@@ -2055,9 +2065,16 @@ async fn run(cli: Cli) -> Result<i32> {
                 };
                 songs.extend(batch);
             }
+            // 纯 --roam（无其它目标）：私人FM 首批即队列
+            if songs.is_empty() && roam {
+                let s = ncm.radio_songs().await?;
+                if s.is_empty() {
+                    bail!("私人FM为空（该接口需登录：ncm login --session/--cookie）");
+                }
+                descs.push("私人漫游".to_string());
+                songs.extend(s);
+            }
             let desc = descs.join(" + ");
-            // 私人漫游模式默认开启无限续播（等效 --roam）
-            let roam = roam || targets.iter().any(|t| t.eq_ignore_ascii_case("roam"));
             if limit > 0 && songs.len() > limit as usize {
                 songs.truncate(limit as usize);
             }
@@ -2315,11 +2332,11 @@ async fn run(cli: Cli) -> Result<i32> {
             let mut args: Vec<String> = base_args.clone();
             let sock = player::socket_path();
             if is_mpv {
-                // 抑制 mpv 状态/info 行防止刷屏（歌词底行或每首提示接管输出）
+                // 抑制 mpv 状态/info 行防止刷屏（歌词底行或每首提示接管输出）；
+                // 只放行 error + 音频模块 warn，stderr 经 spawn_stderr_filter 过滤
+                // 后以 toast 打出（如无法识别音频设备），不再直写终端打乱 overlay
                 args.push("--term-status-msg=".to_string());
-                // 抑制 mpv 全部非 fatal 输出：memfd/ipc_N Write error 等杂散日志
-                // 不带光标协议，插进 overlay 双行会打乱行状态（排障可经 -- 透传覆盖 msg-level）
-                args.push("--msg-level=all=fatal".to_string());
+                args.push("--msg-level=all=error,ao=warn,ad=warn".to_string());
                 // 直链交给 ffmpeg：禁用 ytdl 解析（坏掉的 yt-dlp 只会刷 traceback）
                 args.push("--ytdl=no".to_string());
                 // 预开播放列表下一条：按 > 跳过时新曲已就绪，无需等冷加载缓冲
@@ -2381,10 +2398,15 @@ async fn run(cli: Cli) -> Result<i32> {
             // 播放守护：pending 随播随取（在线地址现取防过期）+ 可选漫游接FM
             // + 快捷下载按键监听（ipc_send/ipc_get 为 unix 实现，Windows 仅提示不支持）
             #[cfg(unix)]
-            let (guard_handle, msg_listener) = if guard_needed {
+            let (guard_handle, msg_listener, quick_tasks) = if guard_needed {
                 if roam {
                     ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
                 }
+                // 快捷下载/收藏任务句柄：播放器退出后 join，防 .part 截断
+                let quick_tasks = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+                    tokio::task::JoinHandle<()>,
+                >::new(
+                )));
                 // 独立客户端监听 script-message（与歌词 overlay 并存，mpv 支持多客户端）
                 let listener = Some(player::spawn_msg_listener(sock.clone()));
                 let handle = Some(tokio::spawn(guard_loop(
@@ -2398,14 +2420,19 @@ async fn run(cli: Cli) -> Result<i32> {
                     queue.clone(),
                     dl_ncm,
                     out_dir.clone(),
+                    quick_tasks.clone(),
                 )));
-                (handle, listener)
+                (handle, listener, Some(quick_tasks))
             } else {
                 if roam {
                     ui::info("漫游需要 mpv（当前播放器无 IPC 接口），已忽略");
                 }
-                (None, None)
+                (None, None, None)
             };
+            #[cfg(not(unix))]
+            let quick_tasks: Option<
+                std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+            > = None;
             #[cfg(not(unix))]
             let guard_handle: Option<tokio::task::JoinHandle<()>> = {
                 if roam {
@@ -2419,11 +2446,19 @@ async fn run(cli: Cli) -> Result<i32> {
                 // ffplay 不支持播放列表：逐首串行（首尾相接）
                 let mut last = None;
                 for loc in &locations {
-                    let r = std::process::Command::new(&prog)
-                        .args(&args)
+                    let mut cmd = tokio::process::Command::new(&prog);
+                    cmd.args(&args)
                         .arg(loc)
-                        .status()
+                        .stderr(std::process::Stdio::piped());
+                    let mut child = cmd
+                        .spawn()
                         .with_context(|| format!("启动播放器失败: {prog}"))?;
+                    // stderr 过滤：错误/设备信息走 toast，不直写终端打乱底行
+                    let log = child.stderr.take().map(player::spawn_stderr_filter);
+                    let r = child.wait().await.context("等待播放器失败")?;
+                    if let Some(h) = log {
+                        h.abort();
+                    }
                     last = Some(r);
                     if !r.success() {
                         break;
@@ -2432,12 +2467,22 @@ async fn run(cli: Cli) -> Result<i32> {
                 last.context("ffplay 未启动")?
             } else {
                 // mpv / 自定义播放器：一次性喂入全部地址（mpv 自动建播放列表）
-                let mut cmd = std::process::Command::new(&prog);
-                cmd.args(&args).args(&locations);
-                tokio::task::spawn_blocking(move || cmd.status())
-                    .await
-                    .context("等待播放器失败")?
-                    .with_context(|| format!("启动播放器失败: {prog}"))?
+                let mut cmd = tokio::process::Command::new(&prog);
+                cmd.args(&args)
+                    .args(&locations)
+                    .stderr(std::process::Stdio::piped());
+                let mut child = cmd
+                    .spawn()
+                    .with_context(|| format!("启动播放器失败: {prog}"))?;
+                // stderr 过滤：错误/音频设备等有用行经 toast 打出，其余噪声丢弃
+                let log = child.stderr.take().map(player::spawn_stderr_filter);
+                let status = child.wait().await.context("等待播放器失败")?;
+                if let Some(h) = log {
+                    // EOF 随 mpv 退出自然结束；等一拍让末尾错误行打完再回收
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    h.abort();
+                }
+                status
             };
             if let Some(h) = guard_handle {
                 h.abort();
@@ -2445,6 +2490,19 @@ async fn run(cli: Cli) -> Result<i32> {
             #[cfg(unix)]
             if let Some(l) = msg_listener {
                 l.abort();
+            }
+            // 等快捷下载/收藏任务收尾：guard 已停不会再 spawn 新任务，
+            // 限时 join 防下载未完 .part 被进程退出截断
+            if let Some(tasks) = quick_tasks {
+                let tasks = std::mem::take(&mut *tasks.lock().unwrap_or_else(|e| e.into_inner()));
+                if !tasks.is_empty() {
+                    ui::info("等待快捷下载/收藏完成…");
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(120),
+                        futures_util::future::join_all(tasks),
+                    )
+                    .await;
+                }
             }
             if let Some(p) = input_conf {
                 let _ = std::fs::remove_file(p);
@@ -3219,6 +3277,7 @@ async fn guard_loop(
     queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String)>>>,
     dl_ncm: Ncm,
     dl_dir: PathBuf,
+    quick: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 ) {
     use std::sync::atomic::Ordering;
     let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
@@ -3233,6 +3292,8 @@ async fn guard_loop(
         .collect();
     seen.extend(pending.iter().map(|p| p.track.id));
     let mut dup_streak: u32 = 0; // 连续整批重复计数（防服务端只回同一批时卡死）
+    let mut last_vol: Option<f64> = None; // 音量 toast 去重（首轮只记录不打）
+    let mut last_speed: Option<f64> = None; // 变速 toast 去重
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         // 查询失败 = mpv 未就绪或已退出（连续 3 次才认定退出）
@@ -3249,6 +3310,27 @@ async fn guard_loop(
             continue;
         };
         fails = 0;
+        // 音量/变速 toast：mpv 终端状态行已关闭，按键调节经 IPC 轮询感知
+        req_id += 1;
+        if let Some(v) = player::ipc_get(&sock, "volume", req_id)
+            .await
+            .and_then(|v| v.as_f64())
+        {
+            if last_vol.is_some_and(|x| (x - v).abs() > 0.5) {
+                player::toast(&format!("♪ 音量 {:.0}%", v));
+            }
+            last_vol = Some(v);
+        }
+        req_id += 1;
+        if let Some(s) = player::ipc_get(&sock, "speed", req_id)
+            .await
+            .and_then(|v| v.as_f64())
+        {
+            if last_speed.is_some_and(|x| (x - s).abs() > 0.001) {
+                player::toast(&format!("♪ 速度 {:.2}x", s));
+            }
+            last_speed = Some(s);
+        }
         let Some(pos) = pos_v.as_i64().filter(|&p| p >= 0).map(|p| p as u64) else {
             continue; // 队列空/空闲：mpv 还活着，等下轮
         };
@@ -3261,13 +3343,14 @@ async fn guard_loop(
                 .get(pos as usize)
                 .cloned();
             if let Some((id, label)) = hit {
-                tokio::spawn(quick_download(
+                let h = tokio::spawn(quick_download(
                     dl_ncm.clone(),
                     id,
                     label,
                     dl_dir.clone(),
                     quality.clone(),
                 ));
+                quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
             }
         }
         // 快捷收藏请求：取当前曲加入"我喜欢的音乐"（多次按下合并为一次）
@@ -3279,7 +3362,7 @@ async fn guard_loop(
                 .cloned();
             if let Some((id, label)) = hit {
                 let like_ncm = dl_ncm.clone();
-                tokio::spawn(async move {
+                let h = tokio::spawn(async move {
                     // 逐级收集错误，失败不谎报成功
                     let outcome: anyhow::Result<()> = async {
                         let (uid, _) = like_ncm
@@ -3302,6 +3385,7 @@ async fn guard_loop(
                         Err(e) => ui::fail(&format!("收藏失败：{e:#}")),
                     }
                 });
+                quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
             }
         }
         if pos + 3 < count {
@@ -3463,9 +3547,12 @@ mod cli_tests {
     fn section_of_commands() {
         let cases: Vec<(Vec<&str>, &str)> = vec![
             (vec!["ncm", "dl", "1"], "download"),
-            (vec!["ncm", "play", "roam"], "roam"),
-            (vec!["ncm", "play", "daily"], "recommend"),
+            (vec!["ncm", "download", "--daily"], "download"),
+            (vec!["ncm", "play", "--roam"], "roam"),
+            (vec!["ncm", "play", "--daily"], "recommend"),
+            (vec!["ncm", "play", "--roam", "--daily"], "roam"),
             (vec!["ncm", "play", "259138"], "play"),
+            (vec!["ncm", "play", "daily"], "play"), // 旧别名已移除：daily 现按关键词搜索
             (vec!["ncm", "daily"], "recommend"),
             (vec!["ncm", "recommend"], "recommend"),
             (vec!["ncm", "search", "moon"], "search"),
