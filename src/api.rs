@@ -587,6 +587,8 @@ impl Ncm {
     }
 
     /// 云盘歌曲列表（weapi，pyncm GetCloudDriveInfo）；返回 (歌曲列表, 总数)
+    /// data 条目顶层是云盘元数据（fileName/artist 为字符串），标准 song 结构在
+    /// simpleSong 里——归一化成 song 结构，表格/下载（ncm download <id>）才能直接用
     pub async fn cloud_songs(&self, limit: u32, offset: u32) -> Result<(Vec<Value>, u64)> {
         let v = self
             .post_weapi(
@@ -598,7 +600,32 @@ impl Ncm {
             )
             .await?;
         let count = v["count"].as_u64().unwrap_or(0);
-        let songs = v["data"].as_array().cloned().unwrap_or_default();
+        let songs: Vec<Value> = v["data"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|it| {
+                        let mut ss = it
+                            .get("simpleSong")
+                            .filter(|s| s.is_object() && !s["name"].is_null())
+                            .cloned()
+                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                        if ss["id"].as_u64().is_none_or(|v| v == 0) {
+                            // simpleSong 缺 id 时用云盘条目的 songId 兜底
+                            if let Some(sid) = it["songId"].as_u64() {
+                                ss["id"] = json!(sid);
+                            }
+                        }
+                        if let (Some(fn_), None) = (it["fileName"].as_str(), ss["name"].as_str()) {
+                            // 极少数无名条目：用原文件名（去扩展名）顶上
+                            let base = fn_.rsplit_once('.').map(|(b, _)| b).unwrap_or(fn_);
+                            ss["name"] = json!(base);
+                        }
+                        ss
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok((songs, count))
     }
 

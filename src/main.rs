@@ -374,6 +374,8 @@ enum FmAction {
         /// 当前歌曲 ID（0 = 不上报）
         #[arg(default_value_t = 0)]
         id: u64,
+        #[command(flatten)]
+        opts: ViewArgs,
     },
     /// 拉取一批 FM 歌曲
     Get {
@@ -2892,7 +2894,9 @@ async fn run(cli: Cli) -> Result<i32> {
                 ui::ok(&format!("已踩曲目 {id}，将少推同类"));
                 Ok(0)
             }
-            FmAction::Skip { id } => {
+            FmAction::Skip { id, opts } => {
+                ui::set_json(opts.json);
+                ui::set_quiet(opts.quiet);
                 let ncm = Ncm::with_cookie(auth.as_deref())?;
                 ncm.whoami()
                     .await?
@@ -2901,6 +2905,10 @@ async fn run(cli: Cli) -> Result<i32> {
                     ncm.fm_skip(id).await?;
                 }
                 let songs = ncm.radio_songs().await?;
+                if opts.json {
+                    println!("{}", serde_json::to_string_pretty(&Value::Array(songs))?);
+                    return Ok(0);
+                }
                 print_search_table(&songs);
                 Ok(0)
             }
