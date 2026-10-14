@@ -2674,7 +2674,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 ui::info(&format!("歌曲 {id} 暂无热门评论（总评论 {total} 条）"));
                 return Ok(0);
             }
-            for (i, c) in hot.iter().enumerate() {
+            for (i, c) in hot.iter().take(limit as usize).enumerate() {
                 let user = c["user"]["nickname"].as_str().unwrap_or("匿名");
                 let liked = c["likedCount"].as_u64().unwrap_or(0);
                 let time = c["time"].as_i64().unwrap_or(0);

@@ -1,4 +1,5 @@
 //! 网易云接口封装：读走明文 /api，写走 weapi/eapi 加密通道
+use anyhow::Context;
 use anyhow::Result;
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -133,9 +134,8 @@ impl Ncm {
         path: &str,
         mut payload: serde_json::Map<String, Value>,
     ) -> Result<Value> {
-        if self.csrf.is_empty() {
-            anyhow::bail!("cookie 缺少 __csrf 字段，无法执行写操作；请复制完整 Cookie（含 __csrf）重新 ncm login --cookie ...");
-        }
+        // 无 __csrf 不再前置拦截：读类 weapi（sublist/cloud 等）空 csrf 可用，
+        // 写类失败由服务端 code 报告（下方 context 补登录提示）
         payload.insert("csrf_token".into(), json!(self.csrf));
         let (params, enc_sec_key) =
             crate::crypto::weapi_encrypt(&Value::Object(payload).to_string());
@@ -156,7 +156,13 @@ impl Ncm {
             .await?;
         let status = resp.status();
         let bytes = resp.bytes().await?;
-        let v = parse_write_body("/weapi", path, status, &bytes)?;
+        let v = parse_write_body("/weapi", path, status, &bytes).with_context(|| {
+            if self.csrf.is_empty() {
+                "cookie 无 __csrf（部分写操作需完整 Cookie：浏览器复制时带上 __csrf 重新 ncm login --cookie）"
+            } else {
+                "weapi 请求失败"
+            }
+        })?;
         Ok(v)
     }
 
