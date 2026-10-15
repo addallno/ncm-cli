@@ -249,40 +249,40 @@ enum Commands {
         /// 歌曲 ID / 链接 / 关键词（可多个，按序拼接）
         target: Vec<String>,
         /// 播放每日推荐队列（需登录；可与其它目标叠加，置于最前）
-        #[arg(long)]
+        #[arg(help_heading = "队列", long)]
         daily: bool,
         /// 从文件读取目标列表（每行一个，与命令行目标拼接）
         #[arg(short = 'f', long, value_name = "FILE")]
         file: Option<PathBuf>,
         /// 最多播放 N 首（0 = 全部；关键词默认取最相关 1 首，-n 指定则取前 N 首连续播）
-        #[arg(short = 'n', long, default_value_t = 0)]
+        #[arg(help_heading = "队列", short = 'n', long, default_value_t = 0)]
         limit: u32,
         /// 播放队列随机洗牌
-        #[arg(long)]
+        #[arg(help_heading = "队列", long)]
         shuffle: bool,
         /// 指定播放器程序（默认探测 $NCM_PLAYER → mpv → ffplay）
-        #[arg(long, value_name = "CMD")]
+        #[arg(help_heading = "播放器", long, value_name = "CMD")]
         player: Option<String>,
         /// 音质
-        #[arg(long, default_value = "lossless", value_parser = ["lossless", "standard", "exhigh", "hires"])]
+        #[arg(help_heading = "播放器", long, default_value = "lossless", value_parser = ["lossless", "standard", "exhigh", "hires"])]
         quality: String,
         /// 只输出播放队列 JSON（不调用播放器）
-        #[arg(long)]
+        #[arg(help_heading = "输出与保存", long)]
         json: bool,
         /// 播放前先下载到本地并播放本地文件
-        #[arg(long)]
+        #[arg(help_heading = "输出与保存", long)]
         save: bool,
         /// 下载目录（--save / 快捷下载时生效；未指定取 config download-dir）
-        #[arg(short = 'o', long, value_name = "目录")]
+        #[arg(help_heading = "输出与保存", short = 'o', long, value_name = "目录")]
         output: Option<PathBuf>,
         /// 不显示滚动歌词
-        #[arg(long = "no-lyric")]
+        #[arg(help_heading = "播放器", long = "no-lyric")]
         no_lyric: bool,
         /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv；单独 --roam 即纯 FM 开播）
-        #[arg(long)]
+        #[arg(help_heading = "队列", long)]
         roam: bool,
         /// 透传给播放器的参数（经 `--` 分隔，置于最后同名以用户为准；mpv 需 `=` 形式，如 -- --volume=60 --ao=alsa）
-        #[arg(last = true, value_name = "ARGS")]
+        #[arg(help_heading = "播放器", last = true, value_name = "ARGS")]
         player_args: Vec<std::ffi::OsString>,
     },
 }
@@ -407,55 +407,64 @@ struct ViewArgs {
 #[derive(Args, Clone)]
 struct DownloadArgs {
     /// 关键词候选取前 N 首（仅 download 关键词时生效；TTY 下可交互选择，非 TTY 无 -d 取 1 首）
-    #[arg(short = 'n', long, default_value_t = 10)]
+    #[arg(help_heading = "选择", short = 'n', long, default_value_t = 10)]
     limit: u32,
     /// 音频输出目录（未指定时取 config download-dir，再未配置为当前目录）
-    #[arg(short = 'o', long, value_name = "目录")]
+    #[arg(help_heading = "输出", short = 'o', long, value_name = "目录")]
     output: Option<PathBuf>,
     /// 歌词输出目录（可重复指定多个；默认与音频同目录）
-    #[arg(long = "lrc-dir", value_name = "目录")]
+    #[arg(help_heading = "歌词", long = "lrc-dir", value_name = "目录")]
     lrc_dir: Vec<PathBuf>,
     /// 要下载的歌词类型，逗号分隔
-    #[arg(long, default_value = LRC_DEFAULT)]
+    #[arg(help_heading = "歌词", long, default_value = LRC_DEFAULT)]
     lrcs: String,
     /// 不下载任何歌词
-    #[arg(long = "no-lrc")]
+    #[arg(help_heading = "歌词", long = "no-lrc")]
     no_lrc: bool,
     /// 只下载歌词，不保存音频
-    #[arg(long = "only-lrc", alias = "lyric-only")]
+    #[arg(help_heading = "歌词", long = "only-lrc", alias = "lyric-only")]
     only_lrc: bool,
     /// 音质：standard/exhigh/lossless/hires
-    #[arg(long, default_value = "lossless")]
+    #[arg(help_heading = "输出", long, default_value = "lossless")]
     quality: String,
     /// 静默：隐藏进度动画与过程输出，仅保留结果
-    #[arg(short = 'q', long)]
+    #[arg(help_heading = "执行", short = 'q', long)]
     quiet: bool,
     /// 预演：取址并报告将写入的文件，不实际下载
-    #[arg(long)]
+    #[arg(help_heading = "执行", long)]
     dry_run: bool,
     /// 文件名模板
-    #[arg(short = 't', long, default_value = "{artists} - {track}")]
+    #[arg(
+        help_heading = "输出",
+        short = 't',
+        long,
+        default_value = "{artists} - {track}"
+    )]
     template: String,
     /// 跳过已存在的音频文件
-    #[arg(long = "skip-existing", visible_alias = "no-overwrites")]
+    #[arg(
+        help_heading = "输出",
+        long = "skip-existing",
+        visible_alias = "no-overwrites"
+    )]
     skip_existing: bool,
     /// 允许下载 30 秒试听片段（默认跳过）
-    #[arg(long = "allow-trial")]
+    #[arg(help_heading = "输出", long = "allow-trial")]
     allow_trial: bool,
     /// 按歌手维度解析目标
-    #[arg(short = 'a', long = "artist", alias = "ar")]
+    #[arg(help_heading = "选择", short = 'a', long = "artist", alias = "ar")]
     artist: bool,
     /// 机器可读的 JSON 输出
     #[arg(long)]
     json: bool,
     /// 按编号选择要下载的项：1,3 / 5-8 / 1- / all（download 结果统一生效）
-    #[arg(short = 'd', long)]
+    #[arg(help_heading = "选择", short = 'd', long)]
     download: Option<String>,
     /// 并发下载数（>1 时关闭逐曲转圈/行内进度，仅保留结果行）
-    #[arg(short = 'j', long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=16))]
+    #[arg(help_heading = "执行", short = 'j', long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=16))]
     jobs: u32,
     /// 下载完成后导出 M3U 播放列表（含成功曲目，路径相对播放列表所在目录）
-    #[arg(long, value_name = "文件")]
+    #[arg(help_heading = "输出", long, value_name = "文件")]
     m3u: Option<PathBuf>,
 }
 
@@ -948,6 +957,20 @@ fn find_player(spec: Option<&str>) -> Option<(String, Vec<String>)> {
         }
     }
     None
+}
+
+/// 旧目标别名迁移提示：daily/today/roam 现为 --daily/--roam 标志，
+/// 字面命中时本次按关键词搜索，提示避免静默换义后用户困惑（json/quiet 下自动静默）
+fn hint_legacy_alias(targets: &[String], is_play: bool) {
+    if targets
+        .iter()
+        .any(|t| matches!(t.as_str(), "daily" | "today"))
+    {
+        ui::info("daily/today 已移除目标别名，每日推荐请用 --daily（本次按关键词搜索）");
+    }
+    if is_play && targets.iter().any(|t| t == "roam") {
+        ui::info("roam 已移除目标别名，私人漫游请用 --roam（本次按关键词搜索）");
+    }
 }
 
 /// download 的批量编排：收集曲目（--daily / ID / 链接 / 关键词）→ TTY 交互选号 → 下载
@@ -1792,6 +1815,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     "请提供歌曲 ID / 歌单·专辑链接 / 关键词，或加 --daily 下每日推荐（ncm help download）"
                 );
             }
+            hint_legacy_alias(&targets, false);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             run_batch(&ncm, targets, opts, daily).await
         }
@@ -2034,6 +2058,7 @@ async fn run(cli: Cli) -> Result<i32> {
             if targets.is_empty() && !daily && !roam {
                 bail!("未指定播放目标（歌曲 ID/链接/关键词、-f 文件，或 --daily 每日推荐 / --roam 私人漫游）");
             }
+            hint_legacy_alias(&targets, true);
 
             let mut songs: Vec<Value> = Vec::new();
             let mut descs: Vec<String> = Vec::new();

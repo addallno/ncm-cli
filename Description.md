@@ -72,6 +72,8 @@ src/
 播放时自动检测 VIP 账号（若已配置多个 profile）。
 板块判定（`section_of`）：download（别名 dl）=download、play --roam=roam、play --daily/daily/recommend=recommend、
 search=search、list/playlist=list、其余=default；播放中按下载键用 download 板块凭据下载，按收藏键用当前播放凭据。
+旧目标别名 `daily/today/roam` 已移除：字面输入按关键词搜索并打一行迁移提示（改用 `--daily`/`--roam`）。
+`ncm help play`/`help download` 选项按「选择/输出/歌词/执行/队列/播放器」分组显示。
 
 取址兜底：官方失败/试听 → 第三方直连源（xuanluoge/kangqiovo/vincentzyu，无需本地服务）→ 本地 mirror（`--mirror` > `NCM_MIRROR` > 默认 3000,3100 多候选，`none` 禁用）。
 
