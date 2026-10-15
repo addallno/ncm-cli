@@ -93,7 +93,8 @@ pub fn toast(msg: &str) {
     if !std::io::stderr().is_terminal() {
         return;
     }
-    clear_overlay_rows();
+    let _g = canvas_lock();
+    clear_overlay_rows_locked();
     eprintln!("{}", crate::ui::dim(msg));
 }
 
@@ -352,9 +353,23 @@ fn current_line(tracks: &[LyricTrack], idx: usize, t: f64) -> Option<(String, Op
 /// 底行是否已写到第二行（译文行）——刷新回移与清理用
 static ON_SECOND_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// stderr 底行画布锁：overlay 刷新 / toast / 清行互斥，防交错写打乱双行状态
+static CANVAS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 持有画布锁（overlay print_row 与 toast 互斥写 stderr）
+pub(crate) fn canvas_lock() -> std::sync::MutexGuard<'static, ()> {
+    CANVAS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 清掉双行底行（line1 主词 + line2 译文），光标回到首行行首
 ///（切曲打歌名行、播放结束清理时调用）
 pub fn clear_overlay_rows() {
+    let _g = canvas_lock();
+    clear_overlay_rows_locked();
+}
+
+/// 无锁版清理：调用方已持 CANVAS 时用（防 std Mutex 不可重入死锁）
+fn clear_overlay_rows_locked() {
     use std::sync::atomic::Ordering::Relaxed;
     if ON_SECOND_LINE.swap(false, Relaxed) {
         eprint!("\r\x1b[2K\x1b[1A\r\x1b[2K");
@@ -378,6 +393,8 @@ fn print_row(
     if !std::io::stderr().is_terminal() {
         return;
     }
+    // 持画布锁：与 toast/清行互斥，防交错写打乱双行状态
+    let _g = canvas_lock();
     let total = tracks.len();
     let name = tracks.get(idx).map(|t| t.label.as_str()).unwrap_or("");
     let (main_body, sub_body) = text.unwrap_or((name, None));

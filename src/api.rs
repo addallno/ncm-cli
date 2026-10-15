@@ -694,6 +694,12 @@ impl Ncm {
         Ok(())
     }
 
+    /// 错误是否为「歌单内歌曲重复」（manipulate/tracks code=502 msg 含 1017）：
+    /// 歌已在目标歌单，语义上不算失败，调用方转成提示而非报错
+    pub fn is_duplicate_track_err(e: &anyhow::Error) -> bool {
+        format!("{e:#}").contains("歌单内歌曲重复")
+    }
+
     /// 歌单增删曲目（weapi，pyncm SetManipulatePlaylistTrack）；op = "add" | "del"
     pub async fn playlist_tracks_op(
         &self,

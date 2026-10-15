@@ -1754,6 +1754,7 @@ async fn run(cli: Cli) -> Result<i32> {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let kw = keyword.join(" ");
+            let _sp = ui::Spinner::start("搜索中…");
             let types = searchtype::dedup_types(types);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             let qs = searchtype::quotas(limit, types.len());
@@ -1845,6 +1846,7 @@ async fn run(cli: Cli) -> Result<i32> {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let _sp = ui::Spinner::start("读取每日推荐…");
             let mut songs = ncm.daily_songs().await?;
             if songs.is_empty() {
                 bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie 保存登录态）");
@@ -1861,6 +1863,7 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Some(Commands::Recommend { types, limit, opts }) => {
+            let _sp = ui::Spinner::start("读取首页推荐…");
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
@@ -2059,6 +2062,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 bail!("未指定播放目标（歌曲 ID/链接/关键词、-f 文件，或 --daily 每日推荐 / --roam 私人漫游）");
             }
             hint_legacy_alias(&targets, true);
+            let mut sp_collect = ui::Spinner::start("读取播放队列…");
 
             let mut songs: Vec<Value> = Vec::new();
             let mut descs: Vec<String> = Vec::new();
@@ -2300,6 +2304,7 @@ async fn run(cli: Cli) -> Result<i32> {
             let locations: Vec<String> = entries.iter().map(|(_, s, _, _)| s.loc()).collect();
             let n_play = entries.len();
             let n_queue = n_play + pending.len();
+            sp_collect.shutdown();
             ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
             // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告；热度标 ★）
             let show_n = n_play.min(10);
@@ -2588,6 +2593,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 return Ok(0);
             };
             let ncm = Ncm::with_cookie(Some(&auth_str))?;
+            let _sp = ui::Spinner::start("检查登录状态…");
             match ncm.whoami().await? {
                 Some((uid, name)) => {
                     if given {
@@ -2646,6 +2652,7 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Some(Commands::Whoami) => {
+            let _sp = ui::Spinner::start("查询账号信息…");
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             match ncm.whoami().await? {
                 Some((uid, name)) => {
@@ -2664,6 +2671,7 @@ async fn run(cli: Cli) -> Result<i32> {
             }
         }
         Some(Commands::Info { target, json }) => {
+            let _sp = ui::Spinner::start("读取歌曲详情…");
             ui::set_json(json);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             let id = if let Ok(id) = target.parse::<u64>() {
@@ -2741,6 +2749,7 @@ async fn run(cli: Cli) -> Result<i32> {
             limit,
             opts,
         }) => {
+            let _sp = ui::Spinner::start("读取评论…");
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let id = parse_id_or_url(&target)?;
@@ -2787,6 +2796,7 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Some(Commands::Sign { web }) => {
+            let _sp = ui::Spinner::start("签到中…");
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             let (uid, _) = ncm
                 .whoami()
@@ -2799,6 +2809,7 @@ async fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Some(Commands::Subs { types, limit, opts }) => {
+            let _sp = ui::Spinner::start("读取收藏的专辑 / 歌手…");
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
@@ -2878,6 +2889,7 @@ async fn run(cli: Cli) -> Result<i32> {
             play,
             json,
         }) => {
+            let _sp = ui::Spinner::start("读取 MV 信息…");
             ui::set_json(json);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             let detail = ncm.mv_detail(id).await?;
@@ -2928,6 +2940,7 @@ async fn run(cli: Cli) -> Result<i32> {
             offset,
             opts,
         }) => {
+            let _sp = ui::Spinner::start("读取云盘歌曲…");
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
@@ -2959,6 +2972,7 @@ async fn run(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Fm { action }) => match action {
             FmAction::Like { id, unlike } => {
+                let _sp = ui::Spinner::start("FM 处理中…");
                 let ncm = Ncm::with_cookie(auth.as_deref())?;
                 ncm.whoami()
                     .await?
@@ -2969,6 +2983,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             FmAction::Trash { id } => {
+                let _sp = ui::Spinner::start("FM 处理中…");
                 let ncm = Ncm::with_cookie(auth.as_deref())?;
                 ncm.whoami()
                     .await?
@@ -2978,6 +2993,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             FmAction::Skip { id, opts } => {
+                let _sp = ui::Spinner::start("FM 处理中…");
                 ui::set_json(opts.json);
                 ui::set_quiet(opts.quiet);
                 let ncm = Ncm::with_cookie(auth.as_deref())?;
@@ -2996,6 +3012,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             FmAction::Get { limit, opts } => {
+                let _sp = ui::Spinner::start("读取私人FM…");
                 ui::set_json(opts.json);
                 ui::set_quiet(opts.quiet);
                 let ncm = Ncm::with_cookie(auth.as_deref())?;
@@ -3015,6 +3032,7 @@ async fn run(cli: Cli) -> Result<i32> {
             }
         },
         Some(Commands::Playlist { action }) => {
+            let _sp = ui::Spinner::start("歌单操作…");
             let action = action.unwrap_or(PlaylistAction::List {
                 limit: 50,
                 opts: ViewArgs {
@@ -3141,14 +3159,23 @@ async fn run(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Like { ids, unlike }) => {
             if ids.is_empty() {
-                anyhow::bail!("请至少指定一首歌曲 ID 或链接");
+                anyhow::bail!("请至少指定一首歌曲 ID、链接或（--unlike 时）歌名关键词");
             }
-            let mut track_ids = Vec::new();
+            // 分拣：ID/链接直接收；名字仅 --unlike 支持（在红心歌单内模糊匹配）
+            let mut track_ids: Vec<u64> = Vec::new();
+            let mut names: Vec<String> = Vec::new();
             for s in &ids {
-                track_ids.push(parse_id_or_url(s)?);
+                match parse_id_or_url(s) {
+                    Ok(id) => track_ids.push(id),
+                    Err(_) => {
+                        if !unlike {
+                            anyhow::bail!("「{s}」不是歌曲 ID/链接；按歌名取消喜欢请加 --unlike");
+                        }
+                        names.push(s.clone());
+                    }
+                }
             }
-            track_ids.sort_unstable();
-            track_ids.dedup();
+            let _sp = ui::Spinner::start("读取「我喜欢的音乐」…");
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             let (uid, _) = ncm
                 .whoami()
@@ -3157,8 +3184,108 @@ async fn run(cli: Cli) -> Result<i32> {
             let lists = ncm.user_playlists(uid).await?;
             let (pid, _) = resolve_playlist(&lists, None)
                 .context("账号下未找到「我喜欢的音乐」歌单（红心歌单），请先在网页端创建")?;
+            if !names.is_empty() {
+                let (tracks, _) = ncm.playlist(pid).await?;
+                drop(_sp); // 匹配完成先停，进入交互/删除前不再转
+                for name in &names {
+                    let q = name.to_lowercase();
+                    let hits: Vec<(u64, String)> = tracks
+                        .iter()
+                        .filter_map(|t| {
+                            let title = t["name"].as_str()?;
+                            if !title.to_lowercase().contains(&q) {
+                                return None;
+                            }
+                            let id = t["id"].as_u64()?;
+                            let artists: Vec<&str> = t["ar"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|x| x["name"].as_str())
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            Some((id, format!("{title} - {}", artists.join("/"))))
+                        })
+                        .collect();
+                    match hits.len() {
+                        0 => ui::skip(&format!("红心歌单无名称含「{name}」的歌曲")),
+                        1 => {
+                            ui::info(&format!("匹配 1 首：{}", hits[0].1));
+                            track_ids.push(hits[0].0);
+                        }
+                        _ => {
+                            println!();
+                            ui::table(
+                                &["#", "曲目"],
+                                &hits
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, (_, label))| vec![(i + 1).to_string(), label.clone()])
+                                    .collect::<Vec<_>>(),
+                            );
+                            if !ui::is_tty() {
+                                anyhow::bail!(
+                                    "「{name}」匹配到 {} 首，非交互环境无法选择，请改用歌曲 ID",
+                                    hits.len()
+                                );
+                            }
+                            print!("  输入要取消喜欢的编号（如 1,3 / 1-2 / all，回车跳过）: ");
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                            let mut line = String::new();
+                            if std::io::stdin().read_line(&mut line).is_err()
+                                || line.trim().is_empty()
+                            {
+                                ui::info(&format!("已跳过「{name}」"));
+                                continue;
+                            }
+                            for tok in line.trim().split([',', ' ']) {
+                                let t = tok.trim();
+                                if t.is_empty() {
+                                    continue;
+                                }
+                                if t.eq_ignore_ascii_case("all") {
+                                    track_ids.extend(hits.iter().map(|(id, _)| *id));
+                                    continue;
+                                }
+                                let (lo, hi) = match t.split_once('-') {
+                                    Some((a, b)) => (
+                                        a.parse::<usize>().unwrap_or(0),
+                                        b.parse::<usize>().unwrap_or(hits.len()),
+                                    ),
+                                    None => {
+                                        let v = t.parse::<usize>().unwrap_or(0);
+                                        (v, v)
+                                    }
+                                };
+                                if lo < 1 || hi > hits.len() || lo > hi {
+                                    ui::fail(&format!("无效编号：{t}（共 {} 条）", hits.len()));
+                                    continue;
+                                }
+                                track_ids.extend(hits[lo - 1..=hi - 1].iter().map(|(id, _)| *id));
+                            }
+                        }
+                    }
+                }
+            }
+            track_ids.sort_unstable();
+            track_ids.dedup();
+            if track_ids.is_empty() {
+                anyhow::bail!("没有可操作的歌曲（检查 ID / 名称匹配结果）");
+            }
             let op = if unlike { "del" } else { "add" };
-            ncm.playlist_tracks_op(op, pid, &track_ids).await?;
+            let res = ncm.playlist_tracks_op(op, pid, &track_ids).await;
+            if let Err(ref e) = res {
+                // 歌已在红心歌单：语义已达成，不当失败
+                if op == "add" && Ncm::is_duplicate_track_err(e) {
+                    ui::skip(&format!(
+                        "{} 首已在「我喜欢的音乐」，无需重复收藏",
+                        track_ids.len()
+                    ));
+                    return Ok(0);
+                }
+            }
+            res?;
             let msg = if unlike {
                 format!("从「我喜欢的音乐」取消收藏 {} 首", track_ids.len())
             } else {
@@ -3407,6 +3534,10 @@ async fn guard_loop(
                     }
                     match outcome {
                         Ok(()) => ui::ok(&format!("已收藏「{label}」到我喜欢的音乐")),
+                        Err(e) if Ncm::is_duplicate_track_err(&e) => {
+                            // 歌已在红心歌单：语义已达成，提示而非报错
+                            ui::skip(&format!("「{label}」已在「我喜欢的音乐」"));
+                        }
                         Err(e) => ui::fail(&format!("收藏失败：{e:#}")),
                     }
                 });

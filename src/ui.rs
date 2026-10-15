@@ -373,7 +373,8 @@ pub fn progress_line(done: u64, total: u64, started: Instant) -> String {
     }
 }
 
-const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// gh 风格 braille 帧（GitHub gh CLI 加载 Codespace 时同款）
+const SPINNER_FRAMES: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
 /// 转圈动画：进度条接管时调用 stop() 收行，两者不抢行
 pub struct Spinner {
