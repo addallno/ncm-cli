@@ -96,14 +96,19 @@ pub fn toast(msg: &str) {
     let _g = canvas_lock();
     clear_overlay_rows_locked();
     eprintln!("{}", crate::ui::dim(msg));
+    // 底行被清：标记重画，overlay 即刻恢复歌词（暂停时无 time-pos 事件也要恢复）
+    CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 捕获 mpv/ffplay stderr：终端不再直接受其输出（底行歌词不会被插行打乱），
 /// 过滤后把有用的行（错误/音频设备/解码等）以 toast 打出
-pub fn spawn_stderr_filter(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<()> {
+pub fn spawn_output_filter<R>(output: R) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut lines = BufReader::new(stderr).lines();
+        let mut lines = BufReader::new(output).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(msg) = useful_log(&line) {
                 toast(&msg);
@@ -112,9 +117,29 @@ pub fn spawn_stderr_filter(stderr: tokio::process::ChildStderr) -> tokio::task::
     })
 }
 
+/// 剥离 ANSI 转义序列（mpv 可能带终端色，toast 统一重上灰色防串色）
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\x1b' && it.clone().next() == Some('[') {
+            it.next();
+            for c2 in it.by_ref() {
+                if c2.is_ascii_alphabetic() || c2 == '@' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// 从播放器日志行提取值得展示的内容；噪声/正常信息返回 None
 fn useful_log(line: &str) -> Option<String> {
-    let t = line.trim();
+    let cleaned = strip_ansi(line);
+    let t = cleaned.trim();
     if t.is_empty() {
         return None;
     }
@@ -242,7 +267,28 @@ async fn overlay_loop(
     let mut cur_t: f64 = 0.0;
     let mut dur: Option<f64> = None;
     let mut lines = TokioBufReader::new(read).lines();
-    while let Ok(Some(raw)) = lines.next_line().await {
+    loop {
+        // 400ms 轮询：toast 清底行后无事件（暂停/停秒）也要立即重画，防歌词滞留
+        let next = tokio::time::timeout(Duration::from_millis(400), lines.next_line()).await;
+        if CANVAS_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+            let line = current_line(ts.as_slice(), cur_idx, cur_t);
+            let disp = line.as_ref().map(|(m, s)| (m.as_str(), s.as_deref()));
+            print_row(
+                ts.as_slice(),
+                cur_idx,
+                disp,
+                (cur_t > 0.0).then_some(cur_t),
+                dur,
+            );
+            last_line = line;
+            last_sec = (cur_t >= 0.0).then_some(cur_t as u64);
+        }
+        let raw = match next {
+            Ok(Ok(Some(raw))) => raw,
+            Ok(Ok(None)) | Ok(Err(_)) => break, // EOF / 读错误 → 结束
+            Err(_) => continue,                 // 超时：只处理 dirty
+        };
         let Ok(ev) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
@@ -355,6 +401,8 @@ static ON_SECOND_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 
 /// stderr 底行画布锁：overlay 刷新 / toast / 清行互斥，防交错写打乱双行状态
 static CANVAS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// 画布被 toast 清过：overlay 需立即重画，否则暂停/无事件时歌词滞留
+static CANVAS_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 持有画布锁（overlay print_row 与 toast 互斥写 stderr）
 pub(crate) fn canvas_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -431,12 +479,18 @@ fn print_row(
     if ON_SECOND_LINE.load(Relaxed) {
         out.push_str("\x1b[1A\r\x1b[2K"); // 上移回 line1
     }
+    // meta 为空（切曲首帧无时间）时补一个空格，防 prefix 与歌名黏连
+    let gap = if meta.is_empty() {
+        " ".to_string()
+    } else {
+        meta
+    };
     out.push_str(&format!(
-        "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{meta}{clipped}\n\r\x1b[2K"
+        "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{gap}{clipped}\n\r\x1b[2K"
     ));
     if let Some(s) = &sub_clipped {
-        // 与 line1 原文起始列对齐（跳过 prefix+meta 宽度），译文用淡蓝
-        let pad = " ".repeat(crate::ui::display_width(&prefix) + crate::ui::display_width(&meta));
+        // 与 line1 原文起始列对齐（跳过 prefix+gap 宽度），译文用淡蓝
+        let pad = " ".repeat(crate::ui::display_width(&prefix) + crate::ui::display_width(&gap));
         out.push_str(&crate::ui::soft_blue(&format!("{pad}{s}")));
     }
     ON_SECOND_LINE.store(true, Relaxed);

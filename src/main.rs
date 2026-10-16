@@ -2367,6 +2367,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 // 后以 toast 打出（如无法识别音频设备），不再直写终端打乱 overlay
                 args.push("--term-status-msg=".to_string());
                 args.push("--msg-level=all=error,ao=warn,ad=warn".to_string());
+                // 禁 mpv 自带终端着色（toast 统一重上灰，防红色串色）
+                args.push("--msg-color=no".to_string());
                 // 直链交给 ffmpeg：禁用 ytdl 解析（坏掉的 yt-dlp 只会刷 traceback）
                 args.push("--ytdl=no".to_string());
                 // 预开播放列表下一条：按 > 跳过时新曲已就绪，无需等冷加载缓冲
@@ -2484,7 +2486,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         .spawn()
                         .with_context(|| format!("启动播放器失败: {prog}"))?;
                     // stderr 过滤：错误/设备信息走 toast，不直写终端打乱底行
-                    let log = child.stderr.take().map(player::spawn_stderr_filter);
+                    let log = child.stderr.take().map(player::spawn_output_filter);
                     let r = child.wait().await.context("等待播放器失败")?;
                     if let Some(h) = log {
                         h.abort();
@@ -2500,16 +2502,22 @@ async fn run(cli: Cli) -> Result<i32> {
                 let mut cmd = tokio::process::Command::new(&prog);
                 cmd.args(&args)
                     .args(&locations)
-                    .stderr(std::process::Stdio::piped());
+                    .stderr(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped());
                 let mut child = cmd
                     .spawn()
                     .with_context(|| format!("启动播放器失败: {prog}"))?;
-                // stderr 过滤：错误/音频设备等有用行经 toast 打出，其余噪声丢弃
-                let log = child.stderr.take().map(player::spawn_stderr_filter);
+                // stderr/stdout 都收进过滤器：错误/音频设备等有用行经 toast 打出，
+                // 其余噪声丢弃，防任何一路直写终端打乱歌词底行
+                let log = child.stderr.take().map(player::spawn_output_filter);
+                let log2 = child.stdout.take().map(player::spawn_output_filter);
                 let status = child.wait().await.context("等待播放器失败")?;
                 if let Some(h) = log {
                     // EOF 随 mpv 退出自然结束；等一拍让末尾错误行打完再回收
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    h.abort();
+                }
+                if let Some(h) = log2 {
                     h.abort();
                 }
                 status

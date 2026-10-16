@@ -88,28 +88,44 @@ pub fn soft_blue(t: &str) -> String {
     paint(t, "38;5;117")
 }
 
+/// 清掉当前行（防 spinner 转圈占行时后续输出黏在行尾）；TTY 下才写
+fn clear_cur_line() {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\r\x1b[K");
+    let _ = out.flush();
+}
+
 pub fn step(msg: &str) {
+    clear_cur_line();
     if json_mode() || quiet() {
         return;
     }
     println!("{} {}", accent("▸"), msg);
 }
 pub fn ok(msg: &str) {
+    clear_cur_line();
     if json_mode() {
         return;
     }
     println!("  {} {}", good("✔"), msg);
 }
 pub fn skip(msg: &str) {
+    clear_cur_line();
     if json_mode() {
         return;
     }
     println!("  {} {}", warn("◌"), msg);
 }
 pub fn fail(msg: &str) {
+    clear_cur_line();
     eprintln!("  {} {}", bad("✘"), msg);
 }
 pub fn info(msg: &str) {
+    clear_cur_line();
     if json_mode() || quiet() {
         return;
     }
@@ -408,7 +424,7 @@ impl Spinner {
                         frame.to_string()
                     };
                     let mut out = std::io::stdout();
-                    let line = format!("  {painted} {label}");
+                    let line = format!("  {painted} {label} ");
                     let line = truncate_width(&line, term_width().saturating_sub(1));
                     let _ = write!(out, "\r\x1b[K{line}");
                     let _ = out.flush();
@@ -417,7 +433,7 @@ impl Spinner {
                 }
             }));
         } else {
-            println!("  {}", dim(&s.label));
+            println!("  {} ", dim(&s.label));
         }
         s
     }
