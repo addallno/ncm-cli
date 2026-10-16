@@ -2346,7 +2346,7 @@ async fn run(cli: Cli) -> Result<i32> {
             if is_mpv {
                 #[cfg(unix)]
                 ui::info(&format!(
-                    "mpv 键位: 空格 暂停 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · {} 下载当前曲 · {} 收藏当前曲 · q 退出",
+                    "mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · {} 下载当前曲 · {} 收藏当前曲 · q 退出",
                     config::play_download_key(),
                     config::play_like_key()
                 ));
@@ -2369,36 +2369,20 @@ async fn run(cli: Cli) -> Result<i32> {
                 args.push("--msg-level=all=error,ao=warn,ad=warn".to_string());
                 // 禁 mpv 自带终端着色（toast 统一重上灰，防红色串色）
                 args.push("--msg-color=no".to_string());
+                // mpv 的 terminal input 在本环境不初始化（不读 tty），键入只被内核
+                // 回显后遭 overlay 擦除；改由 ncm 键盘接管，mpv 侧禁自读防双端抢键
+                #[cfg(unix)]
+                args.push("--input-terminal=no".to_string());
                 // 直链交给 ffmpeg：禁用 ytdl 解析（坏掉的 yt-dlp 只会刷 traceback）
                 args.push("--ytdl=no".to_string());
                 // 预开播放列表下一条：按 > 跳过时新曲已就绪，无需等冷加载缓冲
                 args.push("--prefetch-playlist=yes".to_string());
             }
-            // 守护任务：续取/漫游 + 快捷下载按键消费（都需要 IPC socket）
+            // 守护任务：续取/漫游 + 快捷下载消费（都需要 IPC socket）
             #[cfg(unix)]
             let guard_needed = is_mpv;
             #[cfg(not(unix))]
             let guard_needed = false;
-            // 快捷下载/收藏键写入临时 input-conf（mpv 仅取文件中列出的绑定，不影响默认键）
-            #[cfg(unix)]
-            let input_conf = if guard_needed {
-                let dl_key = config::play_download_key();
-                let like_key = config::play_like_key();
-                let p = std::env::temp_dir().join(format!("ncm-input-{}.conf", std::process::id()));
-                let content = format!(
-                    "{dl_key} script-message ncm-download\n{like_key} script-message ncm-like\n"
-                );
-                if std::fs::write(&p, content).is_ok() {
-                    args.push(format!("--input-conf={}", p.display()));
-                    Some(p)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            #[cfg(not(unix))]
-            let input_conf: Option<PathBuf> = None;
             if is_mpv && (want_lyric || guard_needed) {
                 player::cleanup_socket(&sock);
                 args.push(format!("--input-ipc-server={}", sock.display()));
@@ -2428,9 +2412,15 @@ async fn run(cli: Cli) -> Result<i32> {
                 }
             }
             // 播放守护：pending 随播随取（在线地址现取防过期）+ 可选漫游接FM
-            // + 快捷下载按键监听（ipc_send/ipc_get 为 unix 实现，Windows 仅提示不支持）
+            // + 键盘接管（ipc_send/ipc_get 为 unix 实现，Windows 仅提示不支持）
             #[cfg(unix)]
-            let (guard_handle, msg_listener, quick_tasks) = if guard_needed {
+            let raw_guard = if guard_needed && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                player::RawGuard::enable()
+            } else {
+                None
+            };
+            #[cfg(unix)]
+            let (guard_handle, key_reader, quick_tasks) = if guard_needed {
                 if roam {
                     ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
                 }
@@ -2439,8 +2429,14 @@ async fn run(cli: Cli) -> Result<i32> {
                     tokio::task::JoinHandle<()>,
                 >::new(
                 )));
-                // 独立客户端监听 script-message（与歌词 overlay 并存，mpv 支持多客户端）
-                let listener = Some(player::spawn_msg_listener(sock.clone()));
+                // 键盘接管：raw 模式就绪才接管（非 TTY 场景按键本就到不了）
+                let key_reader = raw_guard.as_ref().map(|_| {
+                    player::spawn_key_reader(
+                        sock.clone(),
+                        config::play_download_key(),
+                        config::play_like_key(),
+                    )
+                });
                 let handle = Some(tokio::spawn(guard_loop(
                     sock.clone(),
                     ncm.clone(),
@@ -2454,7 +2450,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     out_dir.clone(),
                     quick_tasks.clone(),
                 )));
-                (handle, listener, Some(quick_tasks))
+                (handle, key_reader, Some(quick_tasks))
             } else {
                 if roam {
                     ui::info("漫游需要 mpv（当前播放器无 IPC 接口），已忽略");
@@ -2526,7 +2522,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 h.abort();
             }
             #[cfg(unix)]
-            if let Some(l) = msg_listener {
+            if let Some(l) = key_reader {
                 l.abort();
             }
             // 等快捷下载/收藏任务收尾：guard 已停不会再 spawn 新任务，
@@ -2541,9 +2537,6 @@ async fn run(cli: Cli) -> Result<i32> {
                     )
                     .await;
                 }
-            }
-            if let Some(p) = input_conf {
-                let _ = std::fs::remove_file(p);
             }
             if overlay.is_some() && std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                 player::clear_overlay_rows();
@@ -3452,8 +3445,6 @@ async fn guard_loop(
         .collect();
     seen.extend(pending.iter().map(|p| p.track.id));
     let mut dup_streak: u32 = 0; // 连续整批重复计数（防服务端只回同一批时卡死）
-    let mut last_vol: Option<f64> = None; // 音量 toast 去重（首轮只记录不打）
-    let mut last_speed: Option<f64> = None; // 变速 toast 去重
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         // 查询失败 = mpv 未就绪或已退出（连续 3 次才认定退出）
@@ -3470,27 +3461,6 @@ async fn guard_loop(
             continue;
         };
         fails = 0;
-        // 音量/变速 toast：mpv 终端状态行已关闭，按键调节经 IPC 轮询感知
-        req_id += 1;
-        if let Some(v) = player::ipc_get(&sock, "volume", req_id)
-            .await
-            .and_then(|v| v.as_f64())
-        {
-            if last_vol.is_some_and(|x| (x - v).abs() > 0.5) {
-                player::toast(&format!("♪ 音量 {:.0}%", v));
-            }
-            last_vol = Some(v);
-        }
-        req_id += 1;
-        if let Some(s) = player::ipc_get(&sock, "speed", req_id)
-            .await
-            .and_then(|v| v.as_f64())
-        {
-            if last_speed.is_some_and(|x| (x - s).abs() > 0.001) {
-                player::toast(&format!("♪ 速度 {:.2}x", s));
-            }
-            last_speed = Some(s);
-        }
         let Some(pos) = pos_v.as_i64().filter(|&p| p >= 0).map(|p| p as u64) else {
             continue; // 队列空/空闲：mpv 还活着，等下轮
         };

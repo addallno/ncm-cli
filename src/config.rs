@@ -125,7 +125,7 @@ pub fn download_dir() -> Option<PathBuf> {
     get("download-dir").ok().flatten().map(PathBuf::from)
 }
 
-/// 播放快捷下载键（未配置默认 `d`，mpv 中该键未被占用）
+/// 播放快捷下载键（未配置默认 `d`，播放期由 ncm 键盘接管消费，不与 mpv 键冲突）
 pub fn play_download_key() -> String {
     get("play.download-key")
         .ok()
@@ -133,7 +133,7 @@ pub fn play_download_key() -> String {
         .unwrap_or_else(|| "d".to_string())
 }
 
-/// 播放快捷收藏键（未配置默认 `l`，mpv 中该键未被占用）
+/// 播放快捷收藏键（未配置默认 `l`，播放期由 ncm 键盘接管消费，不与 mpv 键冲突）
 pub fn play_like_key() -> String {
     get("play.like-key")
         .ok()

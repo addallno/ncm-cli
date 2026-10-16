@@ -1,6 +1,6 @@
 [package]
 name = "ncm"
-version = "0.3.26"
+version = "0.3.27"
 edition = "2021"
 description = "网易云音乐统一命令行工具（搜索 / 下载 / 歌词 / TUI）"
 license = "MIT"
@@ -8,7 +8,7 @@ license = "MIT"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "sync", "net", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "time", "sync", "net", "process"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "gzip", "brotli"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +27,9 @@ getrandom = "0.2"
 terminal_size = "0.4"
 # 封面压缩（嵌入前缩放到 ≤1000px 并转 JPEG，防大图导致播放器加载失败）
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

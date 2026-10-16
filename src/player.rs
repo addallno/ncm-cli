@@ -20,61 +20,170 @@ pub struct LyricTrack {
     pub lines: Vec<(f64, String)>,
 }
 
-/// 快捷下载请求计数（mpv input-conf 绑键触发，guard_loop 消费）
+/// 快捷下载请求计数（键盘接管键触发，guard_loop 消费）
 pub static DOWNLOAD_REQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// 快捷收藏请求计数（mpv input-conf 绑键触发，guard_loop 消费）
+/// 快捷收藏请求计数（键盘接管键触发，guard_loop 消费）
 pub static LIKE_REQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// 连接 mpv IPC 并只监听 script-message 快捷下载/收藏请求（mpv input-conf 绑键
-/// `script-message ncm-download` / `script-message ncm-like`）；mpv 退出（EOF）自然结束
-///
-/// 与歌词 overlay 是两个独立客户端，mpv 支持多客户端连接同一 socket
+/// 终端 raw 模式守卫：播放期关掉内核回显与规范模式（字符不再被回显、无需等回车），
+/// ISIG 一并关（Ctrl+C 作为字节交给键盘接管走优雅退出，Drop 恢复 termios）；
+/// Drop（含 panic 路径）恢复原设置
 #[cfg(unix)]
-pub fn spawn_msg_listener(sock: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
+pub struct RawGuard {
+    fd: i32,
+    orig: libc::termios,
+}
+
+#[cfg(unix)]
+impl RawGuard {
+    /// stdin 非 TTY（管道/重定向）返回 None，此时不启用键盘接管
+    pub fn enable() -> Option<Self> {
+        unsafe {
+            let fd = libc::STDIN_FILENO;
+            if libc::isatty(fd) == 0 {
+                return None;
+            }
+            let mut orig = std::mem::MaybeUninit::<libc::termios>::uninit();
+            if libc::tcgetattr(fd, orig.as_mut_ptr()) != 0 {
+                return None;
+            }
+            let orig = orig.assume_init();
+            let mut raw = orig;
+            libc::cfmakeraw(&mut raw);
+            if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
+                return None;
+            }
+            Some(Self { fd, orig })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.orig);
+        }
+    }
+}
+
+/// 播放期键盘接管：mpv 的 terminal input 在当前环境不初始化（不读 tty、不设 raw，
+/// 键入字符仅被内核回显后遭歌词 overlay 擦除），故由 ncm 独占 stdin（raw+noecho），
+/// 按键映射为 mpv IPC 命令；mpv 侧配 --input-terminal=no 禁自读，防恢复后双端抢键。
+/// 调用前须先 RawGuard::enable（读到的字节是 raw 模式才不等回车、不回显）
+#[cfg(unix)]
+pub fn spawn_key_reader(
+    sock: std::path::PathBuf,
+    dl_key: String,
+    like_key: String,
+) -> tokio::task::JoinHandle<()> {
+    use tokio::io::AsyncReadExt;
     tokio::spawn(async move {
-        // 持续重连：mpv 启动晚/中途重启/首次 5s 内没起来都不放弃，
-        // 否则首个窗口错过就永久收不到快捷键（mpv 侧按键照发但没人听）
+        let mut req_id: u64 = 50_000;
+        let dl = dl_key.as_bytes().first().copied();
+        let lk = like_key.as_bytes().first().copied();
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1];
         loop {
-            let stream = loop {
-                match UnixStream::connect(&sock).await {
-                    Ok(s) => break s,
-                    Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            match stdin.read(&mut buf).await {
+                Ok(0) | Err(_) => return, // EOF/读错：stdin 断开，结束接管
+                Ok(_) => {}
+            }
+            let b = buf[0];
+            // 方向键是 ESC [ C/D 序列；读后续字节带 50ms 超时，
+            // 防「单按 ESC」把下一个普通键吞进序列
+            if b == 0x1b {
+                let mut seq = [0u8; 2];
+                let mut n = 0;
+                for slot in &mut seq {
+                    match tokio::time::timeout(
+                        Duration::from_millis(50),
+                        stdin.read(std::slice::from_mut(slot)),
+                    )
+                    .await
+                    {
+                        Ok(Ok(1)) => n += 1,
+                        _ => break,
+                    }
                 }
-            };
-            let mut lines = TokioBufReader::new(stream).lines();
-            while let Ok(Some(raw)) = lines.next_line().await {
-                let Ok(ev) = serde_json::from_str::<Value>(&raw) else {
-                    continue;
-                };
-                if ev["event"] == "client-message" {
-                    match ev["args"][0].as_str() {
-                        Some("ncm-download") => {
-                            std::sync::atomic::AtomicUsize::fetch_add(
-                                &DOWNLOAD_REQ,
-                                1,
-                                std::sync::atomic::Ordering::Relaxed,
-                            );
+                if n == 2 && seq[0] == b'[' {
+                    match seq[1] {
+                        b'C' => {
+                            let _ = ipc_send(&sock, r#"{"command":["seek",5,"small"]}"#).await;
                         }
-                        Some("ncm-like") => {
-                            std::sync::atomic::AtomicUsize::fetch_add(
-                                &LIKE_REQ,
-                                1,
-                                std::sync::atomic::Ordering::Relaxed,
-                            );
+                        b'D' => {
+                            let _ = ipc_send(&sock, r#"{"command":["seek",-5,"small"]}"#).await;
                         }
                         _ => {}
                     }
                 }
+                continue;
             }
-            // EOF：mpv 退出或 socket 被重建，稍等后重连（任务由调用方 abort 收尾）
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            match b {
+                b' ' => {
+                    req_id += 1;
+                    let paused = ipc_get(&sock, "pause", req_id)
+                        .await
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let nv = !paused;
+                    let _ = ipc_send(
+                        &sock,
+                        &format!(r#"{{"command":["set_property","pause",{nv}]}}"#),
+                    )
+                    .await;
+                    toast(if nv {
+                        "♪ 已暂停"
+                    } else {
+                        "♪ 继续播放"
+                    });
+                }
+                b'9' | b'0' => {
+                    let step = if b == b'9' { 5 } else { -5 };
+                    let _ =
+                        ipc_send(&sock, &format!(r#"{{"command":["add","volume",{step}]}}"#)).await;
+                    req_id += 1;
+                    if let Some(v) = ipc_get(&sock, "volume", req_id)
+                        .await
+                        .and_then(|v| v.as_f64())
+                    {
+                        toast(&format!("♪ 音量 {v:.0}%"));
+                    }
+                }
+                b'>' => {
+                    let _ = ipc_send(&sock, r#"{"command":["playlist-next"]}"#).await;
+                }
+                b'<' => {
+                    let _ = ipc_send(&sock, r#"{"command":["playlist-prev"]}"#).await;
+                }
+                b'.' => {
+                    let _ = ipc_send(&sock, r#"{"command":["seek",5,"small"]}"#).await;
+                }
+                b',' => {
+                    let _ = ipc_send(&sock, r#"{"command":["seek",-5,"small"]}"#).await;
+                }
+                0x03 | b'q' => {
+                    // Ctrl+C（raw 下 ISIG 已关，字节直达）与 q：经 IPC 优雅退出，
+                    // 主流程 wait 返回后 Drop 恢复 termios 并收尾；
+                    // socket 未就绪（mpv 启动中）时重试 ~5s，防键被吞后退不出去
+                    for _ in 0..20 {
+                        if ipc_send(&sock, r#"{"command":["quit"]}"#).await.is_ok() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                    return;
+                }
+                _ if dl.is_some_and(|k| k == b) => {
+                    DOWNLOAD_REQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                _ if lk.is_some_and(|k| k == b) => {
+                    LIKE_REQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                _ => {}
+            }
         }
     })
-}
-
-#[cfg(not(unix))]
-pub fn spawn_msg_listener(_sock: std::path::PathBuf) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async {})
 }
 
 /// 生成 mpv IPC socket 路径（tmp 下，带 pid 避免冲突）
