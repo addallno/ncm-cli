@@ -90,33 +90,36 @@ pub fn spawn_key_reader(
                 Ok(_) => {}
             }
             let b = buf[0];
-            // 方向键是 ESC [ C/D 序列；读后续字节带 50ms 超时，
-            // 防「单按 ESC」把下一个普通键吞进序列
+            // ESC 序列（方向键 CSI/SS3、含修饰的变体）：100ms 窗口累积读到终结符
+            // A/B/C/D 即映射 mpv 方向键名；超时/不匹配（单按 ESC 等）丢弃
             if b == 0x1b {
-                let mut seq = [0u8; 2];
-                let mut n = 0;
-                for slot in &mut seq {
+                let mut seq: Vec<u8> = Vec::new();
+                let mut slot = 0u8;
+                while seq.len() < 8 {
                     match tokio::time::timeout(
-                        Duration::from_millis(50),
-                        stdin.read(std::slice::from_mut(slot)),
+                        Duration::from_millis(100),
+                        stdin.read(std::slice::from_mut(&mut slot)),
                     )
                     .await
                     {
-                        Ok(Ok(1)) => n += 1,
+                        Ok(Ok(1)) => {
+                            seq.push(slot);
+                            if matches!(slot, b'A' | b'B' | b'C' | b'D') {
+                                break;
+                            }
+                        }
                         _ => break,
                     }
                 }
-                if n == 2 && seq[0] == b'[' {
-                    match seq[1] {
-                        b'C' => {
-                            let _ = ipc_send(&sock, r#"{"command":["seek",5,"small"]}"#).await;
-                        }
-                        b'D' => {
-                            let _ = ipc_send(&sock, r#"{"command":["seek",-5,"small"]}"#).await;
-                        }
-                        _ => {}
-                    }
-                }
+                let key = match seq.last() {
+                    Some(b'A') => "UP",
+                    Some(b'B') => "DOWN",
+                    Some(b'C') => "RIGHT",
+                    Some(b'D') => "LEFT",
+                    _ => continue,
+                };
+                let cmd = serde_json::json!({ "command": ["keypress", key] }).to_string();
+                let _ = ipc_send(&sock, &cmd).await;
                 continue;
             }
             match b {
@@ -132,35 +135,17 @@ pub fn spawn_key_reader(
                         &format!(r#"{{"command":["set_property","pause",{nv}]}}"#),
                     )
                     .await;
-                    toast(if nv {
-                        "♪ 已暂停"
+                    feedback(if nv {
+                        "⏸ 已暂停"
                     } else {
-                        "♪ 继续播放"
+                        "▶ 继续播放"
                     });
                 }
                 b'9' | b'0' => {
-                    let step = if b == b'9' { 5 } else { -5 };
-                    let _ =
-                        ipc_send(&sock, &format!(r#"{{"command":["add","volume",{step}]}}"#)).await;
-                    req_id += 1;
-                    if let Some(v) = ipc_get(&sock, "volume", req_id)
-                        .await
-                        .and_then(|v| v.as_f64())
-                    {
-                        toast(&format!("♪ 音量 {v:.0}%"));
+                    let step = if b == b'9' { 2 } else { -2 };
+                    if let Some(v) = ipc_add_volume(&sock, step).await {
+                        feedback(format!("♪ 音量 {v:.0}%"));
                     }
-                }
-                b'>' => {
-                    let _ = ipc_send(&sock, r#"{"command":["playlist-next"]}"#).await;
-                }
-                b'<' => {
-                    let _ = ipc_send(&sock, r#"{"command":["playlist-prev"]}"#).await;
-                }
-                b'.' => {
-                    let _ = ipc_send(&sock, r#"{"command":["seek",5,"small"]}"#).await;
-                }
-                b',' => {
-                    let _ = ipc_send(&sock, r#"{"command":["seek",-5,"small"]}"#).await;
                 }
                 0x03 | b'q' => {
                     // Ctrl+C（raw 下 ISIG 已关，字节直达）与 q：经 IPC 优雅退出，
@@ -180,7 +165,17 @@ pub fn spawn_key_reader(
                 _ if lk.is_some_and(|k| k == b) => {
                     LIKE_REQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                _ => {}
+                // 其余可打印 ASCII 键位语义交回 mpv 默认绑定（[ ] 变速、< > 切曲、
+                // , . seek、m 静音、f 全屏、数字跳转等全可用）
+                0x21..=0x7e => {
+                    let ch = (b as char).to_string();
+                    let cmd = serde_json::json!({ "command": ["keypress", ch] }).to_string();
+                    let _ = ipc_send(&sock, &cmd).await;
+                }
+                0x7f => {
+                    let _ = ipc_send(&sock, r#"{"command":["keypress","BS"]}"#).await;
+                }
+                _ => {} // \r\n 与高位 UTF-8 字节丢弃
             }
         }
     })
@@ -325,6 +320,49 @@ pub async fn ipc_get(sock: &Path, prop: &str, req_id: u64) -> Option<Value> {
             let v: Value = serde_json::from_str(&raw).ok()?;
             if v["request_id"].as_u64() == Some(req_id) {
                 return (v["error"].as_str() == Some("success")).then(|| v["data"].clone());
+            }
+        }
+        None
+    };
+    tokio::time::timeout(Duration::from_secs(2), fut)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// 同连接顺序 add volume 后读回显值：防两条独立连接交错时 get 读到加前的旧音量
+#[cfg(unix)]
+async fn ipc_add_volume(sock: &Path, step: i64) -> Option<f64> {
+    use tokio::io::AsyncWriteExt as _;
+    let fut = async move {
+        let mut s = UnixStream::connect(sock).await.ok()?;
+        s.write_all(
+            format!("{{\"command\":[\"add\",\"volume\",{step}],\"request_id\":49998}}\n")
+                .as_bytes(),
+        )
+        .await
+        .ok()?;
+        let mut lines = TokioBufReader::new(s).lines();
+        for _ in 0..8 {
+            let raw = lines.next_line().await.ok()??;
+            let v: Value = serde_json::from_str(&raw).ok()?;
+            if v["request_id"].as_u64() == Some(49998) {
+                break;
+            }
+        }
+        let mut s2 = lines.into_inner();
+        s2.write_all(b"{\"command\":[\"get_property\",\"volume\"],\"request_id\":49999}\n")
+            .await
+            .ok()?;
+        s2.flush().await.ok()?;
+        let mut lines = TokioBufReader::new(s2).lines();
+        for _ in 0..8 {
+            let raw = lines.next_line().await.ok()??;
+            let v: Value = serde_json::from_str(&raw).ok()?;
+            if v["request_id"].as_u64() == Some(49999) {
+                return (v["error"].as_str() == Some("success"))
+                    .then(|| v["data"].as_f64())
+                    .flatten();
             }
         }
         None
@@ -518,6 +556,32 @@ pub(crate) fn canvas_lock() -> std::sync::MutexGuard<'static, ()> {
     CANVAS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// 按键就地反馈槽（非 toast）：overlay 渲染时拼在歌词行末尾，2s TTL
+#[cfg(unix)]
+static FEEDBACK: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// 写入按键就地反馈并唤醒 overlay 重画；2s 后自动过期（置 dirty 触发重画清除）
+#[cfg(unix)]
+fn feedback(msg: impl Into<String>) {
+    *FEEDBACK.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((msg.into(), std::time::Instant::now()));
+    CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// 读取未过期的就地反馈（print_row 渲染拼接用）
+#[cfg(unix)]
+fn feedback_now() -> Option<String> {
+    let g = FEEDBACK.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref()
+        .filter(|(_, at)| at.elapsed() < Duration::from_secs(2))
+        .map(|(m, _)| m.clone())
+}
+
 /// 清掉双行底行（line1 主词 + line2 译文），光标回到首行行首
 ///（切曲打歌名行、播放结束清理时调用）
 pub fn clear_overlay_rows() {
@@ -573,6 +637,13 @@ fn print_row(
         (Some(tt), _) => crate::ui::dim(&format!(" {} ", fmt_t(tt))),
         _ => String::new(),
     };
+    // 按键就地反馈（音量/暂停）拼在行尾：黄字，占位先扣预算防换行叠影
+    let fb = feedback_now();
+    let fb_txt = fb.as_deref().map(|m| format!("  \x1b[33m{m}\x1b[0m"));
+    let fb_w = fb
+        .as_deref()
+        .map(|m| crate::ui::display_width(m) + 2)
+        .unwrap_or(0);
     // 按 stderr 实际终端宽度算预算（写死 60 会在宽屏截太短、窄屏换行叠影）
     let term_w = terminal_size::terminal_size_of(std::io::stderr())
         .map(|(w, _)| w.0 as usize)
@@ -580,6 +651,7 @@ fn print_row(
     let budget = term_w
         .saturating_sub(crate::ui::display_width(&prefix))
         .saturating_sub(crate::ui::display_width(&meta))
+        .saturating_sub(fb_w)
         .saturating_sub(1);
     let clipped = crate::ui::truncate_width(main_body, budget);
     let sub_clipped = sub_body.map(|s| crate::ui::truncate_width(s, budget));
@@ -595,7 +667,8 @@ fn print_row(
         meta
     };
     out.push_str(&format!(
-        "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{gap}{clipped}\n\r\x1b[2K"
+        "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{gap}{clipped}{}\n\r\x1b[2K",
+        fb_txt.unwrap_or_default()
     ));
     if let Some(s) = &sub_clipped {
         // 与 line1 原文起始列对齐（跳过 prefix+gap 宽度），译文用淡蓝
