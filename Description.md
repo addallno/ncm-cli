@@ -41,23 +41,24 @@ src/
 | 命令 | 说明 |
 |------|------|
 | `ncm search <kw>` | 纯浏览：表格 / `--json`（下载走 download）；`-t/--type` 逗号分隔多类型（数字与别名混用，如 `1,1000`/`song,playlist`），统一表 + 「类型」列，`-n` 总条数按类平分（0 = 全部，单次上限 100/类）；单 type JSON 为数组、多 type 为 `{"1":[…],"1000":[…]}` 对象 |
-| `ncm download <目标>`（别名 `ncm dl`） | 唯一下载入口：单曲/歌单/专辑/歌手/关键词 + `--daily` 每日推荐；`-d` 选择器、TTY 交互、`-n` 候选数、`-j/--jobs 2..16` 并发下载（>1 关闭逐曲动画）、`--m3u <文件>` 导出 M3U（成功曲目，路径相对列表）；完成出结果一览表（状态/来源/大小/失败原因）+ 耗时汇总；多目标部分解析失败只报该目标并继续，全部失败才整体报错 |
-| `ncm list <目标>` | 纯浏览歌单/专辑/歌手作品列表 |
+| `ncm download <目标>`（别名 `ncm dl`） | 唯一下载入口：单曲/歌单/专辑/歌手/关键词 + `--daily` 每日推荐；`-d` 选择器（如 `1-10` 下前 10 首）、TTY 交互、`-n` 候选数、`-j/--jobs 2..16` 并发下载（>1 关闭逐曲动画）、`-y/--yes` 跳过多条目 y/N 确认（预估大小 = Σ时长×音质码率/8；`config download.confirm=false` 全局关闭，非交互/`--dry-run` 自动放行）、`--quality` 取 config `quality` 回退 lossless、`--m3u <文件>` 导出 M3U（成功曲目，路径相对列表）；单任务（`-j 1`）行内刷新：step/进度原地覆盖只留结果行；完成出结果一览表（状态/来源/大小/失败原因）+ 耗时汇总；多目标部分解析失败只报该目标并继续，全部失败才整体报错 |
+| `ncm info playlist/album/artist <目标>` | 纯浏览歌单/专辑/歌手作品列表（`-n` 前 N 首；`-n` 提示里给 `-d 1-N` 下载前 N 首） |
+| `ncm info lyric <目标>` | 打印歌曲 LRC 歌词到标准输出（ID/链接/关键词均可，可重定向） |
 | `ncm pl list` | 我创建/收藏的歌单（需登录） |
 | `ncm daily` | 每日推荐浏览（需登录） |
 | `ncm play <目标...>` | 多目标按序拼接（`ncm play "A" "B"`），`-f <文件>` 每行一个目标（`#` 注释跳过，可与命令行混用）； 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`、`--daily` 每日推荐队列、`--roam` 播放漫游（队列将尽自动接私人FM续播；`play --roam` 且无目标时单开FM歌单）；mpv 下 <>/←→ 交互+歌词滚动（`--prefetch-playlist` 预开下首，跳过无缓冲等待），双行底行 `mm:ss/mm:ss [进度条] 原文` + `译文(dim)` 按终端宽度截行（非 TTY 静默）；切曲历史打一行 `▶ [i/N] 歌名`；**参数透传** `-- --volume=60 --ao=alsa`（经 `--` 分隔置于最后，同名以用户为准，仅 mpv，ffplay 忽略）；mpv stderr 管道过滤（`--msg-level=all=error,ao=warn,ad=warn`）：错误/音频设备等有用行打成 dim toast，音量/速度变化经 IPC 轮询打 `♪ 音量 60%`/`♪ 速度 1.50x`，memfd/ipc 杂散日志不打乱底行，播放计数含 guard 续喂；**分批取址**：先播前 6 首，后续随播随取（防网易直链 ~10min 过期 403 雪崩）；取址先本地 mirror 再第三方（快起播）；mpv 键位：空格 暂停、←/→ 快退/快进、</> 上/下曲、/ 搜索、`d` 下载当前曲、`l` 收藏当前曲（`play.download-key`/`play.like-key` 可配）；播放队列标 `★N` 显示歌曲喜欢人数（likeCount） |
 | `ncm recommend` | 首页推荐：`-t/--type` 推荐位逗号分隔（`daily` 每日推荐·默认 / `toplist` 官方榜单 / `fm` 私人FM / `radar` 私人雷达），默认只列每日推荐歌曲；`-n` 总条数按位平分（0 = 全部），统一表 / `--json` |
 | `ncm login/--logout` | 保存/查看/清除登录凭据（持久化）；`--profile <名>` 多账号另存 `cookie.<名>` |
-| `ncm config set/get/list/unset` | 持久化配置：`download-dir` 默认下载目录、`play.download-key` 播放快捷下载键（默认 `d`）、`play.like-key` 播放快捷收藏键（默认 `l`）、`profile.<板块>` 板块绑定会话（板块：default/download/play/recommend/roam/search/list） |
+| `ncm config set/get/list/unset` | 持久化配置：`download-dir` 默认下载目录、`quality` 默认音质（standard/exhigh/lossless/hires，play/download 共用回退 lossless）、`download.confirm` 多条目下载是否确认（默认 `true`）、`play.download-key` 播放快捷下载键（默认 `d`）、`play.like-key` 播放快捷收藏键（默认 `l`）、`profile.<板块>` 板块绑定会话（板块：default/download/play/recommend/roam/search/list） |
 | `ncm whoami` | 当前登录状态（昵称/uid/凭据来源） |
 | `ncm like [IDS...] [--unlike]` | 收藏/取消收藏歌曲到"我喜欢的音乐"（需登录；ID/链接均可，可多个） |
 | `ncm pl create/delete/rename/add/remove` | 歌单管理（需登录；create 新建、delete 删除含全部歌曲不可恢复、rename 改名、add 添加歌曲、remove 移除歌曲） |
-| `ncm info <目标>` | 歌曲详情（标题行/歌名/歌手/专辑/时长/费用着色/版权），VIP 曲提示 mirror 解锁，`--json` |
-| `ncm comment <ID>` | 歌曲热门评论（明文读接口可匿名；`-n` 条数、`--json`），含昵称/时间/赞数 |
+| `ncm info song <目标>` | 歌曲详情（标题行/歌名/歌手/专辑/时长/费用着色/版权），VIP 曲提示 mirror 解锁，`--json` |
+| `ncm info comment <ID>` | 歌曲热门评论（明文读接口可匿名；`-n` 条数、`--json`），含昵称/时间/赞数 |
 | `ncm sign [--web]` | 每日签到（需登录；默认移动端 +4 经验，`--web` 网页端 +1） |
-| `ncm subs [-t album,artist]` | 收藏的专辑/歌手列表（需登录；`-t` 逗号分隔选类型，默认两类、`-n` 每类条数） |
-| `ncm mv <ID> [--res 1080] [--play]` | MV 详情 + 播放地址（240/480/720/1080）；`--play` 交 mpv 播放，`--json` 取链接 |
-| `ncm cloud [-n] [--offset]` | 云盘歌曲列表（需登录；标准表，下载用 `ncm download <ID>`，暂不支持上传） |
+| `ncm info subs [-t album,artist]` | 收藏的专辑/歌手列表（需登录；`-t` 逗号分隔选类型，默认两类、`-n` 每类条数） |
+| `ncm info mv <ID> [--res 1080] [--play]` | MV 详情 + 播放地址（240/480/720/1080）；`--play` 交 mpv 播放，`--json` 取链接 |
+| `ncm info cloud [-n] [--offset]` | 云盘歌曲列表（需登录；标准表，下载用 `ncm download <ID>`，暂不支持上传） |
 | `ncm fm like/trash/skip/get` | 私人FM 操作（需登录）：`like <ID> [--unlike]` 红心、`trash <ID>` 踩、`skip <ID>` 跳过并拉下批、`get -n` 拉取 |
 | `ncm completions <shell>` | 生成 bash/zsh/fish/powershell 补全 |
 
@@ -117,6 +118,7 @@ clap、clap_complete、tokio、reqwest(rustls)、lofty、serde_json、aes/base64
 
 - **滚动区行**（step/ok/skip/fail/info）：命令过程与结果，留历史
 - **第二行反馈**（`player::toast` → FEEDBACK 槽，2s 消失）：播放期一切单行反馈——音量、暂停/播放、喜欢结果、热度/评论、mpv 错误（前缀 ✘），不留屏
+- **行内刷新**（`ui::set_live`，仅 `ncm download` 单任务非预演）：进行中 step/转圈/进度条原地覆盖同一行，每首只固化 1 行结果（✔/◌/✘），大批量下载不再刷屏
 
 ### 语言规范
 

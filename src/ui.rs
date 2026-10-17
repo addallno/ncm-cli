@@ -48,6 +48,17 @@ pub fn concurrent() -> bool {
     CONCURRENT.load(Ordering::Relaxed)
 }
 
+/// 行内刷新模式（批量下载单任务）：step/进度原地覆盖不占滚屏，只固化结果行
+static LIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_live(v: bool) {
+    LIVE.store(v, Ordering::Relaxed)
+}
+
+fn live() -> bool {
+    LIVE.load(Ordering::Relaxed) && is_tty() && !json_mode() && !quiet() && !concurrent()
+}
+
 /// 颜色开关（--no-color / NO_COLOR）
 static COLOR: AtomicBool = AtomicBool::new(true);
 
@@ -100,11 +111,29 @@ fn clear_cur_line() {
 }
 
 pub fn step(msg: &str) {
-    clear_cur_line();
     if json_mode() || quiet() {
         return;
     }
+    if live() {
+        // 行内刷新：原地覆盖当前行不换行，结果行由 ok/skip/fail 固化
+        let line = truncate_width(
+            &format!("{} {}", accent("▸"), msg),
+            term_width().saturating_sub(1),
+        );
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\r\x1b[K{line}");
+        let _ = out.flush();
+        return;
+    }
+    clear_cur_line();
     println!("{} {}", accent("▸"), msg);
+}
+
+/// 行内刷新模式下清掉动态行（固化结果行前调用）；非 live 模式空操作
+pub fn live_clear() {
+    if live() {
+        clear_cur_line();
+    }
 }
 pub fn ok(msg: &str) {
     clear_cur_line();

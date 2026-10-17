@@ -99,16 +99,6 @@ enum Commands {
         #[command(flatten)]
         opts: DownloadArgs,
     },
-    /// 浏览歌单/专辑/歌手的作品列表（下载用 ncm download <链接>）
-    List {
-        /// 歌单/专辑/歌手 ID 或链接
-        target: String,
-        /// 只列出前 N 首（0 = 全部）
-        #[arg(short = 'n', long, default_value_t = 0)]
-        limit: u32,
-        #[command(flatten)]
-        opts: ViewArgs,
-    },
     /// 歌单管理（需登录；list=查看我的歌单，默认操作"我喜欢的音乐"）
     #[command(visible_alias = "pl")]
     Playlist {
@@ -169,28 +159,15 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// 查看歌曲详情（ID / 专辑 / 发行日期 / 音质 / 版权等）
+    /// 查询族：song 歌曲详情 / playlist·album·artist 曲目 / lyric 歌词 / comment 评论 / mv / cloud 云盘 / subs 我的收藏
     Info {
-        /// 歌曲 ID / 链接 / 关键词
-        target: String,
-        /// 机器可读的 JSON 输出
-        #[arg(long)]
-        json: bool,
+        #[command(subcommand)]
+        action: InfoAction,
     },
     /// 生成 shell 自动补全脚本
     Completions {
         /// 目标 shell
         shell: clap_complete::Shell,
-    },
-    /// 歌曲热门评论（需登录；ID / 链接）
-    Comment {
-        /// 歌曲 ID / 链接
-        target: String,
-        /// 显示前 N 条热门评论
-        #[arg(short = 'n', long, default_value_t = 10)]
-        limit: u32,
-        #[command(flatten)]
-        opts: ViewArgs,
     },
     /// 每日签到（需登录；移动端 +4 经验）
     Sign {
@@ -198,18 +175,106 @@ enum Commands {
         #[arg(long)]
         web: bool,
     },
-    /// 收藏的专辑 / 歌手列表（需登录）
-    Subs {
-        /// 类型，逗号分隔：album 专辑 / artist 歌手（默认两者）
-        #[arg(
-            short = 't',
-            long = "type",
-            value_delimiter = ',',
-            default_value = "album,artist"
-        )]
-        types: Vec<String>,
-        /// 每类最多条数
-        #[arg(short = 'n', long, default_value_t = 30)]
+    /// 私人FM 操作：红心 / 踩 / 跳过（需登录）
+    Fm {
+        #[command(subcommand)]
+        action: FmAction,
+    },
+    /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 </> 切曲、←/→ 快退进、歌词同步滚动）
+    Play {
+        /// 歌曲 ID / 链接 / 关键词（可多个，按序拼接）
+        target: Vec<String>,
+        /// 播放每日推荐队列（需登录；可与其它目标叠加，置于最前）
+        #[arg(help_heading = "队列", long)]
+        daily: bool,
+        /// 从文件读取目标列表（每行一个，与命令行目标拼接）
+        #[arg(short = 'f', long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// 最多播放 N 首（0 = 全部；关键词默认取最相关 1 首，-n 指定则取前 N 首连续播）
+        #[arg(help_heading = "队列", short = 'n', long, default_value_t = 0)]
+        limit: u32,
+        /// 播放队列随机洗牌
+        #[arg(help_heading = "队列", long)]
+        shuffle: bool,
+        /// 指定播放器程序（默认探测 $NCM_PLAYER → mpv → ffplay）
+        #[arg(help_heading = "播放器", long, value_name = "CMD")]
+        player: Option<String>,
+        /// 音质：lossless/standard/exhigh/hires（默认取 config quality，未配置为 lossless）
+        #[arg(help_heading = "播放器", long, value_parser = ["lossless", "standard", "exhigh", "hires"])]
+        quality: Option<String>,
+        /// 只输出播放队列 JSON（不调用播放器）
+        #[arg(help_heading = "输出与保存", long)]
+        json: bool,
+        /// 播放前先下载到本地并播放本地文件
+        #[arg(help_heading = "输出与保存", long)]
+        save: bool,
+        /// 下载目录（--save / 快捷下载时生效；未指定取 config download-dir）
+        #[arg(help_heading = "输出与保存", short = 'o', long, value_name = "目录")]
+        output: Option<PathBuf>,
+        /// 不显示滚动歌词
+        #[arg(help_heading = "播放器", long = "no-lyric")]
+        no_lyric: bool,
+        /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv；单独 --roam 即纯 FM 开播）
+        #[arg(help_heading = "队列", long)]
+        roam: bool,
+        /// 透传给播放器的参数（经 `--` 分隔，置于最后同名以用户为准；mpv 需 `=` 形式，如 -- --volume=60 --ao=alsa）
+        #[arg(help_heading = "播放器", last = true, value_name = "ARGS")]
+        player_args: Vec<std::ffi::OsString>,
+    },
+}
+
+/// ncm info 查询族（noun 子命令，仿 gh 组织方式）
+#[derive(Subcommand)]
+enum InfoAction {
+    /// 歌曲详情（ID / 专辑 / 发行日期 / 音质 / 版权等）
+    Song {
+        /// 歌曲 ID / 链接 / 关键词
+        target: String,
+        /// 机器可读的 JSON 输出
+        #[arg(long)]
+        json: bool,
+    },
+    /// 歌单曲目列表（下载前 N 首: ncm download <歌单ID> -d 1-N）
+    Playlist {
+        /// 歌单 ID / 链接
+        target: String,
+        /// 只列出前 N 首（0 = 全部）
+        #[arg(short = 'n', long, default_value_t = 0)]
+        limit: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
+    /// 专辑曲目列表（下载: ncm download <专辑ID> -d 1-N）
+    Album {
+        /// 专辑 ID / 链接
+        target: String,
+        /// 只列出前 N 首（0 = 全部）
+        #[arg(short = 'n', long, default_value_t = 0)]
+        limit: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
+    /// 歌手作品列表（下载: ncm download <歌手ID> -d 1-N）
+    Artist {
+        /// 歌手 ID / 链接
+        target: String,
+        /// 只列出前 N 首（0 = 全部）
+        #[arg(short = 'n', long, default_value_t = 0)]
+        limit: u32,
+        #[command(flatten)]
+        opts: ViewArgs,
+    },
+    /// 歌词文本（LRC，打印到标准输出）
+    Lyric {
+        /// 歌曲 ID / 链接 / 关键词
+        target: String,
+    },
+    /// 歌曲热门评论
+    Comment {
+        /// 歌曲 ID / 链接
+        target: String,
+        /// 显示前 N 条热门评论
+        #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
         #[command(flatten)]
         opts: ViewArgs,
@@ -239,51 +304,21 @@ enum Commands {
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 私人FM 操作：红心 / 踩 / 跳过（需登录）
-    Fm {
-        #[command(subcommand)]
-        action: FmAction,
-    },
-    /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 </> 切曲、←/→ 快退进、歌词同步滚动）
-    Play {
-        /// 歌曲 ID / 链接 / 关键词（可多个，按序拼接）
-        target: Vec<String>,
-        /// 播放每日推荐队列（需登录；可与其它目标叠加，置于最前）
-        #[arg(help_heading = "队列", long)]
-        daily: bool,
-        /// 从文件读取目标列表（每行一个，与命令行目标拼接）
-        #[arg(short = 'f', long, value_name = "FILE")]
-        file: Option<PathBuf>,
-        /// 最多播放 N 首（0 = 全部；关键词默认取最相关 1 首，-n 指定则取前 N 首连续播）
-        #[arg(help_heading = "队列", short = 'n', long, default_value_t = 0)]
+    /// 收藏的专辑 / 歌手列表（需登录）
+    Subs {
+        /// 类型，逗号分隔：album 专辑 / artist 歌手（默认两者）
+        #[arg(
+            short = 't',
+            long = "type",
+            value_delimiter = ',',
+            default_value = "album,artist"
+        )]
+        types: Vec<String>,
+        /// 每类最多条数
+        #[arg(short = 'n', long, default_value_t = 30)]
         limit: u32,
-        /// 播放队列随机洗牌
-        #[arg(help_heading = "队列", long)]
-        shuffle: bool,
-        /// 指定播放器程序（默认探测 $NCM_PLAYER → mpv → ffplay）
-        #[arg(help_heading = "播放器", long, value_name = "CMD")]
-        player: Option<String>,
-        /// 音质
-        #[arg(help_heading = "播放器", long, default_value = "lossless", value_parser = ["lossless", "standard", "exhigh", "hires"])]
-        quality: String,
-        /// 只输出播放队列 JSON（不调用播放器）
-        #[arg(help_heading = "输出与保存", long)]
-        json: bool,
-        /// 播放前先下载到本地并播放本地文件
-        #[arg(help_heading = "输出与保存", long)]
-        save: bool,
-        /// 下载目录（--save / 快捷下载时生效；未指定取 config download-dir）
-        #[arg(help_heading = "输出与保存", short = 'o', long, value_name = "目录")]
-        output: Option<PathBuf>,
-        /// 不显示滚动歌词
-        #[arg(help_heading = "播放器", long = "no-lyric")]
-        no_lyric: bool,
-        /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv；单独 --roam 即纯 FM 开播）
-        #[arg(help_heading = "队列", long)]
-        roam: bool,
-        /// 透传给播放器的参数（经 `--` 分隔，置于最后同名以用户为准；mpv 需 `=` 形式，如 -- --volume=60 --ao=alsa）
-        #[arg(help_heading = "播放器", last = true, value_name = "ARGS")]
-        player_args: Vec<std::ffi::OsString>,
+        #[command(flatten)]
+        opts: ViewArgs,
     },
 }
 
@@ -291,7 +326,7 @@ enum Commands {
 enum ConfigAction {
     /// 写入配置项（如: ncm config set download-dir /sdcard/Music/NCMusic）
     Set {
-        /// 配置键（download-dir / play.download-key / profile.<板块>）
+        /// 配置键（download-dir / quality / download.confirm / play.download-key / profile.<板块>）
         key: String,
         /// 配置值
         value: String,
@@ -424,9 +459,9 @@ struct DownloadArgs {
     /// 只下载歌词，不保存音频
     #[arg(help_heading = "歌词", long = "only-lrc", alias = "lyric-only")]
     only_lrc: bool,
-    /// 音质：standard/exhigh/lossless/hires
-    #[arg(help_heading = "输出", long, default_value = "lossless")]
-    quality: String,
+    /// 音质：standard/exhigh/lossless/hires（默认取 config quality，未配置为 lossless）
+    #[arg(help_heading = "输出", long)]
+    quality: Option<String>,
     /// 静默：隐藏进度动画与过程输出，仅保留结果
     #[arg(help_heading = "执行", short = 'q', long)]
     quiet: bool,
@@ -463,6 +498,9 @@ struct DownloadArgs {
     /// 并发下载数（>1 时关闭逐曲转圈/行内进度，仅保留结果行）
     #[arg(help_heading = "执行", short = 'j', long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=16))]
     jobs: u32,
+    /// 多条目下载时跳过 y/N 确认（config download.confirm=false 可全局关闭确认）
+    #[arg(help_heading = "执行", short = 'y', long)]
+    yes: bool,
     /// 下载完成后导出 M3U 播放列表（含成功曲目，路径相对播放列表所在目录）
     #[arg(help_heading = "输出", long, value_name = "文件")]
     m3u: Option<PathBuf>,
@@ -985,8 +1023,21 @@ async fn run_batch(
 ) -> Result<i32> {
     let mut songs: Vec<Value> = Vec::new();
     let mut scope: Vec<String> = Vec::new();
+    let mut opts = opts;
+    if opts.quality.is_none() {
+        opts.quality = Some(config::default_quality());
+    }
     let tty = !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin());
     let interactive = tty && opts.download.is_none();
+    // 行内刷新：单任务批量下载时 step/进度原地覆盖，只固化结果行（离开 run_batch 恢复）
+    ui::set_live(tty && opts.jobs == 1 && !opts.dry_run);
+    struct LiveGuard;
+    impl Drop for LiveGuard {
+        fn drop(&mut self) {
+            ui::set_live(false);
+        }
+    }
+    let _live_guard = LiveGuard;
 
     // --daily：每日推荐置于最前（与其它目标叠加）
     if daily {
@@ -1071,6 +1122,33 @@ async fn run_batch(
         songs = picked;
     }
 
+    // 多条目下载前给预估并 y/N 确认；-y/--yes 或 config download.confirm=false 跳过（非交互/预演直接放行）
+    if songs.len() > 1
+        && tty
+        && !opts.quiet
+        && !opts.yes
+        && !opts.dry_run
+        && config::download_confirm()
+    {
+        let total_ms: u64 = songs
+            .iter()
+            .map(|s| Track::from_json(s).duration_ms)
+            .sum();
+        let br = quality_br(opts.quality.as_deref().unwrap_or("lossless"))?;
+        let est = (total_ms as f64 / 1000.0) * br as f64 / 8.0;
+        ui::info(&format!(
+            "将下载 {} 首 · 总时长 {} · 音质 {} · 预估大小 {}",
+            songs.len(),
+            hms(total_ms),
+            opts.quality.as_deref().unwrap_or("lossless"),
+            ui::human_size(est as u64)
+        ));
+        if !ui::confirm("确认下载？") {
+            ui::info("已取消下载");
+            return Ok(0);
+        }
+    }
+
     download_songs(ncm, songs, scope, opts)
         .await
         .map(|(code, _)| code)
@@ -1100,8 +1178,8 @@ async fn download_songs(
     } else {
         lrc::parse_lrc_selection(&opts.lrcs)?
     };
-    let quality = normalize_quality(&opts.quality).to_string();
-    let _ = quality_br(&opts.quality)?;
+    let quality = normalize_quality(opts.quality.as_deref().unwrap_or("lossless")).to_string();
+    let _ = quality_br(opts.quality.as_deref().unwrap_or("lossless"))?;
 
     let out_arg = opts
         .output
@@ -1134,6 +1212,7 @@ async fn download_songs(
     let json_flag = opts.json;
     // 结果行打印（两分支共用）：按完成顺序输出，编号取自原下标
     let show = |idx: usize, r: &ItemResult| {
+        ui::live_clear();
         if json_flag {
             // JSON 模式逐条静默，最后统一输出
         } else if opts.dry_run {
@@ -1468,7 +1547,7 @@ fn report(
         let out = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "output": output.display().to_string(),
-            "quality": opts.quality,
+            "quality": opts.quality.as_deref().unwrap_or("lossless"),
             "dry_run": opts.dry_run,
             "elapsed_secs": elapsed.as_secs(),
             "items": json_items,
@@ -1543,6 +1622,9 @@ fn report(
     };
     parts.push(format!("耗时 {dur_str}"));
     let done = if opts.only_lrc { lrc } else { audio };
+    // 汇总行要固化留屏：先清动态行再退出行内刷新模式
+    ui::live_clear();
+    ui::set_live(false);
     ui::step(&format!("完成 {done} · {}", parts.join(" · ")));
     if !skipped.is_empty() {
         if opts.dry_run {
@@ -1624,7 +1706,7 @@ fn section_of(cmd: Option<&Commands>) -> &'static str {
     match cmd {
         Some(Commands::Search { .. }) => "search",
         Some(Commands::Download { .. }) => "download",
-        Some(Commands::List { .. }) | Some(Commands::Playlist { .. }) => "list",
+        Some(Commands::Info { .. }) | Some(Commands::Playlist { .. }) => "list",
         Some(Commands::Daily { .. }) | Some(Commands::Recommend { .. }) => "recommend",
         Some(Commands::Play { daily, roam, .. }) => {
             // 板块优先级与目标一致：漫游 > 每日推荐 > 普通播放
@@ -1799,7 +1881,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 }
                 print_render_table(&rows);
                 ui::info(&format!(
-                    "下载: ncm download \"{kw}\" -d 编号  ·  浏览歌单: ncm list <ID>"
+                    "下载: ncm download \"{kw}\" -d 编号  ·  浏览歌单: ncm info playlist <ID>"
                 ));
             }
             Ok(0)
@@ -1820,10 +1902,23 @@ async fn run(cli: Cli) -> Result<i32> {
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             run_batch(&ncm, targets, opts, daily).await
         }
-        Some(Commands::List {
-            target,
-            limit,
-            opts,
+        Some(Commands::Info {
+            action:
+                InfoAction::Playlist {
+                    target,
+                    limit,
+                    opts,
+                }
+                | InfoAction::Album {
+                    target,
+                    limit,
+                    opts,
+                }
+                | InfoAction::Artist {
+                    target,
+                    limit,
+                    opts,
+                },
         }) => {
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
@@ -1956,7 +2051,7 @@ async fn run(cli: Cli) -> Result<i32> {
                                 Err(e) => errors.push(format!("私人雷达歌单解析失败: {e:#}")),
                             },
                             None => errors.push(
-                                "未找到私人雷达歌单（可 ncm list <私人雷达链接> 手动浏览）".into(),
+                                "未找到私人雷达歌单（可 ncm info playlist <私人雷达链接> 手动浏览）".into(),
                             ),
                         }
                     }
@@ -1995,7 +2090,7 @@ async fn run(cli: Cli) -> Result<i32> {
             for e in &errors {
                 ui::info(e);
             }
-            ui::info("下载: ncm download -d 编号  ·  浏览: ncm list <ID>");
+            ui::info("下载: ncm download -d 编号  ·  浏览: ncm info playlist <ID>");
             Ok(0)
         }
         Some(Commands::Play {
@@ -2016,6 +2111,7 @@ async fn run(cli: Cli) -> Result<i32> {
             if json && save {
                 bail!("--json 与 --save 互斥");
             }
+            let quality = quality.unwrap_or_else(config::default_quality);
             let _ = quality_br(&quality)?;
             // 下载目录：-o > config download-dir > 当前目录（--save 与快捷下载共用）
             let out_dir = output
@@ -2176,7 +2272,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     lrcs: LRC_DEFAULT.to_string(),
                     no_lrc: false,
                     only_lrc: false,
-                    quality: quality.clone(),
+                    quality: Some(quality.clone()),
                     quiet: false,
                     dry_run: false,
                     template: "{artists} - {track}".to_string(),
@@ -2186,6 +2282,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     json: false,
                     download: None,
                     jobs: 1,
+                    yes: false,
                     m3u: None,
                 };
                 let (_code, items) = download_songs(
@@ -2708,7 +2805,9 @@ async fn run(cli: Cli) -> Result<i32> {
                 }
             }
         }
-        Some(Commands::Info { target, json }) => {
+        Some(Commands::Info {
+            action: InfoAction::Song { target, json },
+        }) => {
             let _sp = ui::Spinner::start("读取歌曲详情…");
             ui::set_json(json);
             let ncm = Ncm::with_cookie(auth.as_deref())?;
@@ -2782,10 +2881,36 @@ async fn run(cli: Cli) -> Result<i32> {
             clap_complete::generate(shell, &mut cmd, "ncm", &mut std::io::stdout());
             Ok(0)
         }
-        Some(Commands::Comment {
-            target,
-            limit,
-            opts,
+        Some(Commands::Info {
+            action: InfoAction::Lyric { target },
+        }) => {
+            let _sp = ui::Spinner::start("读取歌词…");
+            let ncm = Ncm::with_cookie(auth.as_deref())?;
+            let id = if let Ok(id) = target.parse::<u64>() {
+                id
+            } else {
+                let found = if is_target_like(&target) {
+                    resolve_target(&ncm, &target, false).await?.0
+                } else {
+                    ncm.search(&target, 1).await?
+                };
+                match found.first() {
+                    Some(s) => s["id"].as_u64().context("搜索结果没有歌曲 ID")?,
+                    None => bail!("未找到: {target}"),
+                }
+            };
+            let v = ncm.lyric(id).await?;
+            let lrc = v["lrc"]["lyric"].as_str().context("该曲没有可用歌词")?;
+            print!("{lrc}");
+            Ok(0)
+        }
+        Some(Commands::Info {
+            action:
+                InfoAction::Comment {
+                    target,
+                    limit,
+                    opts,
+                },
         }) => {
             let _sp = ui::Spinner::start("读取评论…");
             ui::set_json(opts.json);
@@ -2827,7 +2952,7 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             if !opts.quiet {
                 ui::info(&format!(
-                    "热门 {}/{total} 条 · 查看全部: ncm comment {id} -n 20",
+                    "热门 {}/{total} 条 · 查看全部: ncm info comment {id} -n 20",
                     hot.len()
                 ));
             }
@@ -2846,7 +2971,9 @@ async fn run(cli: Cli) -> Result<i32> {
             ui::ok(&format!("{kind}签到成功 uid={uid} +{point} 经验"));
             Ok(0)
         }
-        Some(Commands::Subs { types, limit, opts }) => {
+        Some(Commands::Info {
+            action: InfoAction::Subs { types, limit, opts },
+        }) => {
             let _sp = ui::Spinner::start("读取收藏的专辑 / 歌手…");
             ui::set_json(opts.json);
             ui::set_quiet(opts.quiet);
@@ -2921,11 +3048,14 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Mv {
-            id,
-            res,
-            play,
-            json,
+        Some(Commands::Info {
+            action:
+                InfoAction::Mv {
+                    id,
+                    res,
+                    play,
+                    json,
+                },
         }) => {
             let _sp = ui::Spinner::start("读取 MV 信息…");
             ui::set_json(json);
@@ -2968,15 +3098,18 @@ async fn run(cli: Cli) -> Result<i32> {
             } else {
                 println!("{}", ui::accent(url));
                 if !ui::quiet() {
-                    ui::info("播放: ncm mv <ID> --play");
+                    ui::info("播放: ncm info mv <ID> --play");
                 }
             }
             Ok(0)
         }
-        Some(Commands::Cloud {
-            limit,
-            offset,
-            opts,
+        Some(Commands::Info {
+            action:
+                InfoAction::Cloud {
+                    limit,
+                    offset,
+                    opts,
+                },
         }) => {
             let _sp = ui::Spinner::start("读取云盘歌曲…");
             ui::set_json(opts.json);
@@ -3124,7 +3257,9 @@ async fn run(cli: Cli) -> Result<i32> {
                         .collect();
                     ui::table(&["#", "歌单名", "曲数", "来源", "ID"], &rows);
                     if !opts.quiet {
-                        ui::info("浏览: ncm list <ID>  ·  下载: ncm download list.<ID> -d 编号");
+                        ui::info(
+                            "浏览: ncm info playlist <ID>  ·  下载: ncm download list.<ID> -d 编号",
+                        );
                     }
                     Ok(0)
                 }
@@ -3428,7 +3563,7 @@ async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, qual
         lrcs: LRC_DEFAULT.to_string(),
         no_lrc: false,
         only_lrc: false,
-        quality,
+        quality: Some(quality),
         quiet: false,
         dry_run: false,
         template: "{artists} - {track}".to_string(),
@@ -3438,6 +3573,7 @@ async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, qual
         json: false,
         download: None,
         jobs: 1,
+        yes: false,
         m3u: None,
     };
     if let Err(e) = download_songs(&ncm, songs, vec![format!("快捷下载 · {label}")], opts).await
@@ -3721,12 +3857,47 @@ mod cli_tests {
             (vec!["ncm", "daily"], "recommend"),
             (vec!["ncm", "recommend"], "recommend"),
             (vec!["ncm", "search", "moon"], "search"),
-            (vec!["ncm", "list", "1"], "list"),
+            (vec!["ncm", "info", "playlist", "1"], "list"),
+            (vec!["ncm", "info", "song", "1"], "list"),
+            (vec!["ncm", "info", "comment", "1"], "list"),
+            (vec!["ncm", "info", "subs"], "list"),
+            (vec!["ncm", "info", "cloud"], "list"),
             (vec!["ncm", "whoami"], "default"),
         ];
         for (args, want) in cases {
             let cli = Cli::try_parse_from(args.clone()).expect("应解析成功");
             assert_eq!(section_of(cli.cmd.as_ref()), want, "{args:?}");
+        }
+    }
+
+    /// download -y 与 info song 子命令解析
+    #[test]
+    fn download_yes_flag_and_info_song_parsed() {
+        let cli = Cli::try_parse_from(["ncm", "download", "1", "-y", "--quality", "standard"])
+            .expect("-y 与 --quality 应解析成功");
+        match cli.cmd {
+            Some(Commands::Download { ref opts, .. }) => {
+                assert!(opts.yes, "-y 应置 yes");
+                assert_eq!(opts.quality.as_deref(), Some("standard"));
+            }
+            other => {
+                let _ = other;
+                panic!("应为 download 命令");
+            }
+        }
+        let cli =
+            Cli::try_parse_from(["ncm", "info", "song", "1", "--json"]).expect("info song 解析");
+        match cli.cmd {
+            Some(Commands::Info {
+                action: InfoAction::Song { ref target, json },
+            }) => {
+                assert_eq!(target, "1");
+                assert!(json);
+            }
+            other => {
+                let _ = other;
+                panic!("应为 info song 命令");
+            }
         }
     }
 

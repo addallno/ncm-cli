@@ -2,6 +2,8 @@
 //!
 //! 纯字符串键值 + 键白名单，避免手改配置文件：
 //! - `download-dir`：默认下载目录（`download -o` / `play -o` 未指定时回退）
+//! - `quality`：默认音质（play / download 未指定 `--quality` 时回退；standard/exhigh/lossless/hires）
+//! - `download.confirm`：多条目下载前是否需要 y/N 确认（默认 true；`-y` 单次跳过）
 //! - `play.download-key`：播放时快捷下载的 mpv 按键（默认 `d`）
 //! - `profile.<板块>`：板块 → 登录会话 profile 名（`login --profile <名>` 保存的凭据）
 use anyhow::{bail, Context, Result};
@@ -57,7 +59,9 @@ fn save(m: &Map<String, Value>) -> Result<()> {
 /// 键白名单校验
 fn validate_key(key: &str) -> Result<()> {
     match key {
-        "download-dir" | "play.download-key" | "play.like-key" => Ok(()),
+        "download-dir" | "play.download-key" | "play.like-key" | "quality" | "download.confirm" => {
+            Ok(())
+        }
         _ => {
             if let Some(sec) = key.strip_prefix("profile.") {
                 if SECTIONS.contains(&sec) {
@@ -65,7 +69,7 @@ fn validate_key(key: &str) -> Result<()> {
                 }
             }
             bail!(
-                "未知配置键 {key}；可用: download-dir, play.download-key, play.like-key, profile.<{}>",
+                "未知配置键 {key}；可用: download-dir, quality, download.confirm, play.download-key, play.like-key, profile.<{}>",
                 SECTIONS.join("|")
             )
         }
@@ -84,6 +88,12 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     }
     if key == "play.like-key" && v.chars().any(char::is_whitespace) {
         bail!("按键名不能含空白");
+    }
+    if key == "quality" && !matches!(v, "standard" | "exhigh" | "lossless" | "hires") {
+        bail!("音质只能是 standard/exhigh/lossless/hires");
+    }
+    if key == "download.confirm" && !matches!(v, "true" | "false") {
+        bail!("download.confirm 只能是 true/false");
     }
     let mut m = load_all();
     m.insert(key.to_string(), Value::String(v.to_string()));
@@ -118,6 +128,19 @@ pub fn list() -> Vec<(String, String)> {
         .collect();
     v.sort();
     v
+}
+
+/// 默认音质（`quality` 键；未配置回退 lossless）
+pub fn default_quality() -> String {
+    get("quality")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "lossless".to_string())
+}
+
+/// 多条目下载是否需要 y/N 确认（`download.confirm`，默认 true）
+pub fn download_confirm() -> bool {
+    get("download.confirm").ok().flatten().as_deref() != Some("false")
 }
 
 /// 默认下载目录（未配置返回 None）
@@ -182,6 +205,21 @@ pub(crate) mod tests {
         assert!(set("play.download-key", "a b").is_err());
         set("play.like-key", "x").unwrap();
         assert!(set("play.like-key", "a b").is_err());
+    }
+
+    /// 新键：quality / download.confirm 的默认值与取值校验
+    #[test]
+    fn quality_and_confirm_keys() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        fresh("quality");
+        assert_eq!(default_quality(), "lossless");
+        assert!(download_confirm());
+        set("quality", "hires").unwrap();
+        assert_eq!(default_quality(), "hires");
+        assert!(set("quality", "ultra").is_err());
+        set("download.confirm", "false").unwrap();
+        assert!(!download_confirm());
+        assert!(set("download.confirm", "no").is_err());
     }
 
     #[test]

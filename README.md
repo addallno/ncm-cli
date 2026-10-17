@@ -10,7 +10,7 @@
   （回车仅列出）
 - **多类型搜索 / 首页推荐**：`ncm search -t song,playlist,...` 逗号分隔多类型
   （数字与英文别名可混用），一张统一表 + 「类型」列；`ncm recommend` 默认只列
-  每日推荐歌曲，`-t daily,toplist,fm,radar` 选推荐位；直接 `ncm list <ID>` 浏览、
+  每日推荐歌曲，`-t daily,toplist,fm,radar` 选推荐位；直接 `ncm info playlist <ID>` 浏览、
   `ncm download list.<ID>` 下载
 - **严格子命令**：`ncm <未知命令>` 直接报 `unrecognized subcommand`，
   不再把未知参数悄悄当成下载
@@ -45,20 +45,24 @@
 - **持久化配置**：`ncm config set <键> <值>`（不改文件，0600 白名单键）：
   `download-dir` 默认下载目录、`play.download-key` 播放快捷下载键（默认 `d`）、
   `play.like-key` 播放收藏键（默认 `l`）、
+  `quality` 默认音质（standard/exhigh/lossless/hires，play/download 共用回退）、
+  `download.confirm` 多条目下载是否 y/N 确认（默认 `true`）、
   `profile.<板块>` 会话绑定；`ncm config get/list/unset` 查改删
 - **歌词下载**：`--lrcs lrc,tlyric,romalrc,yrc,ass` 多类型（yrc 转 ASS），
   `--lrc-dir A --lrc-dir B` 多路径，`--only-lrc` 只下歌词（无版权歌照样可用）
-- **信息 / 补全**：`ncm info <ID/链接/关键词>` 看详情（歌名/歌手/专辑/时长/费用/版权），
+- **信息 / 补全**：`ncm info song <ID/链接/关键词>` 看详情（歌名/歌手/专辑/时长/费用/版权），
+  `ncm info lyric <ID/链接/关键词>` 打印 LRC 歌词到标准输出（可重定向），
+  `ncm info playlist/album/artist <ID/链接>` 浏览曲目（`-n` 前 N 首），
   `ncm completions bash|zsh|fish|powershell` 生成自动补全脚本
 - **登录后专属**：`ncm pl list`（我的歌单）、`ncm daily`（每日推荐）、
   `ncm pl create/delete/rename/add/remove`（歌单管理）、
   `ncm like <ID...> [--unlike]`（收藏到红心歌单，播放中 mpv 按 `l` 同效）、
   `ncm sign`（每日签到，移动端 +4 经验，`--web` 网页端 +1）、
-  `ncm subs`（收藏的专辑/歌手列表，`-t album,artist` 选类型）
-- **评论 / 私人FM / 云盘 / MV**：`ncm comment <歌曲ID>` 热门评论（可匿名，
+  `ncm info subs`（收藏的专辑/歌手列表，`-t album,artist` 选类型）
+- **评论 / 私人FM / 云盘 / MV**：`ncm info comment <歌曲ID>` 热门评论（可匿名，
   `-n` 条数）；`ncm fm like/trash/skip/get` 私人FM 红心/踩/跳过/拉取；
-  `ncm cloud` 云盘歌曲列表（`--offset` 翻页，下载用 `ncm download <ID>`）；
-  `ncm mv <ID>` MV 详情 + 各清晰度地址（`--play` 交给 mpv，`--json` 取链接）
+  `ncm info cloud` 云盘歌曲列表（`--offset` 翻页，下载用 `ncm download <ID>`）；
+  `ncm info mv <ID>` MV 详情 + 各清晰度地址（`--play` 交给 mpv，`--json` 取链接）
 - **VIP / 无版权解锁**：官方取址失败（`-110` 需 VIP / 404 无版权）或仅给 30s 试听时，
   自动回退本机解锁服务（UnblockNeteaseMusic-utils）拿完整直链，来源标 `mirror·xxx`；
   `--mirror <URL|none>` / `NCM_MIRROR` 配置地址（默认 `http://127.0.0.1:3000`）
@@ -76,18 +80,19 @@ ncm search 晴天 -q -n 3 --json      # 静默 JSON（管道友好）
 ncm download 晴天 -d 1              # 按编号下载搜索结果（别名 ncm dl）
 ncm download 晴天 -n 20 -d 3        # 扩大候选到 20 首再选第 3 首
 ncm download <歌单链接> -o ~/music  # 歌单批量（TTY 交互选编号，管道下全量）
+ncm download <歌单ID> -d 1-10 -y  # 只下前 10 首并跳过确认（多条目默认给预估+确认）
 ncm download --daily -j 4 --m3u list.m3u  # 4 路并发下载并导出 M3U 播放列表
-ncm list 24381616 -n 30             # 浏览歌单前 30 首（看，不下载）
+ncm info playlist 24381616 -n 30             # 浏览歌单前 30 首（看，不下载）
 ncm daily                           # 浏览每日推荐
 ncm pl list                         # 我的歌单（ncm pl 省略 list 同效）
 ncm pl add 123456 -p 我喜欢的音乐    # 歌单加歌（pl create/delete/rename/remove 同族）
 ncm like 123456                     # 收藏到红心歌单（--unlike 取消）
 ncm sign                            # 每日签到（+4 经验，--web 网页端 +1）
-ncm comment 27536479                # 歌曲热门评论（可匿名）
+ncm info comment 27536479                # 歌曲热门评论（可匿名）
 ncm fm get -n 10                    # 私人FM 拉一批（fm like/trash/skip 操作）
-ncm subs                            # 收藏的专辑 + 歌手（-t album 只看一类）
-ncm cloud -n 30                     # 云盘歌曲列表（--offset 翻页）
-ncm mv 5432915 --play               # MV 详情并交给 mpv 播放
+ncm info subs                            # 收藏的专辑 + 歌手（-t album 只看一类）
+ncm info cloud -n 30                     # 云盘歌曲列表（--offset 翻页）
+ncm info mv 5432915 --play               # MV 详情并交给 mpv 播放
 ncm download --daily -d all           # 每日推荐全部下载
 ncm recommend                       # 首页推荐（默认只列每日推荐歌曲）
 ncm recommend -t toplist,fm -n 20   # 追加榜单与私人FM（见推荐位表）
@@ -98,7 +103,7 @@ ncm play "晴天" "七里香"              # 多目标按序拼接（daily/roam 
 ncm play -f queue.txt --shuffle     # 文件列表（每行一个目标，# 注释）
 ncm play 401722227 --quality lossless --save -o ~/music
 ncm play <歌单链接> --json          # 只输出播放队列 JSON
-ncm info 晴天                       # 歌曲详情
+ncm info song 晴天                       # 歌曲详情
 ncm whoami                          # 登录状态
 ncm completions bash > ~/.local/share/bash-completion/completions/ncm
 ```
@@ -134,7 +139,7 @@ ncm search -t song,playlist -n 4 周杰伦
   3  周杰伦-Jay 『网易云精选』  Buradarrr       144 首     歌单  6792103822
   4  周杰伦全免费听             念着倒才傻n186  34 首      歌单  10057662169
   ────────────────────────────────────────────────────────────────────────────
-  下载: ncm download "周杰伦" -d 编号  ·  浏览歌单: ncm list <ID>
+  下载: ncm download "周杰伦" -d 编号  ·  浏览歌单: ncm info playlist <ID>
 ```
 
 多类型按输入顺序分组、组内保持服务端返回顺序；`--json` 单类型输出数组，
