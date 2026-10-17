@@ -90,3 +90,36 @@ CI（GitHub Actions，push 触发）：fmt/clippy/test → 四平台产物
 ## 依赖
 
 clap、clap_complete、tokio、reqwest(rustls)、lofty、serde_json、aes/base64/flate2；无 jq、无 Python。
+
+## TUI 输出规范（v0.3.32 起）
+
+### 符号语义表（Unicode）
+
+| 符号 | 码点 | 名称 | 语义 | 颜色 | 出现位置 |
+|------|------|------|------|------|----------|
+| ▸ | U+25B8 | BLACK RIGHT-POINTING SMALL TRIANGLE | 过程步骤 | 青 36 | `ui::step` 行首 |
+| ▶ | U+25B6 | BLACK RIGHT-POINTING TRIANGLE | 播放中 / 歌词占位行 | 青 36 | 播放反馈、overlay 无词占位 |
+| ▷ | U+25B7 | WHITE RIGHT-POINTING TRIANGLE | 已暂停（空心播放三角） | 黄 33 | 播放反馈（第二行） |
+| ♪ | U+266A | EIGHTH NOTE | 歌曲相关（音量/热度/歌词行） | 黄 33 / 青 36 | 反馈、overlay 歌词行 |
+| ✔ | U+2714 | HEAVY CHECK MARK | 成功 | 绿 32 | `ui::ok`、反馈 |
+| ✘ | U+2718 | HEAVY BALLOT X | 失败/错误 | 红 31 | `ui::fail`、mpv 错误反馈 |
+| ◌ | U+25CC | DOTTED CIRCLE | 跳过/已存在（非错误） | 黄 33 | `ui::skip`、反馈 |
+| ⚠ | U+26A0 | WARNING SIGN | 警告 | 黄 33 | 试听 30s 等 |
+| ★ | U+2605 | BLACK STAR | 热度（喜欢人数） | 青 36 | 播放队列卡片、热度反馈 |
+| ♥ | U+2665 | BLACK HEART SUIT | 已喜欢状态 | — | 热度反馈 |
+| · | U+00B7 | MIDDLE DOT | 字段分隔符 | — | 所有消息内部字段 |
+| 「」 | U+300C/U+300D | CJK corner brackets | 引用歌名/歌单名 | — | 所有消息 |
+| ░ / █ | U+2591 / U+2588 | LIGHT SHADE / FULL BLOCK | 播放进度条 | — | overlay |
+| ⣾ 等 8 帧 | U+2800–U+28FF | BRAILLE PATTERN | 加载 spinner | 青 36 | `ui::Spinner` |
+| … | U+2026 | HORIZONTAL ELLIPSIS | 省略/截断 | — | 队列省略行 |
+
+### 消息通道
+
+- **滚动区行**（step/ok/skip/fail/info）：命令过程与结果，留历史
+- **第二行反馈**（`player::toast` → FEEDBACK 槽，2s 消失）：播放期一切单行反馈——音量、暂停/播放、喜欢结果、热度/评论、mpv 错误（前缀 ✘），不留屏
+
+### 语言规范
+
+- 歌曲红心统一称「喜欢」（`like` 命令、l 键、热度状态）；歌单/专辑/歌手加入保持「收藏」
+- 句式：动宾短语，无句号、无语气词；字段用 `·` 分隔，歌名/歌单用 `「」`
+- 音量一律 `%`；中文标点用全角（：），数字与单位半角

@@ -115,11 +115,11 @@ enum Commands {
         #[command(subcommand)]
         action: Option<PlaylistAction>,
     },
-    /// 收藏/取消收藏歌曲到"我喜欢的音乐"（需登录）
+    /// 喜欢/取消喜欢歌曲到"我喜欢的音乐"（需登录）
     Like {
         /// 歌曲 ID / 链接，可多个
         ids: Vec<String>,
-        /// 取消收藏（从红心歌单移除）
+        /// 取消喜欢（从红心歌单移除）
         #[arg(long)]
         unlike: bool,
     },
@@ -2218,7 +2218,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     .map(|&i| tracks[i].clone())
                     .collect();
                 if !save {
-                    ui::step(&format!("取址 · {desc}（{} / {total} 首）", sub.len()));
+                    ui::step(&format!("取址 · {desc} · {} / {total} 首", sub.len()));
                 }
                 let got = fetch_urls(&ncm, &sub, &quality).await;
                 for (idx, r) in missing.iter().take(prefetch).zip(got) {
@@ -2383,12 +2383,12 @@ async fn run(cli: Cli) -> Result<i32> {
             if is_mpv {
                 #[cfg(unix)]
                 ui::info(&format!(
-                    "mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · {} 下载当前曲 · {} 收藏当前曲 · q 退出",
+                    "mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · {} 下载当前曲 · {} 喜欢当前曲 · q 退出",
                     config::play_download_key(),
                     config::play_like_key()
                 ));
                 #[cfg(not(unix))]
-                ui::info("mpv 键位: 空格 暂停 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · q 退出");
+                ui::info("mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · q 退出");
             }
             if !no_lyric && !cfg!(unix) && is_mpv {
                 ui::info("当前平台不支持 mpv IPC 歌词同步，已跳过");
@@ -2567,7 +2567,7 @@ async fn run(cli: Cli) -> Result<i32> {
             if let Some(tasks) = quick_tasks {
                 let tasks = std::mem::take(&mut *tasks.lock().unwrap_or_else(|e| e.into_inner()));
                 if !tasks.is_empty() {
-                    ui::info("等待快捷下载/收藏完成…");
+                    ui::info("等待快捷下载/喜欢完成…");
                     let _ = tokio::time::timeout(
                         std::time::Duration::from_secs(120),
                         futures_util::future::join_all(tasks),
@@ -3316,18 +3316,15 @@ async fn run(cli: Cli) -> Result<i32> {
             if let Err(ref e) = res {
                 // 歌已在红心歌单：语义已达成，不当失败
                 if op == "add" && Ncm::is_duplicate_track_err(e) {
-                    ui::skip(&format!(
-                        "{} 首已在「我喜欢的音乐」，无需重复收藏",
-                        track_ids.len()
-                    ));
+                    ui::skip(&format!("{} 首已喜欢，无需重复操作", track_ids.len()));
                     return Ok(0);
                 }
             }
             res?;
             let msg = if unlike {
-                format!("从「我喜欢的音乐」取消收藏 {} 首", track_ids.len())
+                format!("从「我喜欢的音乐」取消喜欢 {} 首", track_ids.len())
             } else {
-                format!("收藏 {} 首到「我喜欢的音乐」", track_ids.len())
+                format!("喜欢 {} 首到「我喜欢的音乐」", track_ids.len())
             };
             ui::ok(&msg);
             Ok(0)
@@ -3416,11 +3413,11 @@ async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, qual
     let songs = match ncm.song_detail(&[id]).await {
         Ok(s) if !s.is_empty() => s,
         Ok(_) => {
-            ui::skip(&format!("快捷下载 · {label} · 歌曲详情为空"));
+            ui::fail(&format!("快捷下载 · {label} · 歌曲详情为空"));
             return;
         }
         Err(e) => {
-            ui::skip(&format!("快捷下载 · {label} · 获取详情失败: {e}"));
+            ui::fail(&format!("快捷下载 · {label} · 获取详情失败：{e}"));
             return;
         }
     };
@@ -3445,7 +3442,7 @@ async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, qual
     };
     if let Err(e) = download_songs(&ncm, songs, vec![format!("快捷下载 · {label}")], opts).await
     {
-        ui::skip(&format!("快捷下载 · {label} · 失败: {e:#}"));
+        ui::fail(&format!("快捷下载 · {label} · 下载失败：{e:#}"));
     }
 }
 
@@ -3544,16 +3541,13 @@ async fn guard_loop(
                             .await
                     }
                     .await;
-                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                        player::clear_overlay_rows();
-                    }
                     match outcome {
-                        Ok(()) => ui::ok(&format!("已收藏「{label}」到我喜欢的音乐")),
+                        Ok(()) => crate::player::toast(&format!("✔ 已喜欢「{label}」")),
                         Err(e) if Ncm::is_duplicate_track_err(&e) => {
                             // 歌已在红心歌单：语义已达成，提示而非报错
-                            ui::skip(&format!("「{label}」已在「我喜欢的音乐」"));
+                            crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
                         }
-                        Err(e) => ui::fail(&format!("收藏失败：{e:#}")),
+                        Err(e) => crate::player::toast(&format!("✘ 喜欢失败：{e:#}")),
                     }
                 });
                 quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
