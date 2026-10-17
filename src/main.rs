@@ -1130,10 +1130,7 @@ async fn run_batch(
         && !opts.dry_run
         && config::download_confirm()
     {
-        let total_ms: u64 = songs
-            .iter()
-            .map(|s| Track::from_json(s).duration_ms)
-            .sum();
+        let total_ms: u64 = songs.iter().map(|s| Track::from_json(s).duration_ms).sum();
         let br = quality_br(opts.quality.as_deref().unwrap_or("lossless"))?;
         let est = (total_ms as f64 / 1000.0) * br as f64 / 8.0;
         ui::info(&format!(
