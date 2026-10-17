@@ -637,13 +637,9 @@ fn print_row(
         (Some(tt), _) => crate::ui::dim(&format!(" {} ", fmt_t(tt))),
         _ => String::new(),
     };
-    // 按键就地反馈（音量/暂停）拼在行尾：黄字，占位先扣预算防换行叠影
+    // 按键就地反馈（音量/暂停）：第二行行首显示作 toast，2s 后自动消失；
+    // 与译文同行共存（toast 左、译文仍在原文对齐列）
     let fb = feedback_now();
-    let fb_txt = fb.as_deref().map(|m| format!("  \x1b[33m{m}\x1b[0m"));
-    let fb_w = fb
-        .as_deref()
-        .map(|m| crate::ui::display_width(m) + 2)
-        .unwrap_or(0);
     // 按 stderr 实际终端宽度算预算（写死 60 会在宽屏截太短、窄屏换行叠影）
     let term_w = terminal_size::terminal_size_of(std::io::stderr())
         .map(|(w, _)| w.0 as usize)
@@ -651,7 +647,6 @@ fn print_row(
     let budget = term_w
         .saturating_sub(crate::ui::display_width(&prefix))
         .saturating_sub(crate::ui::display_width(&meta))
-        .saturating_sub(fb_w)
         .saturating_sub(1);
     let clipped = crate::ui::truncate_width(main_body, budget);
     let sub_clipped = sub_body.map(|s| crate::ui::truncate_width(s, budget));
@@ -667,14 +662,28 @@ fn print_row(
         meta
     };
     out.push_str(&format!(
-        "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{gap}{clipped}{}\n\r\x1b[2K",
-        fb_txt.unwrap_or_default()
+        "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{gap}{clipped}\n\r\x1b[2K"
     ));
-    if let Some(s) = &sub_clipped {
-        // 与 line1 原文起始列对齐（跳过 prefix+gap 宽度），译文用淡蓝
-        let pad = " ".repeat(crate::ui::display_width(&prefix) + crate::ui::display_width(&gap));
-        out.push_str(&crate::ui::soft_blue(&format!("{pad}{s}")));
-    }
+    // 第二行 = toast（黄字，行首）+ 对齐列起译文（淡蓝）；两者可共存
+    let align = crate::ui::display_width(&prefix) + crate::ui::display_width(&gap);
+    let line2 = match (fb, &sub_clipped) {
+        (Some(f), Some(s)) => {
+            // toast 太宽挤到译文时，译文紧跟其后空两格，防叠印
+            let pad = align.saturating_sub(crate::ui::display_width(&f)).max(2);
+            format!(
+                "\x1b[33m{f}\x1b[0m{}{}",
+                " ".repeat(pad),
+                crate::ui::soft_blue(s)
+            )
+        }
+        (Some(f), None) => format!("\x1b[33m{f}\x1b[0m"),
+        (None, Some(s)) => {
+            let pad = " ".repeat(align);
+            crate::ui::soft_blue(&format!("{pad}{s}"))
+        }
+        (None, None) => String::new(),
+    };
+    out.push_str(&line2);
     ON_SECOND_LINE.store(true, Relaxed);
     eprint!("{out}");
     let _ = std::io::Write::flush(&mut std::io::stderr());
