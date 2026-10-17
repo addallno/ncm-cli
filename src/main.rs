@@ -2306,6 +2306,43 @@ async fn run(cli: Cli) -> Result<i32> {
             let n_queue = n_play + pending.len();
             sp_collect.shutdown();
             ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
+            // 开播异步展示当前曲热度：红心状态 + 评论总数（不阻塞开播，
+            // 查到后经 toast 在第二行短暂显示；匿名时仅评论数）
+            #[cfg(unix)]
+            {
+                let info_ncm = ncm.clone();
+                let first_id = play_tracks.first().map(|t| t.id);
+                tokio::spawn(async move {
+                    let Some(id) = first_id else { return };
+                    let mut parts: Vec<String> = Vec::new();
+                    if let Ok(Some((uid, _))) = info_ncm.whoami().await {
+                        if let Ok(lists) = info_ncm.user_playlists(uid).await {
+                            let pid = lists
+                                .iter()
+                                .find(|p| p["name"].as_str() == Some("我喜欢的音乐"))
+                                .and_then(|p| p["id"].as_u64());
+                            if let Some(pid) = pid {
+                                match info_ncm.song_in_playlist(pid, id).await {
+                                    Ok(true) => parts.push("已喜欢 ♥".into()),
+                                    Ok(false) => parts.push("未喜欢".into()),
+                                    Err(_) => {}
+                                }
+                            }
+                        }
+                    }
+                    if let Ok((_, total)) = info_ncm.song_comments(id, 1).await {
+                        let s = if total >= 10_000 {
+                            format!("{:.1}万", total as f64 / 10_000.0)
+                        } else {
+                            total.to_string()
+                        };
+                        parts.push(format!("评论 {s}"));
+                    }
+                    if !parts.is_empty() {
+                        crate::player::toast(&format!("♪ {}", parts.join(" · ")));
+                    }
+                });
+            }
             // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告；热度标 ★）
             let show_n = n_play.min(10);
             for (i, (label, _, source, br)) in entries.iter().take(show_n).enumerate() {

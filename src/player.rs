@@ -191,11 +191,19 @@ pub fn cleanup_socket(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// 在歌词底行之上打一行提示（先清底行避免插行打乱，提示行留在滚动历史可回翻）
+/// 播放期提示：overlay 活着时走第二行 FEEDBACK（2s 自动消失不留痕，
+/// 与按键反馈同位同风格）；overlay 停了才退回「清底行+滚动区打印」老路径
 pub fn toast(msg: &str) {
     use std::io::IsTerminal;
     if !std::io::stderr().is_terminal() {
         return;
+    }
+    #[cfg(unix)]
+    {
+        if OVERLAY_ALIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            feedback(msg.to_string());
+            return;
+        }
     }
     let _g = canvas_lock();
     clear_overlay_rows_locked();
@@ -378,6 +386,16 @@ async fn overlay_loop(
     sock: &Path,
     tracks: &Arc<std::sync::RwLock<Vec<LyricTrack>>>,
 ) -> std::io::Result<()> {
+    // overlay 生命周期标记：活着时 toast 走第二行 FEEDBACK，退出（含提前 Err）
+    // 自动回落为滚动区打印，防提示发给已死的渲染循环而丢失
+    struct AliveGuard;
+    impl Drop for AliveGuard {
+        fn drop(&mut self) {
+            OVERLAY_ALIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    OVERLAY_ALIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _alive = AliveGuard;
     // mpv 启动后才创建 socket，重试等待（最多 ~5s）
     let stream = {
         let mut last = None;
@@ -550,6 +568,8 @@ static ON_SECOND_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 static CANVAS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// 画布被 toast 清过：overlay 需立即重画，否则暂停/无事件时歌词滞留
 static CANVAS_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// overlay_loop 是否在跑：跑着才走 FEEDBACK 第二行渲染，停了 fallback 滚动区打印
+static OVERLAY_ALIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 持有画布锁（overlay print_row 与 toast 互斥写 stderr）
 pub(crate) fn canvas_lock() -> std::sync::MutexGuard<'static, ()> {

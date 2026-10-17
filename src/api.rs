@@ -700,6 +700,21 @@ impl Ncm {
         format!("{e:#}").contains("歌单内歌曲重复")
     }
 
+    /// 查询歌曲是否在指定歌单（weapi /v1/playlist/track/get）；
+    /// 返回 data.op=="add" 表示曲目在歌单内。用于「我喜欢的音乐」红心状态反查
+    pub async fn song_in_playlist(&self, playlist_id: u64, track_id: u64) -> Result<bool> {
+        let v = self
+            .post_weapi(
+                "/v1/playlist/track/get",
+                serde_json::Map::from_iter([
+                    ("pid".into(), json!(playlist_id.to_string())),
+                    ("trackId".into(), json!(track_id.to_string())),
+                ]),
+            )
+            .await?;
+        Ok(v["op"].as_str() == Some("add") || v["data"]["op"].as_str() == Some("add"))
+    }
+
     /// 歌单增删曲目（weapi，pyncm SetManipulatePlaylistTrack）；op = "add" | "del"
     pub async fn playlist_tracks_op(
         &self,
