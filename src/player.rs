@@ -135,14 +135,11 @@ pub fn spawn_key_reader(
                         &format!(r#"{{"command":["set_property","pause",{nv}]}}"#),
                     )
                     .await;
-                    feedback(if nv {
-                        "⏸ 已暂停"
-                    } else {
-                        "▶ 继续播放"
-                    });
+                    feedback(if nv { "▷ 已暂停" } else { "▶ 播放中" });
                 }
                 b'9' | b'0' => {
-                    let step = if b == b'9' { 2 } else { -2 };
+                    // 与 mpv 默认一致：9 减、0 加
+                    let step = if b == b'9' { -2 } else { 2 };
                     if let Some(v) = ipc_add_volume(&sock, step).await {
                         feedback(format!("♪ 音量 {v:.0}%"));
                     }
