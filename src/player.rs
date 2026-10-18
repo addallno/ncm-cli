@@ -220,7 +220,7 @@ where
         let mut lines = BufReader::new(output).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(msg) = useful_log(&line) {
-                toast(&format!("✘ {msg}"));
+                toast(&format!("× {msg}"));
             }
         }
     })

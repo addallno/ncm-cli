@@ -130,6 +130,17 @@ pub fn list() -> Vec<(String, String)> {
     v
 }
 
+/// 全部可配置键及默认值（config list 展示未设置项用）
+pub fn all_keys() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("download-dir", "当前目录"),
+        ("quality", "lossless"),
+        ("download.confirm", "true"),
+        ("play.download-key", "d"),
+        ("play.like-key", "l"),
+    ]
+}
+
 /// 默认音质（`quality` 键；未配置回退 lossless）
 pub fn default_quality() -> String {
     get("quality")

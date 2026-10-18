@@ -108,7 +108,7 @@ pub fn write_lrcs(
         .unwrap_or_else(|| "unknown".into());
     for dir in lrc_dirs {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            eprintln!("  ✘ 创建歌词目录失败 {}: {e}", dir.display());
+            eprintln!("  × 创建歌词目录失败 {}: {e}", dir.display());
             continue;
         }
         for (kind, text) in got {

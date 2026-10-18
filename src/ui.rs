@@ -140,7 +140,7 @@ pub fn ok(msg: &str) {
     if json_mode() {
         return;
     }
-    println!("  {} {}", good("✔"), msg);
+    println!("  {} {}", good("✓"), msg);
 }
 pub fn skip(msg: &str) {
     clear_cur_line();
@@ -151,7 +151,7 @@ pub fn skip(msg: &str) {
 }
 pub fn fail(msg: &str) {
     clear_cur_line();
-    eprintln!("  {} {}", bad("✘"), msg);
+    eprintln!("  {} {}", bad("×"), msg);
 }
 pub fn info(msg: &str) {
     clear_cur_line();
@@ -161,19 +161,24 @@ pub fn info(msg: &str) {
     println!("  {}", dim(msg));
 }
 
-/// 交互确认（y/N）；非 TTY 或 quiet/json 模式下直接返回 false（安全默认）
-pub fn confirm(msg: &str) -> bool {
+/// 交互确认；非 TTY 或 quiet/json 模式下直接返回 false（安全默认）
+/// default_yes=true 时空输入按 y 处理（提示 [Y/n]），false 提示 [y/N]
+pub fn confirm(msg: &str, default_yes: bool) -> bool {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() || json_mode() || quiet() {
         return false;
     }
-    print!("  {} [y/N] ", msg);
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("  {msg} {hint} ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
-        return false;
+        return default_yes;
     }
-    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+    match line.trim().to_lowercase().as_str() {
+        "" => default_yes,
+        s => !s.starts_with('n'),
+    }
 }
 
 /// 中文/全角按 2 列计算的显示宽度

@@ -1140,7 +1140,7 @@ async fn run_batch(
             opts.quality.as_deref().unwrap_or("lossless"),
             ui::human_size(est as u64)
         ));
-        if !ui::confirm("确认下载？") {
+        if !ui::confirm("确认下载？", true) {
             ui::info("已取消下载");
             return Ok(0);
         }
@@ -1563,11 +1563,11 @@ fn report(
             .enumerate()
             .map(|(i, r)| {
                 let icon = if r.error.is_some() && r.audio.is_none() {
-                    ui::bad("✘")
+                    ui::bad("×")
                 } else if r.skipped.is_some() {
                     ui::warn("◌")
                 } else {
-                    ui::good("✔")
+                    ui::good("✓")
                 };
                 let note = if let Some(e) = &r.error {
                     ui::truncate_width(e, 30)
@@ -2437,7 +2437,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     }
                 });
             }
-            // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告；热度标 ★）
+            // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告；热度标 *）
             let show_n = n_play.min(10);
             for (i, (label, _, source, br)) in entries.iter().take(show_n).enumerate() {
                 let br = *br;
@@ -2447,11 +2447,11 @@ async fn run(cli: Cli) -> Result<i32> {
                     b => format!(" · {}kbps", b / 1000),
                 };
                 let trial = if source.contains("试听") {
-                    format!(" {}", ui::warn("⚠ 30s试听"))
+                    format!(" {}", ui::warn("△ 30s试听"))
                 } else {
                     String::new()
                 };
-                // 热度：like_count > 0 时显示 ★N（N 为喜欢人数，>1万缩写为 x.x万）
+                // 热度：like_count > 0 时显示 *N（N 为喜欢人数，>1万缩写为 x.x万）
                 let lc = play_tracks[i].like_count;
                 let heat = if lc > 0 {
                     let s = if lc >= 10_000 {
@@ -2459,7 +2459,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     } else {
                         lc.to_string()
                     };
-                    format!(" {}", ui::soft_blue(&format!("★{s}")))
+                    format!(" {}", ui::soft_blue(&format!("*{s}")))
                 } else {
                     String::new()
                 };
@@ -2761,17 +2761,15 @@ async fn run(cli: Cli) -> Result<i32> {
                 },
                 ConfigAction::List => {
                     let all = config::list();
-                    if all.is_empty() {
-                        ui::info(&format!(
-                            "无已配置项（配置文件: {}）",
-                            config::config_path().display()
-                        ));
-                    } else {
-                        for (k, v) in &all {
-                            println!("{k} = {v}");
-                        }
-                        ui::info(&format!("配置文件: {}", config::config_path().display()));
+                    for (k, v) in &all {
+                        println!("{k} = {v}");
                     }
+                    for (k, dv) in config::all_keys() {
+                        if !all.iter().any(|(ek, _)| ek == k) {
+                            println!("{k} = {dv}（默认）");
+                        }
+                    }
+                    ui::info(&format!("配置文件: {}", config::config_path().display()));
                 }
                 ConfigAction::Unset { key } => {
                     if config::unset(&key)? {
@@ -3282,7 +3280,10 @@ async fn run(cli: Cli) -> Result<i32> {
                                 anyhow::bail!("不能删除「我喜欢的音乐」");
                             }
                             if !force
-                                && !ui::confirm(&format!("确认删除歌单「{name}」（含全部歌曲）？"))
+                                && !ui::confirm(
+                                    &format!("确认删除歌单「{name}」（含全部歌曲）？"),
+                                    false,
+                                )
                             {
                                 ui::info("已取消");
                                 return Ok(1);
@@ -3675,12 +3676,12 @@ async fn guard_loop(
                     }
                     .await;
                     match outcome {
-                        Ok(()) => crate::player::toast(&format!("✔ 已喜欢「{label}」")),
+                        Ok(()) => crate::player::toast(&format!("✓ 已喜欢「{label}」")),
                         Err(e) if Ncm::is_duplicate_track_err(&e) => {
                             // 歌已在红心歌单：语义已达成，提示而非报错
                             crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
                         }
-                        Err(e) => crate::player::toast(&format!("✘ 喜欢失败：{e:#}")),
+                        Err(e) => crate::player::toast(&format!("× 喜欢失败：{e:#}")),
                     }
                 });
                 quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
