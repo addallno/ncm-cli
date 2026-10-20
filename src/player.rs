@@ -20,10 +20,18 @@ pub struct LyricTrack {
     pub lines: Vec<(f64, String)>,
 }
 
-/// 快捷下载请求计数（键盘接管键触发，guard_loop 消费）
-pub static DOWNLOAD_REQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// 快捷收藏请求计数（键盘接管键触发，guard_loop 消费）
-pub static LIKE_REQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// 快捷请求类型（键盘接管键触发）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Quick {
+    Download,
+    Like,
+}
+
+/// 快捷请求队列：(类型, 曲 id, 标签)。
+/// 按键瞬间经 IPC 锁定当时正在播放的曲目——若只记"按键计数"等 guard 轮询
+/// 再取 playlist-pos，2 秒窗口内切曲会把别的歌（如下一首）下载/收藏错
+pub static QUICK_REQS: std::sync::Mutex<Vec<(Quick, u64, String)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// 终端 raw 模式守卫：播放期关掉内核回显与规范模式（字符不再被回显、无需等回车），
 /// ISIG 一并关（Ctrl+C 作为字节交给键盘接管走优雅退出，Drop 恢复 termios）；
@@ -76,6 +84,7 @@ pub fn spawn_key_reader(
     sock: std::path::PathBuf,
     dl_key: String,
     like_key: String,
+    queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String)>>>,
 ) -> tokio::task::JoinHandle<()> {
     use tokio::io::AsyncReadExt;
     tokio::spawn(async move {
@@ -156,11 +165,30 @@ pub fn spawn_key_reader(
                     }
                     return;
                 }
-                _ if dl.is_some_and(|k| k == b) => {
-                    DOWNLOAD_REQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                _ if lk.is_some_and(|k| k == b) => {
-                    LIKE_REQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                _ if dl.is_some_and(|k| k == b) || lk.is_some_and(|k| k == b) => {
+                    // 按下瞬间取 playlist-pos 锁定曲目（防后续切曲错位）
+                    let kind = if dl.is_some_and(|k| k == b) {
+                        Quick::Download
+                    } else {
+                        Quick::Like
+                    };
+                    req_id += 1;
+                    if let Some(pos) = ipc_get(&sock, "playlist-pos", req_id)
+                        .await
+                        .and_then(|v| v.as_i64())
+                    {
+                        if let Some((id, label)) = queue
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(pos as usize)
+                            .cloned()
+                        {
+                            QUICK_REQS
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push((kind, id, label));
+                        }
+                    }
                 }
                 // 其余可打印 ASCII 键位语义交回 mpv 默认绑定（[ ] 变速、< > 切曲、
                 // , . seek、m 静音、f 全屏、数字跳转等全可用）

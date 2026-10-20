@@ -46,12 +46,12 @@ src/
 | `ncm info lyric <目标>` | 打印歌曲 LRC 歌词到标准输出（ID/链接/关键词均可，可重定向） |
 | `ncm pl list` | 我创建/收藏的歌单（需登录） |
 | `ncm daily` | 每日推荐浏览（需登录） |
-| `ncm play <目标...>` | 多目标按序拼接（`ncm play "A" "B"`），`-f <文件>` 每行一个目标（`#` 注释跳过，可与命令行混用）； 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`、`--daily` 每日推荐队列、`--roam` 播放漫游（队列将尽自动接私人FM续播；`play --roam` 且无目标时单开FM歌单）；mpv 下 <>/←→ 交互+歌词滚动（`--prefetch-playlist` 预开下首，跳过无缓冲等待），双行底行 `mm:ss/mm:ss [进度条] 原文` + `译文(dim)` 按终端宽度截行（非 TTY 静默）；切曲历史打一行 `▶ [i/N] 歌名`；**参数透传** `-- --volume=60 --ao=alsa`（经 `--` 分隔置于最后，同名以用户为准，仅 mpv，ffplay 忽略）；mpv stderr 管道过滤（`--msg-level=all=error,ao=warn,ad=warn`）：错误/音频设备等有用行打成 dim toast，音量/速度变化经 IPC 轮询打 `♪ 音量 60%`/`♪ 速度 1.50x`，memfd/ipc 杂散日志不打乱底行，播放计数含 guard 续喂；**分批取址**：先播前 6 首，后续随播随取（防网易直链 ~10min 过期 403 雪崩）；取址先本地 mirror 再第三方（快起播）；mpv 键位：空格 暂停、←/→ 快退/快进、</> 上/下曲、/ 搜索、`d` 下载当前曲、`l` 收藏当前曲（`play.download-key`/`play.like-key` 可配）；播放队列标 `*N` 显示歌曲喜欢人数（likeCount） |
+| `ncm play <目标...>` | 多目标按序拼接（`ncm play "A" "B"`），`-f <文件>` 每行一个目标（`#` 注释跳过，可与命令行混用）； 队列播放：`-n` 队列数、`--shuffle`、`--save -o` 先下载、`--json`、`--no-lyric`、`--daily` 每日推荐队列、`--roam` 播放漫游（队列将尽自动接私人FM续播；`play --roam` 且无目标时单开FM歌单）；mpv 下 <>/←→ 交互+歌词滚动（`--prefetch-playlist` 预开下首，跳过无缓冲等待），双行底行 `mm:ss/mm:ss [进度条] 原文` + `译文(dim)` 按终端宽度截行（非 TTY 静默）；切曲历史打一行 `▶ [i/N] 歌名`；**参数透传** `-- --volume=60 --ao=alsa`（经 `--` 分隔置于最后，同名以用户为准，仅 mpv，ffplay 忽略）；mpv stderr 管道过滤（`--msg-level=all=error,ao=warn,ad=warn`）：错误/音频设备等有用行打成 dim toast，音量/速度变化经 IPC 轮询打 `♪ 音量 60%`/`♪ 速度 1.50x`，memfd/ipc 杂散日志不打乱底行，播放计数含 guard 续喂；**分批取址**：先播前 6 首，后续随播随取（防网易直链 ~10min 过期 403 雪崩）；取址先本地 mirror 再第三方（快起播）；mpv 键位：空格 暂停、←/→ 快退/快进、</> 上/下曲、/ 搜索、`d` 下载当前曲、`l` 收藏当前曲（`play.download-key`/`play.like-key` 可配；**按下瞬间经 IPC 锁定当时曲目**，此后切曲不影响，不会错下/错藏）；播放队列标 `*N` 显示歌曲喜欢人数（likeCount） |
 | `ncm recommend` | 首页推荐：`-t/--type` 推荐位逗号分隔（`daily` 每日推荐·默认 / `toplist` 官方榜单 / `fm` 私人FM / `radar` 私人雷达），默认只列每日推荐歌曲；`-n` 总条数按位平分（0 = 全部），统一表 / `--json` |
 | `ncm login/--logout` | 保存/查看/清除登录凭据（持久化）；`--profile <名>` 多账号另存 `cookie.<名>` |
 | `ncm config set/get/list/unset` | 持久化配置：`download-dir` 默认下载目录、`quality` 默认音质（standard/exhigh/lossless/hires，play/download 共用回退 lossless）、`download.confirm` 多条目下载是否确认（默认 `true`）、`play.download-key` 播放快捷下载键（默认 `d`）、`play.like-key` 播放快捷收藏键（默认 `l`）、`profile.<板块>` 板块绑定会话（板块：default/download/play/recommend/roam/search/list） |
 | `ncm whoami` | 当前登录状态（昵称/uid/凭据来源） |
-| `ncm like [IDS...] [--unlike]` | 收藏/取消收藏歌曲到"我喜欢的音乐"（需登录；ID/链接均可，可多个） |
+| `ncm like [IDS...] [--unlike]` | 收藏/取消收藏歌曲到"我喜欢的音乐"（需登录；ID/链接均可，可多个）；**仅接受歌曲链接/ID**——专辑/歌单/歌手链接直接拒绝（其 id 是别的实体，误加会收藏成无关歌曲）；添加前经 song_detail 反查校验 ID 确为歌曲（非歌曲 ID 报错指出），成功输出实际歌名便于核对；`--unlike` 支持歌名模糊匹配 |
 | `ncm pl create/delete/rename/add/remove` | 歌单管理（需登录；create 新建、delete 删除含全部歌曲不可恢复、rename 改名、add 添加歌曲、remove 移除歌曲） |
 | `ncm info song <目标>` | 歌曲详情（标题行/歌名/歌手/专辑/时长/费用着色/版权），VIP 曲提示 mirror 解锁，`--json` |
 | `ncm info comment <ID>` | 歌曲热门评论（明文读接口可匿名；`-n` 条数、`--json`），含昵称/时间/赞数 |

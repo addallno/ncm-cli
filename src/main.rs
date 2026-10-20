@@ -1765,6 +1765,18 @@ fn resolve_playlist(lists: &[Value], target: Option<&str>) -> Result<(u64, Strin
     anyhow::bail!("未找到歌单「{t}」，可用 ncm pl list 查看")
 }
 
+/// like 目标链接必须是歌曲链接：专辑/歌单/歌手链接的 id 段是别的实体的 ID，
+/// 误加会把毫不相干的歌收藏进红心，入口拦截
+fn require_song_url(s: &str) -> Result<()> {
+    let t = s.trim();
+    if t.starts_with("http") && !t.contains("/song") {
+        anyhow::bail!(
+            "「{s}」不是歌曲链接（专辑/歌单/歌手的 ID 不能直接喜欢，请用歌曲链接或歌曲 ID）"
+        );
+    }
+    Ok(())
+}
+
 /// 歌曲 ID / 链接 → u64（纯数字或 URL 尾段）
 fn parse_id_or_url(s: &str) -> Result<u64> {
     let s = s.trim();
@@ -2566,6 +2578,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         sock.clone(),
                         config::play_download_key(),
                         config::play_like_key(),
+                        queue.clone(),
                     )
                 });
                 let handle = Some(tokio::spawn(guard_loop(
@@ -3336,6 +3349,9 @@ async fn run(cli: Cli) -> Result<i32> {
             let mut track_ids: Vec<u64> = Vec::new();
             let mut names: Vec<String> = Vec::new();
             for s in &ids {
+                // 链接必须是歌曲链接：专辑/歌单链接的 id 段是别的实体的 ID，
+                // 误加会收藏成毫不相干的歌，入口直接拦
+                require_song_url(s)?;
                 match parse_id_or_url(s) {
                     Ok(id) => track_ids.push(id),
                     Err(_) => {
@@ -3445,6 +3461,32 @@ async fn run(cli: Cli) -> Result<i32> {
                 anyhow::bail!("没有可操作的歌曲（检查 ID / 名称匹配结果）");
             }
             let op = if unlike { "del" } else { "add" };
+            // 收藏前反查 ID 确为歌曲并取出歌名：拿专辑/歌单/MV 的 ID 来加，
+            // 服务端不会报错却会收藏成毫不相干的歌——早失败 + 显示实际歌名当场核对
+            let mut label_of: std::collections::HashMap<u64, String> =
+                std::collections::HashMap::new();
+            if op == "add" {
+                let details = ncm.song_detail(&track_ids).await?;
+                for s in &details {
+                    if let Some(id) = s["id"].as_u64() {
+                        label_of.insert(
+                            id,
+                            format!("{} - {}", s["name"].as_str().unwrap_or(""), first_artist(s)),
+                        );
+                    }
+                }
+                let bad: Vec<String> = track_ids
+                    .iter()
+                    .filter(|id| !label_of.contains_key(id))
+                    .map(|id| id.to_string())
+                    .collect();
+                if !bad.is_empty() {
+                    anyhow::bail!(
+                        "以下 ID 不是歌曲（可能是专辑/歌单/MV/用户的 ID）：{}",
+                        bad.join(", ")
+                    );
+                }
+            }
             let res = ncm.playlist_tracks_op(op, pid, &track_ids).await;
             if let Err(ref e) = res {
                 // 歌已在红心歌单：语义已达成，不当失败
@@ -3456,6 +3498,16 @@ async fn run(cli: Cli) -> Result<i32> {
             res?;
             let msg = if unlike {
                 format!("从「我喜欢的音乐」取消喜欢 {} 首", track_ids.len())
+            } else if let Some(first) = label_of.get(&track_ids[0]) {
+                // 显示实际反查到的歌名，便于当场核对是否加对
+                if track_ids.len() == 1 {
+                    format!("喜欢「{first}」到「我喜欢的音乐」")
+                } else {
+                    format!(
+                        "喜欢 {} 首到「我喜欢的音乐」（首首：{first}）",
+                        track_ids.len()
+                    )
+                }
             } else {
                 format!("喜欢 {} 首到「我喜欢的音乐」", track_ids.len())
             };
@@ -3600,7 +3652,6 @@ async fn guard_loop(
     dl_dir: PathBuf,
     quick: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 ) {
-    use std::sync::atomic::Ordering;
     let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
     let mut req_id: u64 = 9000;
     let mut fails: u32 = 0; // 启动期 socket 未就绪的容忍计数
@@ -3633,58 +3684,57 @@ async fn guard_loop(
             continue; // 队列空/空闲：mpv 还活着，等下轮
         };
         let mut count = count_v.as_u64().unwrap_or(0);
-        // 快捷下载请求：取当前曲 spawn 独立下载，不阻塞续曲轮询（多次按下合并为一次）
-        if player::DOWNLOAD_REQ.swap(0, Ordering::Relaxed) > 0 {
-            let hit = queue
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(pos as usize)
-                .cloned();
-            if let Some((id, label)) = hit {
-                let h = tokio::spawn(quick_download(
-                    dl_ncm.clone(),
-                    id,
-                    label,
-                    dl_dir.clone(),
-                    quality.clone(),
-                ));
-                quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
+        // 快捷下载/收藏请求：消费按键瞬间锁定的曲目（多次按下各自成条，
+        // 同曲去重；下载 spawn 独立任务不阻塞续曲轮询）
+        let reqs: Vec<(player::Quick, u64, String)> = {
+            let mut g = player::QUICK_REQS.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *g)
+        };
+        let mut seen_req: std::collections::HashSet<(player::Quick, u64)> =
+            std::collections::HashSet::new();
+        for (kind, id, label) in reqs {
+            if !seen_req.insert((kind, id)) {
+                continue; // 同曲同操作重复按下合并为一次（d/l 各自独立）
             }
-        }
-        // 快捷收藏请求：取当前曲加入"我喜欢的音乐"（多次按下合并为一次）
-        if player::LIKE_REQ.swap(0, Ordering::Relaxed) > 0 {
-            let hit = queue
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(pos as usize)
-                .cloned();
-            if let Some((id, label)) = hit {
-                let like_ncm = dl_ncm.clone();
-                let h = tokio::spawn(async move {
-                    // 逐级收集错误，失败不谎报成功
-                    let outcome: anyhow::Result<()> = async {
-                        let (uid, _) = like_ncm
-                            .whoami()
-                            .await?
-                            .context("未登录：ncm login 保存登录后重试")?;
-                        let lists = like_ncm.user_playlists(uid).await?;
-                        let (pid, _) =
-                            resolve_playlist(&lists, None).context("未找到「我喜欢的音乐」歌单")?;
-                        like_ncm
-                            .playlist_tracks_op("add", pid, std::slice::from_ref(&id))
-                            .await
-                    }
-                    .await;
-                    match outcome {
-                        Ok(()) => crate::player::toast(&format!("✓ 已喜欢「{label}」")),
-                        Err(e) if Ncm::is_duplicate_track_err(&e) => {
-                            // 歌已在红心歌单：语义已达成，提示而非报错
-                            crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
+            match kind {
+                player::Quick::Download => {
+                    let h = tokio::spawn(quick_download(
+                        dl_ncm.clone(),
+                        id,
+                        label,
+                        dl_dir.clone(),
+                        quality.clone(),
+                    ));
+                    quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
+                }
+                player::Quick::Like => {
+                    let like_ncm = dl_ncm.clone();
+                    let h = tokio::spawn(async move {
+                        // 逐级收集错误，失败不谎报成功
+                        let outcome: anyhow::Result<()> = async {
+                            let (uid, _) = like_ncm
+                                .whoami()
+                                .await?
+                                .context("未登录：ncm login 保存登录后重试")?;
+                            let lists = like_ncm.user_playlists(uid).await?;
+                            let (pid, _) = resolve_playlist(&lists, None)
+                                .context("未找到「我喜欢的音乐」歌单")?;
+                            like_ncm
+                                .playlist_tracks_op("add", pid, std::slice::from_ref(&id))
+                                .await
                         }
-                        Err(e) => crate::player::toast(&format!("× 喜欢失败：{e:#}")),
-                    }
-                });
-                quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
+                        .await;
+                        match outcome {
+                            Ok(()) => crate::player::toast(&format!("✓ 已喜欢「{label}」")),
+                            Err(e) if Ncm::is_duplicate_track_err(&e) => {
+                                // 歌已在红心歌单：语义已达成，提示而非报错
+                                crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
+                            }
+                            Err(e) => crate::player::toast(&format!("× 喜欢失败：{e:#}")),
+                        }
+                    });
+                    quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
+                }
             }
         }
         if pos + 3 < count {
@@ -3996,5 +4046,43 @@ mod cli_tests {
         }
         // 未知值报错
         assert!(Cli::try_parse_from(["ncm", "recommend", "-t", "nope"]).is_err());
+    }
+
+    /// like 目标链接拦截：非歌曲链接（专辑/歌单/歌手）直接拒绝，歌曲链接/纯 ID 放行
+    #[test]
+    fn like_url_must_be_song() {
+        // 纯 ID / 歌曲链接放行
+        assert!(require_song_url("259138").is_ok());
+        assert!(require_song_url("https://music.163.com/#/song?id=259138").is_ok());
+        assert!(require_song_url("https://music.163.com/song/259138/?userid=1").is_ok());
+        // 专辑/歌单/歌手链接拒绝（其 id 段是别的实体的 ID，误加会收藏成无关歌曲）
+        assert!(require_song_url("https://music.163.com/#/album?id=38467536").is_err());
+        assert!(require_song_url("https://music.163.com/#/playlist?id=3778678").is_err());
+        assert!(require_song_url("https://music.163.com/#/artist?id=6452").is_err());
+    }
+
+    /// 快捷请求去重语义：同曲同操作多次按下合并为一次；d/l 互不影响
+    #[test]
+    fn quick_req_dedup_by_kind_and_id() {
+        let reqs: Vec<(player::Quick, u64, String)> = vec![
+            (player::Quick::Like, 1, "A".into()),
+            (player::Quick::Like, 1, "A".into()), // 重复按下 → 合并
+            (player::Quick::Download, 1, "A".into()), // 同曲不同操作 → 保留
+            (player::Quick::Like, 2, "B".into()),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        let kept: Vec<(player::Quick, u64)> = reqs
+            .into_iter()
+            .filter(|(k, id, _)| seen.insert((*k, *id)))
+            .map(|(k, id, _)| (k, id))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                (player::Quick::Like, 1),
+                (player::Quick::Download, 1),
+                (player::Quick::Like, 2)
+            ]
+        );
     }
 }
