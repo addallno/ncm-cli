@@ -3669,15 +3669,10 @@ async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, qual
     }
 }
 
-/// 时间种子洗牌（xorshift64*，满足播放随机即可，无外部 rand 依赖）
-/// 播放守护：队尾将尽时把 pending 续入 mpv（在线地址现取防过期），pending
-/// 耗尽且开启漫游时拉私人FM补充；歌词容器与播放列表索引对齐；
-/// 消费快捷下载按键请求（<key> 下载当前曲，用 download 板块凭据）；
-/// mpv 退出（IPC 连不上连续 3 次）静默结束
-#[cfg(unix)]
 /// 消费按键瞬间锁定的快捷请求队列：下载独立 spawn（互不阻塞）；
 /// 收藏合并为**单任务顺序执行**——并发写同一歌单会丢曲/顺序错乱，
 /// 且红心歌单 id 复用共享状态（未就绪才自查一次），免 N 次重复 whoami+列表请求
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 fn dispatch_quick_reqs(
     dl_ncm: &Ncm,
@@ -3788,6 +3783,11 @@ fn dispatch_quick_reqs(
     quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
 }
 
+/// 播放守护：队尾将尽时把 pending 续入 mpv（在线地址现取防过期），pending
+/// 耗尽且开启漫游时拉私人FM补充；歌词容器与播放列表索引对齐；
+/// 消费快捷下载按键请求（<key> 下载当前曲，用 download 板块凭据）；
+/// mpv 退出（IPC 连不上连续 3 次）静默结束
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 async fn guard_loop(
     sock: std::path::PathBuf,
@@ -3947,6 +3947,7 @@ async fn guard_loop(
     }
 }
 
+/// 时间种子洗牌（xorshift64*，满足播放随机即可，无外部 rand 依赖）
 fn shuffle_by_time(v: &mut [Value]) {
     let mut seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
