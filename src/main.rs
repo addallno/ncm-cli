@@ -2390,6 +2390,8 @@ async fn run(cli: Cli) -> Result<i32> {
                         .map(|(t, lines)| player::LyricTrack {
                             label: format!("{} - {}", t.title, t.artists),
                             lines: lines.unwrap_or_default(),
+                            id: t.id,
+                            like_count: t.like_count,
                         })
                         .collect();
                     Some(std::sync::Arc::new(std::sync::RwLock::new(lts)))
@@ -2397,12 +2399,44 @@ async fn run(cli: Cli) -> Result<i32> {
                     None
                 };
             let want_lyric = lyric_tracks.is_some();
-            // 快捷下载队列：(曲 id, 标签)，与 mpv 播放列表索引对齐（guard 续入时同步 push）
-            let queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String)>>> =
+            // 共享红心状态：切曲行 ♥ 显示、l 键预判、like 成功就地维护
+            let liked: player::SharedLiked =
+                std::sync::Arc::new(std::sync::RwLock::new(player::LikedCtx {
+                    ids: std::collections::HashSet::new(),
+                    red_pid: None,
+                }));
+            // 异步加载红心集合（登录态）：whoami → 红心歌单 → trackIds 一次拉全量；
+            // 加载完成前切曲行不带 ♥，完成后自动出现（不阻塞开播）
+            {
+                let liked = liked.clone();
+                let loader = ncm.clone();
+                tokio::spawn(async move {
+                    let Ok(Some((uid, _))) = loader.whoami().await else {
+                        return;
+                    };
+                    let Ok(lists) = loader.user_playlists(uid).await else {
+                        return;
+                    };
+                    let Some(pid) = lists
+                        .iter()
+                        .find(|p| p["name"].as_str() == Some("我喜欢的音乐"))
+                        .and_then(|p| p["id"].as_u64())
+                    else {
+                        return;
+                    };
+                    if let Ok(ids) = loader.playlist_ids(pid).await {
+                        let mut g = liked.write().unwrap_or_else(|e| e.into_inner());
+                        g.ids = ids.into_iter().collect();
+                        g.red_pid = Some(pid);
+                    }
+                });
+            }
+            // 快捷下载队列：(曲 id, 标签, 喜欢人数)，与 mpv 播放列表索引对齐（guard 续入时同步 push）
+            let queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String, u64)>>> =
                 std::sync::Arc::new(std::sync::RwLock::new(
                     play_tracks
                         .iter()
-                        .map(|t| (t.id, format!("{} - {}", t.title, t.artists)))
+                        .map(|t| (t.id, format!("{} - {}", t.title, t.artists), t.like_count))
                         .collect(),
                 ));
 
@@ -2535,6 +2569,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 Some(player::spawn_overlay(
                     sock.clone(),
                     lyric_tracks.clone().expect("want_lyric 保证 Some"),
+                    liked.clone(),
                 ))
             } else if is_mpv {
                 // 无歌词 IPC 时用 mpv 模板每首打一行，兼作切曲提示
@@ -2593,6 +2628,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     dl_ncm,
                     out_dir.clone(),
                     quick_tasks.clone(),
+                    liked.clone(),
                 )));
                 (handle, key_reader, Some(quick_tasks))
             } else {
@@ -3500,11 +3536,12 @@ async fn run(cli: Cli) -> Result<i32> {
                 format!("从「我喜欢的音乐」取消喜欢 {} 首", track_ids.len())
             } else if let Some(first) = label_of.get(&track_ids[0]) {
                 // 显示实际反查到的歌名，便于当场核对是否加对
+                // （track_ids 已按 id 排序，"首首"是排序首——如实写"如"）
                 if track_ids.len() == 1 {
                     format!("喜欢「{first}」到「我喜欢的音乐」")
                 } else {
                     format!(
-                        "喜欢 {} 首到「我喜欢的音乐」（首首：{first}）",
+                        "喜欢 {} 首到「我喜欢的音乐」（如：{first}）",
                         track_ids.len()
                     )
                 }
@@ -3638,6 +3675,119 @@ async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, qual
 /// 消费快捷下载按键请求（<key> 下载当前曲，用 download 板块凭据）；
 /// mpv 退出（IPC 连不上连续 3 次）静默结束
 #[cfg(unix)]
+/// 消费按键瞬间锁定的快捷请求队列：下载独立 spawn（互不阻塞）；
+/// 收藏合并为**单任务顺序执行**——并发写同一歌单会丢曲/顺序错乱，
+/// 且红心歌单 id 复用共享状态（未就绪才自查一次），免 N 次重复 whoami+列表请求
+#[allow(clippy::too_many_arguments)]
+fn dispatch_quick_reqs(
+    dl_ncm: &Ncm,
+    dl_dir: &std::path::Path,
+    quality: &str,
+    quick: &std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    liked: &player::SharedLiked,
+) {
+    let reqs: Vec<(player::Quick, u64, String)> = {
+        let mut g = player::QUICK_REQS.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *g)
+    };
+    if reqs.is_empty() {
+        return;
+    }
+    let mut seen_req: std::collections::HashSet<(player::Quick, u64)> =
+        std::collections::HashSet::new();
+    let mut like_batch: Vec<(u64, String)> = Vec::new();
+    for (kind, id, label) in reqs {
+        if !seen_req.insert((kind, id)) {
+            continue; // 同曲同操作重复按下合并为一次（d/l 各自独立）
+        }
+        match kind {
+            player::Quick::Download => {
+                let h = tokio::spawn(quick_download(
+                    dl_ncm.clone(),
+                    id,
+                    label,
+                    dl_dir.to_path_buf(),
+                    quality.to_string(),
+                ));
+                quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
+            }
+            player::Quick::Like => {
+                // 红心集合已加载且该曲已在：直接提示，免 API 往返
+                if liked
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .ids
+                    .contains(&id)
+                {
+                    crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
+                    continue;
+                }
+                like_batch.push((id, label));
+            }
+        }
+    }
+    if like_batch.is_empty() {
+        return;
+    }
+    let like_ncm = dl_ncm.clone();
+    let liked = liked.clone();
+    let h = tokio::spawn(async move {
+        // 红心歌单 id：优先复用共享状态；未就绪则自查一次并写回
+        let mut pid = liked.read().unwrap_or_else(|e| e.into_inner()).red_pid;
+        if pid.is_none() {
+            let fetched: anyhow::Result<u64> = async {
+                let (uid, _) = like_ncm
+                    .whoami()
+                    .await?
+                    .context("未登录：ncm login 保存登录后重试")?;
+                let lists = like_ncm.user_playlists(uid).await?;
+                let (p, _) =
+                    resolve_playlist(&lists, None).context("未找到「我喜欢的音乐」歌单")?;
+                Ok(p)
+            }
+            .await;
+            match fetched {
+                Ok(p) => {
+                    pid = Some(p);
+                    liked.write().unwrap_or_else(|e| e.into_inner()).red_pid = Some(p);
+                }
+                Err(e) => {
+                    crate::player::toast(&format!("× 喜欢失败：{e:#}"));
+                    return;
+                }
+            }
+        }
+        let Some(pid) = pid else { return };
+        // 顺序逐首 add，每首即时 toast；一首失败不中断后续
+        for (id, label) in like_batch {
+            match like_ncm
+                .playlist_tracks_op("add", pid, std::slice::from_ref(&id))
+                .await
+            {
+                Ok(()) => {
+                    liked
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .ids
+                        .insert(id);
+                    crate::player::toast(&format!("✓ 已喜欢「{label}」"));
+                }
+                Err(e) if Ncm::is_duplicate_track_err(&e) => {
+                    // 歌已在红心歌单：语义已达成，提示而非报错
+                    liked
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .ids
+                        .insert(id);
+                    crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
+                }
+                Err(e) => crate::player::toast(&format!("× 喜欢失败「{label}」：{e:#}")),
+            }
+        }
+    });
+    quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn guard_loop(
     sock: std::path::PathBuf,
@@ -3647,10 +3797,11 @@ async fn guard_loop(
     mut pending: std::collections::VecDeque<PendingItem>,
     roam: bool,
     fed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String)>>>,
+    queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String, u64)>>>,
     dl_ncm: Ncm,
     dl_dir: PathBuf,
     quick: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    liked: player::SharedLiked,
 ) {
     let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
     let mut req_id: u64 = 9000;
@@ -3660,12 +3811,15 @@ async fn guard_loop(
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .map(|(id, _)| *id)
+        .map(|(id, _, _)| *id)
         .collect();
     seen.extend(pending.iter().map(|p| p.track.id));
     let mut dup_streak: u32 = 0; // 连续整批重复计数（防服务端只回同一批时卡死）
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // 先消费快捷请求：不依赖 mpv 状态——空闲(pos=-1)/IPC 瞬时失败/即将退出
+        // 时按键意图也照常完成（在状态门之前，否则会被 continue 跳过静默丢失）
+        dispatch_quick_reqs(&dl_ncm, &dl_dir, &quality, &quick, &liked);
         // 查询失败 = mpv 未就绪或已退出（连续 3 次才认定退出）
         // 注意：仅 ipc 调用 Err 计失败；pos=-1 是 mpv 空闲/空队列的合法值，不当断连
         req_id += 1;
@@ -3675,6 +3829,8 @@ async fn guard_loop(
         let (Some(pos_v), Some(count_v)) = (pos_v, count_v) else {
             fails += 1;
             if fails >= 3 {
+                // mpv 已退出：补消费退出窗口内的按键（任务不依赖 mpv，join 收尾等到）
+                dispatch_quick_reqs(&dl_ncm, &dl_dir, &quality, &quick, &liked);
                 return;
             }
             continue;
@@ -3684,59 +3840,6 @@ async fn guard_loop(
             continue; // 队列空/空闲：mpv 还活着，等下轮
         };
         let mut count = count_v.as_u64().unwrap_or(0);
-        // 快捷下载/收藏请求：消费按键瞬间锁定的曲目（多次按下各自成条，
-        // 同曲去重；下载 spawn 独立任务不阻塞续曲轮询）
-        let reqs: Vec<(player::Quick, u64, String)> = {
-            let mut g = player::QUICK_REQS.lock().unwrap_or_else(|e| e.into_inner());
-            std::mem::take(&mut *g)
-        };
-        let mut seen_req: std::collections::HashSet<(player::Quick, u64)> =
-            std::collections::HashSet::new();
-        for (kind, id, label) in reqs {
-            if !seen_req.insert((kind, id)) {
-                continue; // 同曲同操作重复按下合并为一次（d/l 各自独立）
-            }
-            match kind {
-                player::Quick::Download => {
-                    let h = tokio::spawn(quick_download(
-                        dl_ncm.clone(),
-                        id,
-                        label,
-                        dl_dir.clone(),
-                        quality.clone(),
-                    ));
-                    quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
-                }
-                player::Quick::Like => {
-                    let like_ncm = dl_ncm.clone();
-                    let h = tokio::spawn(async move {
-                        // 逐级收集错误，失败不谎报成功
-                        let outcome: anyhow::Result<()> = async {
-                            let (uid, _) = like_ncm
-                                .whoami()
-                                .await?
-                                .context("未登录：ncm login 保存登录后重试")?;
-                            let lists = like_ncm.user_playlists(uid).await?;
-                            let (pid, _) = resolve_playlist(&lists, None)
-                                .context("未找到「我喜欢的音乐」歌单")?;
-                            like_ncm
-                                .playlist_tracks_op("add", pid, std::slice::from_ref(&id))
-                                .await
-                        }
-                        .await;
-                        match outcome {
-                            Ok(()) => crate::player::toast(&format!("✓ 已喜欢「{label}」")),
-                            Err(e) if Ncm::is_duplicate_track_err(&e) => {
-                                // 歌已在红心歌单：语义已达成，提示而非报错
-                                crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
-                            }
-                            Err(e) => crate::player::toast(&format!("× 喜欢失败：{e:#}")),
-                        }
-                    });
-                    quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
-                }
-            }
-        }
         if pos + 3 < count {
             continue; // 距队尾还早
         }
@@ -3829,12 +3932,15 @@ async fn guard_loop(
                     .push(player::LyricTrack {
                         label: format!("{} - {}", t.title, t.artists),
                         lines,
+                        id: t.id,
+                        like_count: t.like_count,
                     });
             }
-            queue
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((t.id, format!("{} - {}", t.title, t.artists)));
+            queue.write().unwrap_or_else(|e| e.into_inner()).push((
+                t.id,
+                format!("{} - {}", t.title, t.artists),
+                t.like_count,
+            ));
             count += 1;
             fed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }

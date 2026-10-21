@@ -311,6 +311,18 @@ impl Ncm {
         Ok((self.song_detail(&ids).await?, name))
     }
 
+    /// 歌单曲目 id 列表（轻量：只取 trackIds，不拉曲目详情）
+    /// 用于红心集合——判断"我是否收藏过"只需 id，song_detail 全拉太重
+    pub async fn playlist_ids(&self, id: u64) -> Result<Vec<u64>> {
+        let data = self
+            .get_json("/api/v6/playlist/detail", &[("id", id.to_string())])
+            .await?;
+        Ok(data["playlist"]["trackIds"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|t| t["id"].as_u64()).collect())
+            .unwrap_or_default())
+    }
+
     /// 专辑
     pub async fn album(&self, id: u64) -> Result<(Vec<Value>, String)> {
         let data = self.get_json(&format!("/api/album/{id}"), &[]).await?;

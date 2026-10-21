@@ -18,7 +18,21 @@ use tokio::net::UnixStream;
 pub struct LyricTrack {
     pub label: String,
     pub lines: Vec<(f64, String)>,
+    /// 曲 id（切曲行查红心集合用）
+    pub id: u64,
+    /// 喜欢人数（仅每日推荐/私人FM 来源有值；0 不显示 *N）
+    pub like_count: u64,
 }
+
+/// 播放会话共享红心状态：已收藏曲 id 集合 + 红心歌单 id。
+/// play 启动后异步加载（whoami→红心歌单→trackIds 一次拉全量），
+/// 切曲行查表显示 ♥（零额外请求）；l 键预判已收藏、收藏成功后就地维护
+pub struct LikedCtx {
+    pub ids: std::collections::HashSet<u64>,
+    /// 红心歌单 id（收藏/取消操作复用，免每次 whoami+user_playlists）
+    pub red_pid: Option<u64>,
+}
+pub type SharedLiked = std::sync::Arc<std::sync::RwLock<LikedCtx>>;
 
 /// 快捷请求类型（键盘接管键触发）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,7 +98,7 @@ pub fn spawn_key_reader(
     sock: std::path::PathBuf,
     dl_key: String,
     like_key: String,
-    queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String)>>>,
+    queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String, u64)>>>,
 ) -> tokio::task::JoinHandle<()> {
     use tokio::io::AsyncReadExt;
     tokio::spawn(async move {
@@ -173,21 +187,27 @@ pub fn spawn_key_reader(
                         Quick::Like
                     };
                     req_id += 1;
-                    if let Some(pos) = ipc_get(&sock, "playlist-pos", req_id)
-                        .await
-                        .and_then(|v| v.as_i64())
-                    {
-                        if let Some((id, label)) = queue
+                    let locked = async {
+                        let pos = ipc_get(&sock, "playlist-pos", req_id)
+                            .await
+                            .and_then(|v| v.as_i64())?;
+                        let (id, label, _) = queue
                             .read()
                             .unwrap_or_else(|e| e.into_inner())
                             .get(pos as usize)
-                            .cloned()
-                        {
+                            .cloned()?;
+                        Some((id, label))
+                    }
+                    .await;
+                    match locked {
+                        Some((id, label)) => {
                             QUICK_REQS
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .push((kind, id, label));
                         }
+                        // 空闲(pos=-1)/IPC 失败/越界：明确提示，不再静默吞键
+                        None => feedback("× 无法锁定当前曲目"),
                     }
                 }
                 // 其余可打印 ASCII 键位语义交回 mpv 默认绑定（[ ] 变速、< > 切曲、
@@ -299,11 +319,12 @@ fn useful_log(line: &str) -> Option<String> {
 pub fn spawn_overlay(
     sock: std::path::PathBuf,
     tracks: Arc<std::sync::RwLock<Vec<LyricTrack>>>,
+    liked: SharedLiked,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use std::io::IsTerminal;
         let tty = std::io::stderr().is_terminal();
-        if let Err(e) = overlay_loop(&sock, &tracks).await {
+        if let Err(e) = overlay_loop(&sock, &tracks, &liked).await {
             // mpv 不在或提前退出属正常收尾，静默；其余打一行提示
             if e.kind() != std::io::ErrorKind::NotFound {
                 if tty {
@@ -322,6 +343,7 @@ pub fn spawn_overlay(
 pub fn spawn_overlay(
     _sock: std::path::PathBuf,
     _tracks: Arc<std::sync::RwLock<Vec<LyricTrack>>>,
+    _liked: SharedLiked,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async {})
 }
@@ -410,6 +432,7 @@ async fn ipc_add_volume(sock: &Path, step: i64) -> Option<f64> {
 async fn overlay_loop(
     sock: &Path,
     tracks: &Arc<std::sync::RwLock<Vec<LyricTrack>>>,
+    liked: &SharedLiked,
 ) -> std::io::Result<()> {
     // overlay 生命周期标记：活着时 toast 走第二行 FEEDBACK，退出（含提前 Err）
     // 自动回落为滚动区打印，防提示发给已死的渲染循环而丢失
@@ -492,21 +515,38 @@ async fn overlay_loop(
                         cur_t = 0.0;
                         dur = None;
                         let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
-                        // 切曲往滚动历史打一行歌名（先清底行，行独立可回翻）
+                        // 切曲往滚动历史打一行歌名（先清底行，行独立可回翻）；
+                        // 附带热度 *N（like_count，仅 FM/每日推荐来源有值）与 ♥ 红心态
                         if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                            let label = ts
-                                .get(cur_idx)
-                                .map(|t| t.label.as_str())
-                                .unwrap_or_default();
+                            let (label, heat, heart) = match ts.get(cur_idx) {
+                                Some(t) => {
+                                    let heat = if t.like_count > 0 {
+                                        let s = if t.like_count >= 10_000 {
+                                            format!("{:.1}万", t.like_count as f64 / 10_000.0)
+                                        } else {
+                                            t.like_count.to_string()
+                                        };
+                                        format!(" {}", crate::ui::soft_blue(&format!("*{s}")))
+                                    } else {
+                                        String::new()
+                                    };
+                                    let lk = liked.read().unwrap_or_else(|e| e.into_inner());
+                                    let heart = if lk.ids.contains(&t.id) { " ♥" } else { "" };
+                                    (t.label.as_str(), heat, heart)
+                                }
+                                None => ("", String::new(), ""),
+                            };
                             clear_overlay_rows(); // 清两行底行，歌名行进滚动历史
                             eprintln!(
-                                "{}",
+                                "{}{}{}",
                                 crate::ui::dim(&format!(
                                     "▶ [{}/{}] {}",
                                     cur_idx + 1,
                                     ts.len(),
                                     label
-                                ))
+                                )),
+                                heat,
+                                heart
                             );
                         }
                         print_row(ts.as_slice(), cur_idx, None, None, None);
@@ -766,6 +806,8 @@ mod tests {
         LyricTrack {
             label: "占位歌名".into(),
             lines,
+            id: 0,
+            like_count: 0,
         }
     }
 
