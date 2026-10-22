@@ -5,6 +5,9 @@
 //! - `quality`：默认音质（play / download 未指定 `--quality` 时回退；standard/exhigh/lossless/hires）
 //! - `download.confirm`：多条目下载前是否需要 y/N 确认（默认 true；`-y` 单次跳过）
 //! - `play.download-key`：播放时快捷下载的 mpv 按键（默认 `d`）
+//! - `play.heart-symbol`：切曲行「我已收藏」标记符号（默认 `♥`；字体缺字形可换 `♡` 等）
+//! - `play.heat-symbol`：切曲行喜欢人数前缀符号（默认 `*`）
+//! - `play.show-liked`：切曲行是否显示「我已收藏」标记（默认 true；播放红心歌单时强制隐藏）
 //! - `profile.<板块>`：板块 → 登录会话 profile 名（`login --profile <名>` 保存的凭据）
 use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
@@ -59,9 +62,8 @@ fn save(m: &Map<String, Value>) -> Result<()> {
 /// 键白名单校验
 fn validate_key(key: &str) -> Result<()> {
     match key {
-        "download-dir" | "play.download-key" | "play.like-key" | "quality" | "download.confirm" => {
-            Ok(())
-        }
+        "download-dir" | "play.download-key" | "play.like-key" | "play.heart-symbol"
+        | "play.heat-symbol" | "play.show-liked" | "quality" | "download.confirm" => Ok(()),
         _ => {
             if let Some(sec) = key.strip_prefix("profile.") {
                 if SECTIONS.contains(&sec) {
@@ -69,7 +71,7 @@ fn validate_key(key: &str) -> Result<()> {
                 }
             }
             bail!(
-                "未知配置键 {key}；可用: download-dir, quality, download.confirm, play.download-key, play.like-key, profile.<{}>",
+                "未知配置键 {key}；可用: download-dir, quality, download.confirm, play.download-key, play.like-key, play.heart-symbol, play.heat-symbol, play.show-liked, profile.<{}>",
                 SECTIONS.join("|")
             )
         }
@@ -94,6 +96,14 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     }
     if key == "download.confirm" && !matches!(v, "true" | "false") {
         bail!("download.confirm 只能是 true/false");
+    }
+    if key == "play.show-liked" && !matches!(v, "true" | "false") {
+        bail!("play.show-liked 只能是 true/false");
+    }
+    if (key == "play.heart-symbol" || key == "play.heat-symbol")
+        && v.chars().any(char::is_whitespace)
+    {
+        bail!("符号不能含空白");
     }
     let mut m = load_all();
     m.insert(key.to_string(), Value::String(v.to_string()));
@@ -138,6 +148,9 @@ pub fn all_keys() -> &'static [(&'static str, &'static str)] {
         ("download.confirm", "true"),
         ("play.download-key", "d"),
         ("play.like-key", "l"),
+        ("play.heart-symbol", "♥"),
+        ("play.heat-symbol", "*"),
+        ("play.show-liked", "true"),
     ]
 }
 
@@ -173,6 +186,27 @@ pub fn play_like_key() -> String {
         .ok()
         .flatten()
         .unwrap_or_else(|| "l".to_string())
+}
+
+/// 切曲行「我已收藏」标记符号（默认 `♥`；Nerd Font 缺字形时可换 `♡`/`❤` 等）
+pub fn play_heart_symbol() -> String {
+    get("play.heart-symbol")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "♥".to_string())
+}
+
+/// 切曲行喜欢人数前缀符号（默认 `*`，显示为 `*1.2万`）
+pub fn play_heat_symbol() -> String {
+    get("play.heat-symbol")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "*".to_string())
+}
+
+/// 切曲行是否显示「我已收藏」标记（默认 true；播放红心歌单时 overlay 侧强制隐藏）
+pub fn play_show_liked() -> bool {
+    get("play.show-liked").ok().flatten().as_deref() != Some("false")
 }
 
 /// 板块绑定的会话 profile 名（未绑定返回 None → 回退默认凭据）
@@ -231,6 +265,25 @@ pub(crate) mod tests {
         set("download.confirm", "false").unwrap();
         assert!(!download_confirm());
         assert!(set("download.confirm", "no").is_err());
+    }
+
+    /// 播放显示符号/收藏标记开关：默认值、取值校验
+    #[test]
+    fn play_display_keys() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        fresh("play-display");
+        assert_eq!(play_heart_symbol(), "♥");
+        assert_eq!(play_heat_symbol(), "*");
+        assert!(play_show_liked());
+        set("play.heart-symbol", "♡").unwrap();
+        assert_eq!(play_heart_symbol(), "♡");
+        set("play.heat-symbol", "#").unwrap();
+        assert_eq!(play_heat_symbol(), "#");
+        set("play.show-liked", "false").unwrap();
+        assert!(!play_show_liked());
+        assert!(set("play.show-liked", "no").is_err());
+        assert!(set("play.heart-symbol", "a b").is_err());
+        assert!(set("play.heat-symbol", " ").is_err());
     }
 
     #[test]

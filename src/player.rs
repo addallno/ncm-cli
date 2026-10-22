@@ -20,8 +20,10 @@ pub struct LyricTrack {
     pub lines: Vec<(f64, String)>,
     /// 曲 id（切曲行查红心集合用）
     pub id: u64,
-    /// 喜欢人数（仅每日推荐/私人FM 来源有值；0 不显示 *N）
+    /// 喜欢人数（每日推荐/私人FM 自带；歌单来源切曲时经 song_red_count 补取）
     pub like_count: u64,
+    /// like_count 是否已尝试补取（含失败；防同曲反复请求）
+    pub red_fetched: bool,
 }
 
 /// 播放会话共享红心状态：已收藏曲 id 集合 + 红心歌单 id。
@@ -33,6 +35,16 @@ pub struct LikedCtx {
     pub red_pid: Option<u64>,
 }
 pub type SharedLiked = std::sync::Arc<std::sync::RwLock<LikedCtx>>;
+
+/// 切曲行显示配置：符号与 ♥ 门控（main 读 config 后传入，player 不依赖 config 模块）
+pub struct DisplayCfg {
+    /// 「我已收藏」标记符号（默认 ♥）
+    pub heart_sym: String,
+    /// 喜欢人数前缀符号（默认 *）
+    pub heat_sym: String,
+    /// 是否显示「我已收藏」（play.show-liked 且非红心歌单）
+    pub show_heart: bool,
+}
 
 /// 快捷请求类型（键盘接管键触发）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -320,11 +332,13 @@ pub fn spawn_overlay(
     sock: std::path::PathBuf,
     tracks: Arc<std::sync::RwLock<Vec<LyricTrack>>>,
     liked: SharedLiked,
+    ncm: crate::api::Ncm,
+    disp: DisplayCfg,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use std::io::IsTerminal;
         let tty = std::io::stderr().is_terminal();
-        if let Err(e) = overlay_loop(&sock, &tracks, &liked).await {
+        if let Err(e) = overlay_loop(&sock, &tracks, &liked, &ncm, &disp).await {
             // mpv 不在或提前退出属正常收尾，静默；其余打一行提示
             if e.kind() != std::io::ErrorKind::NotFound {
                 if tty {
@@ -344,6 +358,8 @@ pub fn spawn_overlay(
     _sock: std::path::PathBuf,
     _tracks: Arc<std::sync::RwLock<Vec<LyricTrack>>>,
     _liked: SharedLiked,
+    _ncm: crate::api::Ncm,
+    _disp: DisplayCfg,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async {})
 }
@@ -433,6 +449,8 @@ async fn overlay_loop(
     sock: &Path,
     tracks: &Arc<std::sync::RwLock<Vec<LyricTrack>>>,
     liked: &SharedLiked,
+    ncm: &crate::api::Ncm,
+    disp: &DisplayCfg,
 ) -> std::io::Result<()> {
     // overlay 生命周期标记：活着时 toast 走第二行 FEEDBACK，退出（含提前 Err）
     // 自动回落为滚动区打印，防提示发给已死的渲染循环而丢失
@@ -514,9 +532,43 @@ async fn overlay_loop(
                         last_sec = None;
                         cur_t = 0.0;
                         dur = None;
+                        // 歌单/搜索来源 Track 无 likeCount：切曲时现场补取红心人数
+                        //（1s 超时静默失败；FM/日推自带值或已试过则跳过）
+                        {
+                            let (tid, need) = {
+                                let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+                                match ts.get(cur_idx) {
+                                    Some(t) => (t.id, t.like_count == 0 && !t.red_fetched),
+                                    None => (0, false),
+                                }
+                            };
+                            if need {
+                                if let Ok(Ok(n)) = tokio::time::timeout(
+                                    Duration::from_secs(1),
+                                    ncm.song_red_count(tid),
+                                )
+                                .await
+                                {
+                                    let mut ts = tracks.write().unwrap_or_else(|e| e.into_inner());
+                                    if let Some(t) = ts.get_mut(cur_idx) {
+                                        if t.id == tid && n > 0 {
+                                            t.like_count = n;
+                                        }
+                                        t.red_fetched = true;
+                                    }
+                                } else {
+                                    let mut ts = tracks.write().unwrap_or_else(|e| e.into_inner());
+                                    if let Some(t) = ts.get_mut(cur_idx) {
+                                        if t.id == tid {
+                                            t.red_fetched = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
                         // 切曲往滚动历史打一行歌名（先清底行，行独立可回翻）；
-                        // 附带热度 *N（like_count，仅 FM/每日推荐来源有值）与 ♥ 红心态
+                        // 附带热度 *N（like_count>0，符号可配）与 ♥ 红心态（show_heart 门控）
                         if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                             let (label, heat, heart) = match ts.get(cur_idx) {
                                 Some(t) => {
@@ -526,15 +578,26 @@ async fn overlay_loop(
                                         } else {
                                             t.like_count.to_string()
                                         };
-                                        format!(" {}", crate::ui::soft_blue(&format!("*{s}")))
+                                        format!(
+                                            " {}",
+                                            crate::ui::soft_blue(&format!("{}{s}", disp.heat_sym))
+                                        )
                                     } else {
                                         String::new()
                                     };
-                                    let lk = liked.read().unwrap_or_else(|e| e.into_inner());
-                                    let heart = if lk.ids.contains(&t.id) { " ♥" } else { "" };
+                                    let heart = if disp.show_heart {
+                                        let lk = liked.read().unwrap_or_else(|e| e.into_inner());
+                                        if lk.ids.contains(&t.id) {
+                                            format!(" {}", disp.heart_sym)
+                                        } else {
+                                            String::new()
+                                        }
+                                    } else {
+                                        String::new()
+                                    };
                                     (t.label.as_str(), heat, heart)
                                 }
-                                None => ("", String::new(), ""),
+                                None => ("", String::new(), String::new()),
                             };
                             clear_overlay_rows(); // 清两行底行，歌名行进滚动历史
                             eprintln!(
@@ -808,6 +871,7 @@ mod tests {
             lines,
             id: 0,
             like_count: 0,
+            red_fetched: false,
         }
     }
 

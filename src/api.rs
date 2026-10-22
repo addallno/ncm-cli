@@ -494,6 +494,23 @@ impl Ncm {
         Ok((hot, total))
     }
 
+    /// 歌曲红心人数（喜欢数；eapi /song/red/count，NeteaseCloudMusicApi#1852）
+    /// 歌单/搜索来源的 Track 无 likeCount 字段，切曲行 *N 由此补取
+    pub async fn song_red_count(&self, song_id: u64) -> Result<u64> {
+        let v = self
+            .post_eapi(
+                "/song/red/count",
+                serde_json::Map::from_iter([("songId".into(), json!(song_id.to_string()))]),
+            )
+            .await?;
+        // 各版本响应字段不一：count / redCount / likedCount 都试
+        v["count"]
+            .as_u64()
+            .or_else(|| v["redCount"].as_u64())
+            .or_else(|| v["likedCount"].as_u64())
+            .context("红心数响应缺 count 字段")
+    }
+
     /// 私人FM 跳过（eapi，pyncm SetSkipRadioContent）
     pub async fn fm_skip(&self, song_id: u64) -> Result<()> {
         self.post_eapi(

@@ -2209,6 +2209,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 songs.extend(s);
             }
             let desc = descs.join(" + ");
+            // 播放「我喜欢的音乐」时切曲行强制隐藏 ♥（整份歌单都是已收藏，无信息量）
+            let is_loves_playlist = descs.iter().any(|d| d.starts_with("歌单 我喜欢的音乐（"));
             if limit > 0 && songs.len() > limit as usize {
                 songs.truncate(limit as usize);
             }
@@ -2392,6 +2394,7 @@ async fn run(cli: Cli) -> Result<i32> {
                             lines: lines.unwrap_or_default(),
                             id: t.id,
                             like_count: t.like_count,
+                            red_fetched: false,
                         })
                         .collect();
                     Some(std::sync::Arc::new(std::sync::RwLock::new(lts)))
@@ -2448,24 +2451,31 @@ async fn run(cli: Cli) -> Result<i32> {
             ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
             // 开播异步展示当前曲热度：红心状态 + 评论总数（不阻塞开播，
             // 查到后经 toast 在第二行短暂显示；匿名时仅评论数）
+            // 红心状态部分受 play.show-liked 门控（关闭/红心歌单时免 3 次 API）
             #[cfg(unix)]
             {
                 let info_ncm = ncm.clone();
                 let first_id = play_tracks.first().map(|t| t.id);
+                let show_heart = config::play_show_liked() && !is_loves_playlist;
                 tokio::spawn(async move {
                     let Some(id) = first_id else { return };
                     let mut parts: Vec<String> = Vec::new();
-                    if let Ok(Some((uid, _))) = info_ncm.whoami().await {
-                        if let Ok(lists) = info_ncm.user_playlists(uid).await {
-                            let pid = lists
-                                .iter()
-                                .find(|p| p["name"].as_str() == Some("我喜欢的音乐"))
-                                .and_then(|p| p["id"].as_u64());
-                            if let Some(pid) = pid {
-                                match info_ncm.song_in_playlist(pid, id).await {
-                                    Ok(true) => parts.push("已喜欢 ♥".into()),
-                                    Ok(false) => parts.push("未喜欢".into()),
-                                    Err(_) => {}
+                    if show_heart {
+                        if let Ok(Some((uid, _))) = info_ncm.whoami().await {
+                            if let Ok(lists) = info_ncm.user_playlists(uid).await {
+                                let pid = lists
+                                    .iter()
+                                    .find(|p| p["name"].as_str() == Some("我喜欢的音乐"))
+                                    .and_then(|p| p["id"].as_u64());
+                                if let Some(pid) = pid {
+                                    match info_ncm.song_in_playlist(pid, id).await {
+                                        Ok(true) => parts.push(format!(
+                                            "已喜欢 {}",
+                                            config::play_heart_symbol()
+                                        )),
+                                        Ok(false) => parts.push("未喜欢".into()),
+                                        Err(_) => {}
+                                    }
                                 }
                             }
                         }
@@ -2505,7 +2515,10 @@ async fn run(cli: Cli) -> Result<i32> {
                     } else {
                         lc.to_string()
                     };
-                    format!(" {}", ui::soft_blue(&format!("*{s}")))
+                    format!(
+                        " {}",
+                        ui::soft_blue(&format!("{}{s}", config::play_heat_symbol()))
+                    )
                 } else {
                     String::new()
                 };
@@ -2566,10 +2579,18 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             let overlay = if want_lyric {
                 args.push("--term-playing-msg=".to_string());
+                // 切曲行显示配置：符号可配；♥ 在关闭 show-liked 或红心歌单时隐藏
+                let disp = player::DisplayCfg {
+                    heart_sym: config::play_heart_symbol(),
+                    heat_sym: config::play_heat_symbol(),
+                    show_heart: config::play_show_liked() && !is_loves_playlist,
+                };
                 Some(player::spawn_overlay(
                     sock.clone(),
                     lyric_tracks.clone().expect("want_lyric 保证 Some"),
                     liked.clone(),
+                    ncm.clone(),
+                    disp,
                 ))
             } else if is_mpv {
                 // 无歌词 IPC 时用 mpv 模板每首打一行，兼作切曲提示
@@ -3934,6 +3955,7 @@ async fn guard_loop(
                         lines,
                         id: t.id,
                         like_count: t.like_count,
+                        red_fetched: false,
                     });
             }
             queue.write().unwrap_or_else(|e| e.into_inner()).push((
