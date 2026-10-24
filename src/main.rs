@@ -2431,6 +2431,9 @@ async fn run(cli: Cli) -> Result<i32> {
                         let mut g = liked.write().unwrap_or_else(|e| e.into_inner());
                         g.ids = ids.into_iter().collect();
                         g.red_pid = Some(pid);
+                        drop(g);
+                        // 加载完成即重画：暂停/无 time-pos 时状态栏 ♥ 也要立刻出现
+                        player::mark_dirty();
                     }
                 });
             }

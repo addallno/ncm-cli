@@ -339,16 +339,17 @@ pub fn spawn_overlay(
         use std::io::IsTerminal;
         let tty = std::io::stderr().is_terminal();
         if let Err(e) = overlay_loop(&sock, &tracks, &liked, &ncm, &disp).await {
-            // mpv 不在或提前退出属正常收尾，静默；其余打一行提示
+            // mpv 不在或提前退出属正常收尾，静默；其余清完底行再打一行提示
             if e.kind() != std::io::ErrorKind::NotFound {
                 if tty {
-                    eprintln!("\r\x1b[2K(歌词同步: {e})");
+                    clear_overlay_rows();
+                    eprintln!("(歌词同步: {e})");
                 } else {
                     eprintln!("(歌词同步: {e})");
                 }
             }
         } else if tty {
-            eprintln!("\r\x1b[2K");
+            clear_overlay_rows();
         }
     })
 }
@@ -504,13 +505,15 @@ async fn overlay_loop(
         if CANVAS_DIRTY.swap(false, std::sync::atomic::Ordering::Relaxed) {
             let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
             let line = current_line(ts.as_slice(), cur_idx, cur_t);
-            let disp = line.as_ref().map(|(m, s)| (m.as_str(), s.as_deref()));
+            let ltxt = line.as_ref().map(|(m, s)| (m.as_str(), s.as_deref()));
             print_row(
                 ts.as_slice(),
                 cur_idx,
-                disp,
+                ltxt,
                 (cur_t > 0.0).then_some(cur_t),
                 dur,
+                liked,
+                disp,
             );
             last_line = line;
             last_sec = (cur_t >= 0.0).then_some(cur_t as u64);
@@ -568,51 +571,21 @@ async fn overlay_loop(
                         }
                         let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
                         // 切曲往滚动历史打一行歌名（先清底行，行独立可回翻）；
-                        // 附带热度 *N（like_count>0，符号可配）与 ♥ 红心态（show_heart 门控）
+                        // 收藏/热度已上移状态栏（行1），不再拼在歌名后
                         if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                            let (label, heat, heart) = match ts.get(cur_idx) {
-                                Some(t) => {
-                                    let heat = if t.like_count > 0 {
-                                        let s = if t.like_count >= 10_000 {
-                                            format!("{:.1}万", t.like_count as f64 / 10_000.0)
-                                        } else {
-                                            t.like_count.to_string()
-                                        };
-                                        format!(
-                                            " {}",
-                                            crate::ui::soft_blue(&format!("{}{s}", disp.heat_sym))
-                                        )
-                                    } else {
-                                        String::new()
-                                    };
-                                    let heart = if disp.show_heart {
-                                        let lk = liked.read().unwrap_or_else(|e| e.into_inner());
-                                        if lk.ids.contains(&t.id) {
-                                            format!(" {}", disp.heart_sym)
-                                        } else {
-                                            String::new()
-                                        }
-                                    } else {
-                                        String::new()
-                                    };
-                                    (t.label.as_str(), heat, heart)
-                                }
-                                None => ("", String::new(), String::new()),
-                            };
-                            clear_overlay_rows(); // 清两行底行，歌名行进滚动历史
+                            let label = ts.get(cur_idx).map(|t| t.label.as_str()).unwrap_or("");
+                            clear_overlay_rows(); // 清底行，歌名行进滚动历史
                             eprintln!(
-                                "{}{}{}",
+                                "{}",
                                 crate::ui::dim(&format!(
                                     "▶ [{}/{}] {}",
                                     cur_idx + 1,
                                     ts.len(),
                                     label
-                                )),
-                                heat,
-                                heart
+                                ))
                             );
                         }
-                        print_row(ts.as_slice(), cur_idx, None, None, None);
+                        print_row(ts.as_slice(), cur_idx, None, None, None, liked, disp);
                     }
                 }
                 Some("time-pos") => {
@@ -624,10 +597,10 @@ async fn overlay_loop(
                         if line != last_line || last_sec != Some(sec) {
                             last_line = line.clone();
                             last_sec = Some(sec);
-                            let disp = line
+                            let ltxt = line
                                 .as_ref()
                                 .map(|(main, sub)| (main.as_str(), sub.as_deref()));
-                            print_row(ts.as_slice(), cur_idx, disp, Some(t), dur);
+                            print_row(ts.as_slice(), cur_idx, ltxt, Some(t), dur, liked, disp);
                         }
                     }
                 }
@@ -642,6 +615,8 @@ async fn overlay_loop(
                             .map(|(main, sub)| (main.as_str(), sub.as_deref())),
                         (cur_t > 0.0).then_some(cur_t),
                         dur,
+                        liked,
+                        disp,
                     );
                 }
                 _ => {}
@@ -689,8 +664,8 @@ fn current_line(tracks: &[LyricTrack], idx: usize, t: f64) -> Option<(String, Op
     }
 }
 
-/// 底行是否已写到第二行（译文行）——刷新回移与清理用
-static ON_SECOND_LINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 底行已占行数（0=未画，2=状态栏+歌词，3=含译文）——刷新回移与清理按深度处理
+static OVERLAY_ROWS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// stderr 底行画布锁：overlay 刷新 / toast / 清行互斥，防交错写打乱双行状态
 static CANVAS: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -730,7 +705,7 @@ fn feedback_now() -> Option<String> {
         .map(|(m, _)| m.clone())
 }
 
-/// 清掉双行底行（line1 主词 + line2 译文），光标回到首行行首
+/// 清掉全部底行（状态栏+歌词[+译文]），光标回到首行行首
 ///（切曲打歌名行、播放结束清理时调用）
 pub fn clear_overlay_rows() {
     let _g = canvas_lock();
@@ -740,15 +715,30 @@ pub fn clear_overlay_rows() {
 /// 无锁版清理：调用方已持 CANVAS 时用（防 std Mutex 不可重入死锁）
 fn clear_overlay_rows_locked() {
     use std::sync::atomic::Ordering::Relaxed;
-    if ON_SECOND_LINE.swap(false, Relaxed) {
-        eprint!("\r\x1b[2K\x1b[1A\r\x1b[2K");
-    } else {
+    let n = OVERLAY_ROWS.swap(0, Relaxed);
+    if n == 0 {
         eprint!("\r\x1b[2K");
+    } else {
+        // 自最底行逐行上移清到首行（光标当前在最底行行尾）
+        for k in 0..n {
+            eprint!("\r\x1b[2K");
+            if k + 1 < n {
+                eprint!("\x1b[1A");
+            }
+        }
     }
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 
-/// 在 stderr 双行刷新歌词底行：line1 = 前缀+时间进度+原文，line2 = 译文（淡蓝，与原文对齐）
+/// 外部状态变化（红心集合加载完成等）后唤醒 overlay 重画；
+/// overlay 400ms 轮询消费，暂停无事件时也能刷新
+pub fn mark_dirty() {
+    CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 在 stderr 刷新播放底行（2~3 行，按 OVERLAY_ROWS 深度回移重画）：
+/// 行1 状态栏 = 前缀+时间进度+♥/*N 收藏热度 + 右侧空一格接 toast（2s 反馈）
+/// 行2 歌词原文（缩进 2 空格），行3 译文（淡蓝，与原文同列缩进，仅在有译文时占行）
 #[cfg(unix)]
 fn print_row(
     tracks: &[LyricTrack],
@@ -756,16 +746,19 @@ fn print_row(
     text: Option<(&str, Option<&str>)>,
     t: Option<f64>,
     dur: Option<f64>,
+    liked: &SharedLiked,
+    disp: &DisplayCfg,
 ) {
     use std::io::IsTerminal;
     // 非 TTY（管道/重定向）静默，避免裸 ANSI 序列污染输出
     if !std::io::stderr().is_terminal() {
         return;
     }
-    // 持画布锁：与 toast/清行互斥，防交错写打乱双行状态
+    // 持画布锁：与 toast/清行互斥，防交错写打乱多行状态
     let _g = canvas_lock();
     let total = tracks.len();
-    let name = tracks.get(idx).map(|t| t.label.as_str()).unwrap_or("");
+    let track = tracks.get(idx);
+    let name = track.map(|t| t.label.as_str()).unwrap_or("");
     let (main_body, sub_body) = text.unwrap_or((name, None));
     let prefix = format!("♪ [{}/{}]", idx + 1, total);
     // 时间与进度条：mm:ss/mm:ss [bar]
@@ -785,54 +778,80 @@ fn print_row(
         (Some(tt), _) => crate::ui::dim(&format!(" {} ", fmt_t(tt))),
         _ => String::new(),
     };
-    // 按键就地反馈（音量/暂停）：第二行行首显示作 toast，2s 后自动消失；
-    // 与译文同行共存（toast 左、译文仍在原文对齐列）
+    // 状态栏收藏/热度段：♥ 已收藏、\ 未收藏等宽占位（show_heart 门控）；
+    // *N 喜欢人数（>0 才显示，soft_blue，≥1万 显示 x.x万）
+    let mut status = String::new();
+    if let Some(tr) = track {
+        if disp.show_heart {
+            let lk = liked.read().unwrap_or_else(|e| e.into_inner());
+            if lk.ids.contains(&tr.id) {
+                status.push_str(&disp.heart_sym);
+            } else {
+                status.push('\\'); // 与 ♥ 同宽占位，状态栏列位不跳
+            }
+        }
+        if tr.like_count > 0 {
+            let n = if tr.like_count >= 10_000 {
+                format!("{:.1}万", tr.like_count as f64 / 10_000.0)
+            } else {
+                tr.like_count.to_string()
+            };
+            if !status.is_empty() {
+                status.push(' ');
+            }
+            status.push_str(&crate::ui::soft_blue(&format!("{}{n}", disp.heat_sym)));
+        }
+    }
+    // 按键就地反馈（音量/暂停）：状态栏右侧空一格拼接，2s 后自动消失
     let fb = feedback_now();
     // 按 stderr 实际终端宽度算预算（写死 60 会在宽屏截太短、窄屏换行叠影）
     let term_w = terminal_size::terminal_size_of(std::io::stderr())
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
-    let budget = term_w
-        .saturating_sub(crate::ui::display_width(&prefix))
-        .saturating_sub(crate::ui::display_width(&meta))
-        .saturating_sub(1);
-    let clipped = crate::ui::truncate_width(main_body, budget);
-    let sub_clipped = sub_body.map(|s| crate::ui::truncate_width(s, budget));
-    use std::sync::atomic::Ordering::Relaxed;
-    let mut out = String::new();
-    if ON_SECOND_LINE.load(Relaxed) {
-        out.push_str("\x1b[1A\r\x1b[2K"); // 上移回 line1
-    }
-    // meta 为空（切曲首帧无时间）时补一个空格，防 prefix 与歌名黏连
+    // 行1 状态栏：prefix + gap + 状态段 + toast，超宽右截（toast 先被截，状态段保左）
     let gap = if meta.is_empty() {
         " ".to_string()
     } else {
         meta
     };
-    out.push_str(&format!(
-        "\r\x1b[2K\x1b[36m{prefix}\x1b[0m{gap}{clipped}\n\r\x1b[2K"
-    ));
-    // 第二行 = toast（黄字，行首）+ 对齐列起译文（淡蓝）；两者可共存
-    let align = crate::ui::display_width(&prefix) + crate::ui::display_width(&gap);
-    let line2 = match (fb, &sub_clipped) {
-        (Some(f), Some(s)) => {
-            // toast 太宽挤到译文时，译文紧跟其后空两格，防叠印
-            let pad = align.saturating_sub(crate::ui::display_width(&f)).max(2);
-            format!(
-                "\x1b[33m{f}\x1b[0m{}{}",
-                " ".repeat(pad),
-                crate::ui::soft_blue(s)
-            )
+    let mut row1 = format!("\x1b[36m{prefix}\x1b[0m{gap}{status}");
+    if let Some(f) = &fb {
+        if !status.is_empty() {
+            row1.push(' ');
         }
-        (Some(f), None) => format!("\x1b[33m{f}\x1b[0m"),
-        (None, Some(s)) => {
-            let pad = " ".repeat(align);
-            crate::ui::soft_blue(&format!("{pad}{s}"))
+        row1.push_str(&format!("\x1b[33m{f}\x1b[0m"));
+    }
+    row1 = crate::ui::truncate_width(&row1, term_w);
+    // 行2/行3 歌词：缩进 2 空格同列对齐，预算 = 终宽 - 缩进 - 留边
+    let budget = term_w.saturating_sub(2 + 1);
+    let row2 = format!("  {}", crate::ui::truncate_width(main_body, budget));
+    let row3 = sub_body.filter(|s| !s.is_empty()).map(|s| {
+        format!(
+            "  {}",
+            crate::ui::soft_blue(&crate::ui::truncate_width(s, budget))
+        )
+    });
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out = String::new();
+    // 回移到首行（旧行深 >1 时上移 行深-1），逐行清后重画
+    let prev = OVERLAY_ROWS.load(Relaxed);
+    if prev > 1 {
+        out.push_str(&format!("\x1b[{}A", prev - 1));
+    }
+    out.push_str(&format!("\r\x1b[2K{row1}\n\r\x1b[2K{row2}"));
+    let mut rows = 2u8;
+    if let Some(r3) = &row3 {
+        out.push_str(&format!("\n\r\x1b[2K{r3}"));
+        rows = 3;
+    }
+    // 旧行更深（3→2 译文消失）：下移清残留行再回到当前底行
+    if prev > rows {
+        for _ in 0..(prev - rows) {
+            out.push_str("\n\r\x1b[2K");
         }
-        (None, None) => String::new(),
-    };
-    out.push_str(&line2);
-    ON_SECOND_LINE.store(true, Relaxed);
+        out.push_str(&format!("\x1b[{}A", prev - rows));
+    }
+    OVERLAY_ROWS.store(rows, Relaxed);
     eprint!("{out}");
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
