@@ -2442,7 +2442,13 @@ async fn run(cli: Cli) -> Result<i32> {
                 std::sync::Arc::new(std::sync::RwLock::new(
                     play_tracks
                         .iter()
-                        .map(|t| (t.id, format!("{} - {}", t.title, t.artists), t.like_count))
+                        .map(|t| {
+                            (
+                                t.id,
+                                format!("{} - {}", t.title, t.artists),
+                                t.like_count.unwrap_or(0),
+                            )
+                        })
                         .collect(),
                 ));
 
@@ -2511,19 +2517,19 @@ async fn run(cli: Cli) -> Result<i32> {
                     String::new()
                 };
                 // 热度：like_count > 0 时显示 *N（N 为喜欢人数，>1万缩写为 x.x万）
-                let lc = play_tracks[i].like_count;
-                let heat = if lc > 0 {
-                    let s = if lc >= 10_000 {
-                        format!("{:.1}万", lc as f64 / 10_000.0)
-                    } else {
-                        lc.to_string()
-                    };
-                    format!(
-                        " {}",
-                        ui::soft_blue(&format!("{}{s}", config::play_heat_symbol()))
-                    )
-                } else {
-                    String::new()
+                let heat = match play_tracks[i].like_count {
+                    Some(lc) if lc > 0 => {
+                        let s = if lc >= 10_000 {
+                            format!("{:.1}万", lc as f64 / 10_000.0)
+                        } else {
+                            lc.to_string()
+                        };
+                        format!(
+                            " {}",
+                            ui::soft_blue(&format!("{}{s}", config::play_heat_symbol()))
+                        )
+                    }
+                    _ => String::new(),
                 };
                 ui::info(&format!(
                     "  {}. {label}{heat} · {source}{quality}{trial}",
@@ -3964,7 +3970,7 @@ async fn guard_loop(
             queue.write().unwrap_or_else(|e| e.into_inner()).push((
                 t.id,
                 format!("{} - {}", t.title, t.artists),
-                t.like_count,
+                t.like_count.unwrap_or(0),
             ));
             count += 1;
             fed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

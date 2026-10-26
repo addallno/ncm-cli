@@ -503,11 +503,12 @@ impl Ncm {
                 serde_json::Map::from_iter([("songId".into(), json!(song_id.to_string()))]),
             )
             .await?;
-        // 各版本响应字段不一：count / redCount / likedCount 都试
-        v["count"]
+        // 实测响应嵌套在 data 下：{code:200, data:{count, countDesc}}；兼容平铺字段
+        v["data"]["count"]
             .as_u64()
-            .or_else(|| v["redCount"].as_u64())
-            .or_else(|| v["likedCount"].as_u64())
+            .or_else(|| v["count"].as_u64())
+            .or_else(|| v["data"]["redCount"].as_u64())
+            .or_else(|| v["data"]["likedCount"].as_u64())
             .context("红心数响应缺 count 字段")
     }
 

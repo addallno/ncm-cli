@@ -21,7 +21,8 @@ pub struct LyricTrack {
     /// 曲 id（切曲行查红心集合用）
     pub id: u64,
     /// 喜欢人数（每日推荐/私人FM 自带；歌单来源切曲时经 song_red_count 补取）
-    pub like_count: u64,
+    /// 喜欢人数；None=未知（FM/日推来源数据自带 Some，歌单等切曲补取后置 Some 含 0）
+    pub like_count: Option<u64>,
     /// like_count 是否已尝试补取（含失败；防同曲反复请求）
     pub red_fetched: bool,
 }
@@ -541,7 +542,7 @@ async fn overlay_loop(
                             let (tid, need) = {
                                 let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
                                 match ts.get(cur_idx) {
-                                    Some(t) => (t.id, t.like_count == 0 && !t.red_fetched),
+                                    Some(t) => (t.id, t.like_count.is_none() && !t.red_fetched),
                                     None => (0, false),
                                 }
                             };
@@ -554,8 +555,9 @@ async fn overlay_loop(
                                 {
                                     let mut ts = tracks.write().unwrap_or_else(|e| e.into_inner());
                                     if let Some(t) = ts.get_mut(cur_idx) {
-                                        if t.id == tid && n > 0 {
-                                            t.like_count = n;
+                                        if t.id == tid {
+                                            // Some(0) 也写入：取到过就显示 *0，便于识别接口失败
+                                            t.like_count = Some(n);
                                         }
                                         t.red_fetched = true;
                                     }
@@ -790,11 +792,11 @@ fn print_row(
                 status.push('\\'); // 与 ♥ 同宽占位，状态栏列位不跳
             }
         }
-        if tr.like_count > 0 {
-            let n = if tr.like_count >= 10_000 {
-                format!("{:.1}万", tr.like_count as f64 / 10_000.0)
+        if let Some(lc) = tr.like_count {
+            let n = if lc >= 10_000 {
+                format!("{:.1}万", lc as f64 / 10_000.0)
             } else {
-                tr.like_count.to_string()
+                lc.to_string()
             };
             if !status.is_empty() {
                 status.push(' ');
@@ -889,7 +891,7 @@ mod tests {
             label: "占位歌名".into(),
             lines,
             id: 0,
-            like_count: 0,
+            like_count: None,
             red_fetched: false,
         }
     }

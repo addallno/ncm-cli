@@ -14,7 +14,8 @@ pub struct Track {
     pub no: u64,
     pub publish_ms: i64,
     /// 喜欢人数（likeCount/likedCount，无则 0）
-    pub like_count: u64,
+    /// 喜欢人数；None=接口无该字段（FM/日推来源有，歌单/搜索无，靠 red/count 补取）
+    pub like_count: Option<u64>,
 }
 
 impl Track {
@@ -55,10 +56,7 @@ impl Track {
                 .or_else(|| v["position"].as_u64())
                 .unwrap_or(0),
             publish_ms: publish,
-            like_count: v["likeCount"]
-                .as_u64()
-                .or_else(|| v["likedCount"].as_u64())
-                .unwrap_or(0),
+            like_count: v["likeCount"].as_u64().or_else(|| v["likedCount"].as_u64()),
         }
     }
 
