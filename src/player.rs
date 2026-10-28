@@ -52,6 +52,7 @@ pub struct DisplayCfg {
 pub enum Quick {
     Download,
     Like,
+    Unlike,
 }
 
 /// 快捷请求队列：(类型, 曲 id, 标签)。
@@ -59,6 +60,9 @@ pub enum Quick {
 /// 再取 playlist-pos，2 秒窗口内切曲会把别的歌（如下一首）下载/收藏错
 pub static QUICK_REQS: std::sync::Mutex<Vec<(Quick, u64, String)>> =
     std::sync::Mutex::new(Vec::new());
+
+/// 用户经 q/Ctrl+C 主动退出播放：置位后 mpv 退出不再自动重试（异常退出才重试）
+pub static USER_QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 终端 raw 模式守卫：播放期关掉内核回显与规范模式（字符不再被回显、无需等回车），
 /// ISIG 一并关（Ctrl+C 作为字节交给键盘接管走优雅退出，Drop 恢复 termios）；
@@ -111,6 +115,7 @@ pub fn spawn_key_reader(
     sock: std::path::PathBuf,
     dl_key: String,
     like_key: String,
+    unlike_key: String,
     queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String, u64)>>>,
 ) -> tokio::task::JoinHandle<()> {
     use tokio::io::AsyncReadExt;
@@ -118,6 +123,7 @@ pub fn spawn_key_reader(
         let mut req_id: u64 = 50_000;
         let dl = dl_key.as_bytes().first().copied();
         let lk = like_key.as_bytes().first().copied();
+        let ul = unlike_key.as_bytes().first().copied();
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1];
         loop {
@@ -184,6 +190,7 @@ pub fn spawn_key_reader(
                     // Ctrl+C（raw 下 ISIG 已关，字节直达）与 q：经 IPC 优雅退出，
                     // 主流程 wait 返回后 Drop 恢复 termios 并收尾；
                     // socket 未就绪（mpv 启动中）时重试 ~5s，防键被吞后退不出去
+                    USER_QUIT.store(true, std::sync::atomic::Ordering::Relaxed);
                     for _ in 0..20 {
                         if ipc_send(&sock, r#"{"command":["quit"]}"#).await.is_ok() {
                             return;
@@ -192,12 +199,18 @@ pub fn spawn_key_reader(
                     }
                     return;
                 }
-                _ if dl.is_some_and(|k| k == b) || lk.is_some_and(|k| k == b) => {
+                _ if dl.is_some_and(|k| k == b)
+                    || lk.is_some_and(|k| k == b)
+                    || ul.is_some_and(|k| k == b) =>
+                {
                     // 按下瞬间取 playlist-pos 锁定曲目（防后续切曲错位）
+                    // 同键配置多动作时优先级 d > l > u（与 download/like 既有行为一致）
                     let kind = if dl.is_some_and(|k| k == b) {
                         Quick::Download
-                    } else {
+                    } else if lk.is_some_and(|k| k == b) {
                         Quick::Like
+                    } else {
+                        Quick::Unlike
                     };
                     req_id += 1;
                     let locked = async {

@@ -601,6 +601,7 @@ async fn mirror_fallback(id: u64, row: &mut Value, source: &mut String, last_err
 
 async fn fetch_row(
     ncm: &Ncm,
+    vip: Option<&Ncm>,
     id: u64,
     quality: &str,
     allow_trial: bool,
@@ -631,6 +632,29 @@ async fn fetch_row(
             Err(e) => last_err = format!("{last_err} 官方: {e}"),
         }
         source = "官方".into();
+
+        // 当前账号取不到（无版权/-110 需 VIP/仅试听）且有 VIP 备用号：换号重取一次
+        if let Some(v) = vip.filter(|_| row_incomplete(&row)) {
+            match v
+                .player_url(id, quality_br(quality).unwrap_or(999_000))
+                .await
+            {
+                Ok(r) if !row_incomplete(&r) => {
+                    row = r;
+                    source = "官方·VIP".into();
+                    last_err.clear();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = format!("VIP号官方: {e}");
+                    last_err = if last_err.trim().is_empty() {
+                        msg
+                    } else {
+                        format!("{last_err}；{msg}")
+                    };
+                }
+            }
+        }
 
         // 官方无地址（无版权/-110 需 VIP）或仅 30s 试听 → 按场景顺序兜底
         let official_bad = row_incomplete(&row);
@@ -728,6 +752,7 @@ async fn download_one(
         let spin = ui::Spinner::start(format!("取址 · {}", track.title));
         let (r, src, reason, kind) = fetch_row(
             ncm,
+            None, // download 启动时已整会话选 VIP profile，无需逐曲换号
             track.id,
             quality,
             opts.allow_trial,
@@ -2139,6 +2164,18 @@ async fn run(cli: Cli) -> Result<i32> {
             // guard 续喂成功计数（播放完毕报告用；仅 mpv+unix 分支会累加）
             let fed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let ncm = Ncm::with_cookie(auth.as_deref())?;
+            // VIP 备用号：当前号非 VIP 且存有其他 VIP profile 时探测（并发，一次），
+            // 逐曲官方取址失败(-110/无地址/试听)换 B 重取，仍失败才走第三方兜底；
+            // A 自身是 VIP 或仅一个 profile 时零开销跳过
+            let vip_ncm: Option<Ncm> =
+                if ncm.vip_status().await.unwrap_or(false) || session::list_profiles().len() <= 1 {
+                    None
+                } else {
+                    detect_vip_profile().await.and_then(|p| {
+                        let cookie = session::load_profile(Some(&p))?;
+                        Ncm::with_cookie(Some(&cookie)).ok()
+                    })
+                };
             // 快捷下载用 download 板块凭据（可与播放板块不同，如 VIP 下载号）
             #[cfg(unix)]
             let dl_ncm = Ncm::with_cookie(
@@ -2225,7 +2262,7 @@ async fn run(cli: Cli) -> Result<i32> {
 
             // 2) JSON 模式：全量取址输出队列
             if json {
-                let results = fetch_urls(&ncm, &tracks, &quality).await;
+                let results = fetch_urls(&ncm, vip_ncm.as_ref(), &tracks, &quality).await;
                 let mut arr: Vec<Value> = Vec::with_capacity(total);
                 for (t, r) in tracks.iter().zip(results) {
                     match r {
@@ -2254,7 +2291,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 ui::info(
                     "未找到播放器（可安装 mpv/ffplay 或用 --player/$NCM_PLAYER 指定），队列地址:",
                 );
-                let urls = fetch_urls(&ncm, &tracks, &quality).await;
+                let urls = fetch_urls(&ncm, vip_ncm.as_ref(), &tracks, &quality).await;
                 for (t, r) in tracks.iter().zip(urls) {
                     match r {
                         Ok((url, _, _)) => println!("{} - {}\t{url}", t.title, t.artists),
@@ -2328,7 +2365,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 if !save {
                     ui::step(&format!("取址 · {desc} · {} / {total} 首", sub.len()));
                 }
-                let got = fetch_urls(&ncm, &sub, &quality).await;
+                let got = fetch_urls(&ncm, vip_ncm.as_ref(), &sub, &quality).await;
                 for (idx, r) in missing.iter().take(prefetch).zip(got) {
                     slots[*idx].1 = r.map(|(url, br, src)| (PlaySrc::Url(url), src, br));
                 }
@@ -2379,6 +2416,15 @@ async fn run(cli: Cli) -> Result<i32> {
             if entries.is_empty() {
                 bail!("全部曲目取址失败，无法播放");
             }
+            // 共享播放状态：srcs 与 queue/mpv 播放列表按索引对齐（暂停刷新换 URL、
+            // 异常退出重试续播都靠它定位每首的来源）；last_played 记 guard 观测到的
+            // 最后播放位（usize::MAX=未知，guard 未跑起来就死时从 0 重来）；
+            // pending 改共享：guard 续喂消费，重试时读剩余量判断是否还有得播
+            let srcs: std::sync::Arc<std::sync::RwLock<Vec<PlaySrc>>> = std::sync::Arc::new(
+                std::sync::RwLock::new(entries.iter().map(|(_, s, _, _)| s.clone()).collect()),
+            );
+            let last_played = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+            let pending = std::sync::Arc::new(std::sync::Mutex::new(pending));
 
             // 6) 歌词预取（mpv + unix 下 IPC 底行：有词滚歌词，无词显示歌名占位）
             let want_ipc = !no_lyric && is_mpv && cfg!(unix);
@@ -2455,7 +2501,7 @@ async fn run(cli: Cli) -> Result<i32> {
             // 7) 启动播放
             let locations: Vec<String> = entries.iter().map(|(_, s, _, _)| s.loc()).collect();
             let n_play = entries.len();
-            let n_queue = n_play + pending.len();
+            let n_queue = n_play + pending.lock().unwrap_or_else(|e| e.into_inner()).len();
             sp_collect.shutdown();
             ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
             // 开播异步展示当前曲热度：红心状态 + 评论总数（不阻塞开播，
@@ -2539,15 +2585,16 @@ async fn run(cli: Cli) -> Result<i32> {
             if n_queue > show_n {
                 ui::info(&format!("  … 共 {n_queue} 首"));
             }
-            if !pending.is_empty() {
+            if !pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
                 ui::info("  分批加载 · 链接过期前自动续取后段曲目");
             }
             if is_mpv {
                 #[cfg(unix)]
                 ui::info(&format!(
-                    "mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · {} 下载当前曲 · {} 喜欢当前曲 · q 退出",
+                    "mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · {} 下载当前曲 · {} 收藏当前曲 · {} 取消收藏 · q 退出",
                     config::play_download_key(),
-                    config::play_like_key()
+                    config::play_like_key(),
+                    config::play_unlike_key()
                 ));
                 #[cfg(not(unix))]
                 ui::info("mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · q 退出");
@@ -2574,6 +2621,8 @@ async fn run(cli: Cli) -> Result<i32> {
                 args.push("--input-terminal=no".to_string());
                 // 直链交给 ffmpeg：禁用 ytdl 解析（坏掉的 yt-dlp 只会刷 traceback）
                 args.push("--ytdl=no".to_string());
+                // 网络流 10s 无数据放弃（防网络波动时 mpv 无限挂起不出声）
+                args.push("--network-timeout=10".to_string());
                 // 预开播放列表下一条：按 > 跳过时新曲已就绪，无需等冷加载缓冲
                 args.push("--prefetch-playlist=yes".to_string());
             }
@@ -2586,7 +2635,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 player::cleanup_socket(&sock);
                 args.push(format!("--input-ipc-server={}", sock.display()));
             }
-            let overlay = if want_lyric {
+            let mut overlay = if want_lyric {
                 args.push("--term-playing-msg=".to_string());
                 // 切曲行显示配置：符号可配；♥ 在关闭 show-liked 或红心歌单时隐藏
                 let disp = player::DisplayCfg {
@@ -2628,7 +2677,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 None
             };
             #[cfg(unix)]
-            let (guard_handle, key_reader, quick_tasks) = if guard_needed {
+            let (mut guard_handle, mut key_reader, quick_tasks) = if guard_needed {
                 if roam {
                     ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
                 }
@@ -2643,19 +2692,23 @@ async fn run(cli: Cli) -> Result<i32> {
                         sock.clone(),
                         config::play_download_key(),
                         config::play_like_key(),
+                        config::play_unlike_key(),
                         queue.clone(),
                     )
                 });
                 let handle = Some(tokio::spawn(guard_loop(
                     sock.clone(),
                     ncm.clone(),
+                    vip_ncm.clone(),
                     lyric_tracks.clone(),
                     quality.clone(),
-                    pending,
+                    pending.clone(),
                     roam,
                     fed.clone(),
                     queue.clone(),
-                    dl_ncm,
+                    srcs.clone(),
+                    last_played.clone(),
+                    dl_ncm.clone(),
                     out_dir.clone(),
                     quick_tasks.clone(),
                     liked.clone(),
@@ -2672,11 +2725,11 @@ async fn run(cli: Cli) -> Result<i32> {
                 std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
             > = None;
             #[cfg(not(unix))]
-            let guard_handle: Option<tokio::task::JoinHandle<()>> = {
+            let mut guard_handle: Option<tokio::task::JoinHandle<()>> = {
                 if roam {
                     ui::info("播放漫游暂不支持当前平台（需要 unix + mpv IPC），已忽略");
                 }
-                let _ = (lyric_tracks, pending, queue);
+                let _ = (&lyric_tracks, &pending, &queue);
                 None
             };
 
@@ -2704,35 +2757,209 @@ async fn run(cli: Cli) -> Result<i32> {
                 }
                 last.context("ffplay 未启动")?
             } else {
-                // mpv / 自定义播放器：一次性喂入全部地址（mpv 自动建播放列表）
-                let mut cmd = tokio::process::Command::new(&prog);
-                cmd.args(&args)
-                    .args(&locations)
-                    .stderr(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped());
-                let mut child = cmd
-                    .spawn()
-                    .with_context(|| format!("启动播放器失败: {prog}"))?;
-                // stderr/stdout 都收进过滤器：错误/音频设备等有用行经 toast 打出，
-                // 其余噪声丢弃，防任何一路直写终端打乱歌词底行
-                let log = child.stderr.take().map(player::spawn_output_filter);
-                let log2 = child.stdout.take().map(player::spawn_output_filter);
-                let status = child.wait().await.context("等待播放器失败")?;
-                if let Some(h) = log {
-                    // EOF 随 mpv 退出自然结束；等一拍让末尾错误行打完再回收
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    h.abort();
-                }
-                if let Some(h) = log2 {
-                    h.abort();
-                }
+                // mpv / 自定义播放器：一次性喂入全部地址（mpv 自动建播放列表）；
+                // 异常退出自动重试续播（共 3 次尝试）——仅 mpv+IPC 场景（guard 在跑、
+                // last_played 有观测）；用户 q/Ctrl+C 退出或正常播完不重试
+                let can_retry = cfg!(unix) && is_mpv;
+                let wanted_flac_retry = matches!(quality.as_str(), "lossless" | "hires");
+                let mut attempt = 1u32;
+                let mut cur_locations = locations;
+                let status = loop {
+                    let mut cmd = tokio::process::Command::new(&prog);
+                    cmd.args(&args)
+                        .args(&cur_locations)
+                        .stderr(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped());
+                    let mut child = cmd
+                        .spawn()
+                        .with_context(|| format!("启动播放器失败: {prog}"))?;
+                    // stderr/stdout 都收进过滤器：错误/音频设备等有用行经 toast 打出，
+                    // 其余噪声丢弃，防任何一路直写终端打乱歌词底行
+                    let log = child.stderr.take().map(player::spawn_output_filter);
+                    let log2 = child.stdout.take().map(player::spawn_output_filter);
+                    let status = child.wait().await.context("等待播放器失败")?;
+                    if let Some(h) = log {
+                        // EOF 随 mpv 退出自然结束；等一拍让末尾错误行打完再回收
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        h.abort();
+                    }
+                    if let Some(h) = log2 {
+                        h.abort();
+                    }
+                    if !can_retry || player::USER_QUIT.load(std::sync::atomic::Ordering::Relaxed) {
+                        break status;
+                    }
+                    // 退出时的剩余量：start 之后的已入队曲 + 未喂完的 pending
+                    let start = {
+                        let lp = last_played.load(std::sync::atomic::Ordering::Relaxed);
+                        if lp == usize::MAX {
+                            0
+                        } else {
+                            lp
+                        }
+                    };
+                    let remain = {
+                        let q = queue.read().unwrap_or_else(|e| e.into_inner());
+                        let p = pending.lock().unwrap_or_else(|e| e.into_inner());
+                        q.len().saturating_sub(start + 1) + p.len()
+                    };
+                    if remain == 0 {
+                        break status; // 正常播完
+                    }
+                    if attempt >= 3 {
+                        crate::player::toast(&format!(
+                            "× 播放中断，重试 {attempt} 次仍未恢复，放弃"
+                        ));
+                        break status;
+                    }
+                    attempt += 1;
+                    crate::player::toast(&format!(
+                        "⚠ 播放中断，自动重试 {attempt}/3 · 重取剩余 {remain} 首"
+                    ));
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // 收掉旧任务与 socket，重建（overlay/key_reader/guard 都绑定旧连接）
+                    if let Some(h) = guard_handle.take() {
+                        h.abort();
+                    }
+                    #[cfg(unix)]
+                    if let Some(h) = key_reader.take() {
+                        h.abort();
+                    }
+                    if let Some(h) = overlay.take() {
+                        h.abort();
+                    }
+                    player::cleanup_socket(&sock);
+                    // 截断已播前缀：新 mpv 播放列表 = 剩余曲，索引 0 起重新对齐
+                    {
+                        let mut q = queue.write().unwrap_or_else(|e| e.into_inner());
+                        let n = q.len();
+                        q.drain(..start.min(n));
+                        let mut s = srcs.write().unwrap_or_else(|e| e.into_inner());
+                        let n = s.len();
+                        s.drain(..start.min(n));
+                        if let Some(ts) = &lyric_tracks {
+                            let mut g = ts.write().unwrap_or_else(|e| e.into_inner());
+                            let n = g.len();
+                            g.drain(..start.min(n));
+                        }
+                    }
+                    last_played.store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
+                    // 剩余曲重取地址：本地文件直用，在线 URL 现取（旧链已过期）；
+                    // 取址失败的曲从三份对齐容器里同步剔除
+                    let qsnap: Vec<(u64, String)> = {
+                        let q = queue.read().unwrap_or_else(|e| e.into_inner());
+                        q.iter()
+                            .map(|(id, label, _)| (*id, label.clone()))
+                            .collect()
+                    };
+                    let ssnap: Vec<PlaySrc> =
+                        srcs.read().unwrap_or_else(|e| e.into_inner()).clone();
+                    let mut new_locations: Vec<String> = Vec::new();
+                    let mut drop_idx: Vec<usize> = Vec::new();
+                    for (i, ((id, label), src)) in qsnap.iter().zip(ssnap.iter()).enumerate() {
+                        match src {
+                            PlaySrc::File(p) => new_locations.push(p.display().to_string()),
+                            PlaySrc::Url(_) => {
+                                let (row, _, _, _) = fetch_row(
+                                    &ncm,
+                                    vip_ncm.as_ref(),
+                                    *id,
+                                    &quality,
+                                    true,
+                                    wanted_flac_retry,
+                                    true,
+                                )
+                                .await;
+                                match row
+                                    .as_ref()
+                                    .and_then(|r| r["url"].as_str())
+                                    .filter(|u| !u.is_empty())
+                                    .map(String::from)
+                                {
+                                    Some(u) => new_locations.push(u),
+                                    None => {
+                                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                                            player::clear_overlay_rows();
+                                        }
+                                        ui::skip(&format!("{label} · 重试取址失败，已跳过"));
+                                        drop_idx.push(i);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for i in drop_idx.iter().rev() {
+                        queue.write().unwrap_or_else(|e| e.into_inner()).remove(*i);
+                        srcs.write().unwrap_or_else(|e| e.into_inner()).remove(*i);
+                        if let Some(ts) = &lyric_tracks {
+                            ts.write().unwrap_or_else(|e| e.into_inner()).remove(*i);
+                        }
+                    }
+                    if new_locations.is_empty() {
+                        crate::player::toast("× 剩余曲目全部取址失败，无法续播");
+                        break status;
+                    }
+                    // 重建 overlay / 键盘接管 / guard（绑定新 socket）
+                    #[cfg(unix)]
+                    {
+                        overlay = if want_lyric {
+                            let disp = player::DisplayCfg {
+                                heart_sym: config::play_heart_symbol(),
+                                heat_sym: config::play_heat_symbol(),
+                                show_heart: config::play_show_liked() && !is_loves_playlist,
+                            };
+                            Some(player::spawn_overlay(
+                                sock.clone(),
+                                lyric_tracks.clone().expect("want_lyric 保证 Some"),
+                                liked.clone(),
+                                ncm.clone(),
+                                disp,
+                            ))
+                        } else {
+                            None
+                        };
+                        if guard_needed {
+                            key_reader = raw_guard.as_ref().map(|_| {
+                                player::spawn_key_reader(
+                                    sock.clone(),
+                                    config::play_download_key(),
+                                    config::play_like_key(),
+                                    config::play_unlike_key(),
+                                    queue.clone(),
+                                )
+                            });
+                            guard_handle = Some(tokio::spawn(guard_loop(
+                                sock.clone(),
+                                ncm.clone(),
+                                vip_ncm.clone(),
+                                lyric_tracks.clone(),
+                                quality.clone(),
+                                pending.clone(),
+                                roam,
+                                fed.clone(),
+                                queue.clone(),
+                                srcs.clone(),
+                                last_played.clone(),
+                                dl_ncm.clone(),
+                                out_dir.clone(),
+                                quick_tasks.clone().unwrap_or_else(|| {
+                                    std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))
+                                }),
+                                liked.clone(),
+                            )));
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    let _ = (&overlay, &guard_handle);
+                    cur_locations = new_locations;
+                };
                 status
             };
-            if let Some(h) = guard_handle {
+            if let Some(h) = guard_handle.take() {
                 h.abort();
             }
             #[cfg(unix)]
-            if let Some(l) = key_reader {
+            if let Some(l) = key_reader.take() {
                 l.abort();
             }
             // 等快捷下载/收藏任务收尾：guard 已停不会再 spawn 新任务，
@@ -3603,6 +3830,7 @@ struct PendingItem {
 /// 播放取址槽位：(曲目标签, (播放源, 来源名, 码率) 或失败原因)
 type Slot = (String, Result<(PlaySrc, String, u64), String>);
 
+#[derive(Clone)]
 enum PlaySrc {
     File(PathBuf),
     Url(String),
@@ -3621,6 +3849,7 @@ impl PlaySrc {
 /// 信号量限 8 并发：无上限 join_all 会瞬间打满接口触发风控
 async fn fetch_urls(
     ncm: &Ncm,
+    vip: Option<&Ncm>,
     tracks: &[Track],
     quality: &str,
 ) -> Vec<Result<(String, u64, String), String>> {
@@ -3630,7 +3859,8 @@ async fn fetch_urls(
     let sem = &sem;
     join_all(tracks.iter().map(|t| async move {
         let _permit = sem.acquire().await.expect("信号量未关闭");
-        let (row, source, reason, _) = fetch_row(ncm, t.id, quality, true, wanted_flac, true).await;
+        let (row, source, reason, _) =
+            fetch_row(ncm, vip, t.id, quality, true, wanted_flac, true).await;
         let row = row.ok_or(reason)?;
         let url = row["url"]
             .as_str()
@@ -3720,10 +3950,11 @@ fn dispatch_quick_reqs(
     }
     let mut seen_req: std::collections::HashSet<(player::Quick, u64)> =
         std::collections::HashSet::new();
-    let mut like_batch: Vec<(u64, String)> = Vec::new();
+    // (曲 id, 标签, 是否取消)：add/del 合并为单任务顺序执行，防并发写同一歌单丢曲
+    let mut like_batch: Vec<(u64, String, bool)> = Vec::new();
     for (kind, id, label) in reqs {
         if !seen_req.insert((kind, id)) {
-            continue; // 同曲同操作重复按下合并为一次（d/l 各自独立）
+            continue; // 同曲同操作重复按下合并为一次（d/l/u 各自独立）
         }
         match kind {
             player::Quick::Download => {
@@ -3747,7 +3978,20 @@ fn dispatch_quick_reqs(
                     crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
                     continue;
                 }
-                like_batch.push((id, label));
+                like_batch.push((id, label, false));
+            }
+            player::Quick::Unlike => {
+                // 红心集合已加载且该曲不在：直接提示，免 API 往返
+                if !liked
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .ids
+                    .contains(&id)
+                {
+                    crate::player::toast(&format!("◌ 「{label}」未收藏"));
+                    continue;
+                }
+                like_batch.push((id, label, true));
             }
         }
     }
@@ -3777,25 +4021,37 @@ fn dispatch_quick_reqs(
                     liked.write().unwrap_or_else(|e| e.into_inner()).red_pid = Some(p);
                 }
                 Err(e) => {
-                    crate::player::toast(&format!("× 喜欢失败：{e:#}"));
+                    crate::player::toast(&format!("× 收藏状态未就绪：{e:#}"));
                     return;
                 }
             }
         }
         let Some(pid) = pid else { return };
-        // 顺序逐首 add，每首即时 toast；一首失败不中断后续
-        for (id, label) in like_batch {
+        // 顺序逐首 add/del，每首即时 toast；一首失败不中断后续
+        for (id, label, unlike) in like_batch {
+            let op = if unlike { "del" } else { "add" };
             match like_ncm
-                .playlist_tracks_op("add", pid, std::slice::from_ref(&id))
+                .playlist_tracks_op(op, pid, std::slice::from_ref(&id))
                 .await
             {
                 Ok(()) => {
+                    let mut g = liked.write().unwrap_or_else(|e| e.into_inner());
+                    if unlike {
+                        g.ids.remove(&id);
+                        crate::player::toast(&format!("✓ 已取消收藏「{label}」"));
+                    } else {
+                        g.ids.insert(id);
+                        crate::player::toast(&format!("✓ 已喜欢「{label}」"));
+                    }
+                }
+                Err(e) if unlike => {
+                    // del 失败多因不在歌单（集合判定与服务端不一致）：语义已达成
                     liked
                         .write()
                         .unwrap_or_else(|e| e.into_inner())
                         .ids
-                        .insert(id);
-                    crate::player::toast(&format!("✓ 已喜欢「{label}」"));
+                        .remove(&id);
+                    crate::player::toast(&format!("◌ 「{label}」已不在歌单（{e:#}）"));
                 }
                 Err(e) if Ncm::is_duplicate_track_err(&e) => {
                     // 歌已在红心歌单：语义已达成，提示而非报错
@@ -3806,7 +4062,10 @@ fn dispatch_quick_reqs(
                         .insert(id);
                     crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
                 }
-                Err(e) => crate::player::toast(&format!("× 喜欢失败「{label}」：{e:#}")),
+                Err(e) => {
+                    let what = if unlike { "取消收藏" } else { "喜欢" };
+                    crate::player::toast(&format!("× {what}失败「{label}」：{e:#}"));
+                }
             }
         }
     });
@@ -3816,18 +4075,23 @@ fn dispatch_quick_reqs(
 /// 播放守护：队尾将尽时把 pending 续入 mpv（在线地址现取防过期），pending
 /// 耗尽且开启漫游时拉私人FM补充；歌词容器与播放列表索引对齐；
 /// 消费快捷下载按键请求（<key> 下载当前曲，用 download 板块凭据）；
+/// 暂停时周期性重取已入队 URL 并经 IPC 替换（防网易直链 ~10min 过期）；
+/// 每轮把观测到的 playlist-pos 写入 last_played（异常退出重试续播用）；
 /// mpv 退出（IPC 连不上连续 3 次）静默结束
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 async fn guard_loop(
     sock: std::path::PathBuf,
     ncm: Ncm,
+    vip_ncm: Option<Ncm>,
     tracks: Option<std::sync::Arc<std::sync::RwLock<Vec<player::LyricTrack>>>>,
     quality: String,
-    mut pending: std::collections::VecDeque<PendingItem>,
+    pending: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<PendingItem>>>,
     roam: bool,
     fed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String, u64)>>>,
+    srcs: std::sync::Arc<std::sync::RwLock<Vec<PlaySrc>>>,
+    last_played: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     dl_ncm: Ncm,
     dl_dir: PathBuf,
     quick: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -3843,8 +4107,16 @@ async fn guard_loop(
         .iter()
         .map(|(id, _, _)| *id)
         .collect();
-    seen.extend(pending.iter().map(|p| p.track.id));
+    seen.extend(
+        pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|p| p.track.id),
+    );
     let mut dup_streak: u32 = 0; // 连续整批重复计数（防服务端只回同一批时卡死）
+    let mut last_refresh = tokio::time::Instant::now() - std::time::Duration::from_secs(60);
+    let mut refresh_supported = true; // mpv 不支持 insert-at 时关闭暂停刷新（提示一次）
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         // 先消费快捷请求：不依赖 mpv 状态——空闲(pos=-1)/IPC 瞬时失败/即将退出
@@ -3869,12 +4141,90 @@ async fn guard_loop(
         let Some(pos) = pos_v.as_i64().filter(|&p| p >= 0).map(|p| p as u64) else {
             continue; // 队列空/空闲：mpv 还活着，等下轮
         };
+        last_played.store(pos as usize, std::sync::atomic::Ordering::Relaxed);
         let mut count = count_v.as_u64().unwrap_or(0);
+        // 暂停中：周期性（≥60s）重取已入队的在线 URL 并经 IPC 替换——网易直链
+        // ~10min 过期，暂停超时恢复播放会 403；本地文件与当前曲（已在解码器）不动
+        req_id += 1;
+        let paused = player::ipc_get(&sock, "pause", req_id)
+            .await
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if paused
+            && refresh_supported
+            && last_refresh.elapsed() >= std::time::Duration::from_secs(60)
+        {
+            last_refresh = tokio::time::Instant::now();
+            // 快照待播项 (id, 旧src)；逐个从后往前替换避免索引移位
+            let snapshot: Vec<(u64, PlaySrc)> = {
+                let q = queue.read().unwrap_or_else(|e| e.into_inner());
+                let s = srcs.read().unwrap_or_else(|e| e.into_inner());
+                q.iter()
+                    .zip(s.iter())
+                    .skip(pos as usize + 1)
+                    .map(|((id, _, _), src)| (*id, src.clone()))
+                    .collect()
+            };
+            for (id, old) in snapshot.into_iter().rev() {
+                let PlaySrc::Url(old_url) = old else {
+                    continue; // 本地文件无过期问题
+                };
+                let (row, _, _, _) = fetch_row(
+                    &ncm,
+                    vip_ncm.as_ref(),
+                    id,
+                    &quality,
+                    true,
+                    wanted_flac,
+                    true,
+                )
+                .await;
+                let Some(new_url) = row
+                    .as_ref()
+                    .and_then(|r| r["url"].as_str())
+                    .filter(|u| !u.is_empty() && *u != old_url)
+                    .map(String::from)
+                else {
+                    continue; // 取不到更新就保留旧的（恢复播放时 mpv 自己会跳过）
+                };
+                // mpv 0.38+ 支持 insert-at：新项插入 pos+1，旧项被挤到 pos+2；
+                // 以 playlist-count 是否 +1 验证插入成功，成功才删旧项——
+                // 旧 mpv 拒绝该子命令时 count 不变，跳过本项（不删任何东西防错位）
+                let ins =
+                    serde_json::json!({"command": ["loadfile", new_url, "insert-at", (pos + 1)]})
+                        .to_string();
+                if player::ipc_send(&sock, &ins).await.is_err() {
+                    break; // socket 断了，mpv 即将退出，别再折腾
+                }
+                req_id += 1;
+                let new_count = player::ipc_get(&sock, "playlist-count", req_id)
+                    .await
+                    .and_then(|v| v.as_u64());
+                if new_count != Some(count + 1) {
+                    refresh_supported = false; // 整个会话只提示一次
+                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                        player::clear_overlay_rows();
+                    }
+                    ui::warn("当前 mpv 不支持 insert-at，暂停期链接刷新已停用（升级 mpv 可恢复）");
+                    break;
+                }
+                // 删被挤到 pos+2 的旧项，srcs 槽位换新 URL，索引保持与 mpv 一致
+                let rm = serde_json::json!({"command": ["playlist-remove", (pos + 2)]}).to_string();
+                let _ = player::ipc_send(&sock, &rm).await; // 失败仅多一残影项，不致命
+                if let Some(slot) = srcs
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_mut(pos as usize + 1)
+                {
+                    *slot = PlaySrc::Url(new_url);
+                }
+            }
+        }
         if pos + 3 < count {
             continue; // 距队尾还早
         }
         // pending 耗尽且漫游开启：拉私人FM补充；未开漫游则继续轮询（快捷下载监听至 mpv 退出）
-        if pending.is_empty() {
+        if pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
             if !roam {
                 continue;
             }
@@ -3887,11 +4237,14 @@ async fn guard_loop(
             for song in &fm {
                 let t = Track::from_json(song);
                 if seen.insert(t.id) {
-                    pending.push_back(PendingItem {
-                        label: format!("{} - {}", t.title, t.artists),
-                        src: PlaySrc::Url(String::new()),
-                        track: t,
-                    });
+                    pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push_back(PendingItem {
+                            label: format!("{} - {}", t.title, t.artists),
+                            src: PlaySrc::Url(String::new()),
+                            track: t,
+                        });
                     added += 1;
                 }
             }
@@ -3906,11 +4259,14 @@ async fn guard_loop(
                 for song in fm {
                     let t = Track::from_json(&song);
                     seen.insert(t.id);
-                    pending.push_back(PendingItem {
-                        label: format!("{} - {}", t.title, t.artists),
-                        src: PlaySrc::Url(String::new()),
-                        track: t,
-                    });
+                    pending
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push_back(PendingItem {
+                            label: format!("{} - {}", t.title, t.artists),
+                            src: PlaySrc::Url(String::new()),
+                            track: t,
+                        });
                 }
             } else {
                 dup_streak = 0;
@@ -3918,16 +4274,29 @@ async fn guard_loop(
         }
         // 预追到前方余量 ≥8 首；取址失败的曲跳过换下一首
         while pos + 8 > count {
-            let Some(item) = pending.pop_front() else {
+            let Some(item) = pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front()
+            else {
                 break;
             };
             let t = &item.track;
-            // 在线地址现取（预取链接会过期，防 403），本地文件直接用
-            let loc = match &item.src {
-                PlaySrc::File(_) => item.src.loc(),
+            // 在线地址现取（预取链接会过期，防 403），本地文件直接用；
+            // VIP 备用号参与续取（后半队列的 VIP 歌同样换号）
+            let (loc, out_src) = match &item.src {
+                PlaySrc::File(_) => (item.src.loc(), item.src.clone()),
                 PlaySrc::Url(_) => {
-                    let (row, _source, _reason, _kind) =
-                        fetch_row(&ncm, t.id, &quality, true, wanted_flac, true).await;
+                    let (row, _source, _reason, _kind) = fetch_row(
+                        &ncm,
+                        vip_ncm.as_ref(),
+                        t.id,
+                        &quality,
+                        true,
+                        wanted_flac,
+                        true,
+                    )
+                    .await;
                     let url = row
                         .as_ref()
                         .and_then(|r| r["url"].as_str())
@@ -3941,7 +4310,7 @@ async fn guard_loop(
                         ui::skip(&format!("{} · 续取失败", item.label));
                         continue;
                     };
-                    url
+                    (url.clone(), PlaySrc::Url(url))
                 }
             };
             // 歌词（失败留空，底行 label 占位照常）
@@ -3972,6 +4341,10 @@ async fn guard_loop(
                 format!("{} - {}", t.title, t.artists),
                 t.like_count.unwrap_or(0),
             ));
+            // srcs 与 queue/mpv 播放列表同步追加（暂停刷新与重试续播按此对齐）
+            srcs.write()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(out_src);
             count += 1;
             fed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }

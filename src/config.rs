@@ -62,8 +62,9 @@ fn save(m: &Map<String, Value>) -> Result<()> {
 /// 键白名单校验
 fn validate_key(key: &str) -> Result<()> {
     match key {
-        "download-dir" | "play.download-key" | "play.like-key" | "play.heart-symbol"
-        | "play.heat-symbol" | "play.show-liked" | "quality" | "download.confirm" => Ok(()),
+        "download-dir" | "play.download-key" | "play.like-key" | "play.unlike-key"
+        | "play.heart-symbol" | "play.heat-symbol" | "play.show-liked" | "quality"
+        | "download.confirm" => Ok(()),
         _ => {
             if let Some(sec) = key.strip_prefix("profile.") {
                 if SECTIONS.contains(&sec) {
@@ -71,7 +72,7 @@ fn validate_key(key: &str) -> Result<()> {
                 }
             }
             bail!(
-                "未知配置键 {key}；可用: download-dir, quality, download.confirm, play.download-key, play.like-key, play.heart-symbol, play.heat-symbol, play.show-liked, profile.<{}>",
+                "未知配置键 {key}；可用: download-dir, quality, download.confirm, play.download-key, play.like-key, play.unlike-key, play.heart-symbol, play.heat-symbol, play.show-liked, profile.<{}>",
                 SECTIONS.join("|")
             )
         }
@@ -88,7 +89,7 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     if key == "play.download-key" && v.chars().any(char::is_whitespace) {
         bail!("按键名不能含空白");
     }
-    if key == "play.like-key" && v.chars().any(char::is_whitespace) {
+    if matches!(key, "play.like-key" | "play.unlike-key") && v.chars().any(char::is_whitespace) {
         bail!("按键名不能含空白");
     }
     if key == "quality" && !matches!(v, "standard" | "exhigh" | "lossless" | "hires") {
@@ -148,6 +149,7 @@ pub fn all_keys() -> &'static [(&'static str, &'static str)] {
         ("download.confirm", "true"),
         ("play.download-key", "d"),
         ("play.like-key", "l"),
+        ("play.unlike-key", "u"),
         ("play.heart-symbol", "♥"),
         ("play.heat-symbol", "*"),
         ("play.show-liked", "true"),
@@ -186,6 +188,14 @@ pub fn play_like_key() -> String {
         .ok()
         .flatten()
         .unwrap_or_else(|| "l".to_string())
+}
+
+/// 播放快捷取消收藏键（未配置默认 `u`，播放期由 ncm 键盘接管消费，不与 mpv 键冲突）
+pub fn play_unlike_key() -> String {
+    get("play.unlike-key")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "u".to_string())
 }
 
 /// 切曲行「我已收藏」标记符号（默认 `♥`；Nerd Font 缺字形时可换 `♡`/`❤` 等）
@@ -250,6 +260,9 @@ pub(crate) mod tests {
         assert!(set("play.download-key", "a b").is_err());
         set("play.like-key", "x").unwrap();
         assert!(set("play.like-key", "a b").is_err());
+        set("play.unlike-key", "x").unwrap();
+        assert_eq!(play_unlike_key(), "x");
+        assert!(set("play.unlike-key", "a b").is_err());
     }
 
     /// 新键：quality / download.confirm 的默认值与取值校验

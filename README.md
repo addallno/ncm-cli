@@ -45,6 +45,7 @@
 - **持久化配置**：`ncm config set <键> <值>`（不改文件，0600 白名单键）：
   `download-dir` 默认下载目录、`play.download-key` 播放快捷下载键（默认 `d`）、
   `play.like-key` 播放收藏键（默认 `l`）、
+  `play.unlike-key` 播放取消收藏键（默认 `u`）、
   `quality` 默认音质（standard/exhigh/lossless/hires，play/download 共用回退）、
   `download.confirm` 多条目下载是否 y/N 确认（默认 `true`）、
   `profile.<板块>` 会话绑定；`ncm config get/list/unset` 查改删
@@ -199,7 +200,8 @@ ncm recommend -t fm,radar
 | `n` / `p` | 下一首 / 上一首 |
 | `/` | 跳转搜索 |
 | `d` | 下载当前曲（键可改：`ncm config set play.download-key <键>`） |
-| `l` | 收藏/取消收藏当前曲到红心歌单（键可改：`ncm config set play.like-key <键>`） |
+| `l` | 收藏当前曲到红心歌单（键可改：`ncm config set play.like-key <键>`） |
+| `u` | 取消收藏当前曲（键可改：`ncm config set play.unlike-key <键>`） |
 | `q` | 退出 |
 
 歌词同步：`ncm play` 自动拉 LRC 并通过 mpv IPC socket 跟随进度滚动显示
