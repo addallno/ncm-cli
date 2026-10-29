@@ -38,6 +38,9 @@ pub struct LikedCtx {
     pub ids: std::collections::HashSet<u64>,
     /// 红心歌单 id（收藏/取消操作复用，免每次 whoami+user_playlists）
     pub red_pid: Option<u64>,
+    /// 红心集合是否加载完成（红心歌单播放模式下未加载完先按已收藏显示 ♥，
+    /// 避免用 `\` 占位误导用户；加载完成后按集合精确判断）
+    pub loaded: bool,
 }
 pub type SharedLiked = std::sync::Arc<std::sync::RwLock<LikedCtx>>;
 
@@ -47,8 +50,10 @@ pub struct DisplayCfg {
     pub heart_sym: String,
     /// 喜欢人数前缀符号（默认 *）
     pub heat_sym: String,
-    /// 是否显示「我已收藏」（play.show-liked 且非红心歌单）
+    /// 是否显示「我已收藏」（play.show-liked 门控）
     pub show_heart: bool,
+    /// 当前是否在播红心歌单（集合未加载完时先按已收藏显示 ♥，而非 `\` 占位）
+    pub in_loves: bool,
     /// 状态栏是否显示评论总数（play.show-comments，默认关）
     pub show_comments: bool,
 }
@@ -465,6 +470,98 @@ async fn ipc_add_volume(sock: &Path, step: i64) -> Option<f64> {
         .flatten()
 }
 
+/// 补取尝试记录：曲 id → (上次发起红心数请求时刻, 上次发起评论数请求时刻)
+#[cfg(unix)]
+type BackfillAttempts = std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<u64, (std::time::Instant, std::time::Instant)>>,
+>;
+
+/// 按需后台补取当前曲喜欢人数/评论数。
+/// 每次切曲/每秒事件都会调用（内部按曲 id 去抖 6s，防重复请求被风控），
+/// 请求在后台任务执行（2s 超时，不阻塞 overlay 事件循环——旧实现同步等 1s
+/// 会卡歌词刷新），写回按曲 id 匹配而非索引（防 guard 续入/索引错位），
+/// 失败不置 fetched，下次事件 6s 后自动重试（修"补取只成功一次、后续失效"）
+#[cfg(unix)]
+fn spawn_backfill(
+    ncm: &crate::api::Ncm,
+    tracks: &Arc<std::sync::RwLock<Vec<LyricTrack>>>,
+    attempts: &BackfillAttempts,
+    tid: u64,
+    want_red: bool,
+    want_cmt: bool,
+) {
+    if tid == 0 || (!want_red && !want_cmt) {
+        return;
+    }
+    let now = std::time::Instant::now();
+    const BACKFILL_GAP: std::time::Duration = std::time::Duration::from_secs(6);
+    let (do_red, do_cmt) = {
+        let mut m = attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let e = m.entry(tid).or_insert((now, now));
+        let fire = |last: &mut std::time::Instant| -> bool {
+            if now.duration_since(*last) >= BACKFILL_GAP {
+                *last = now;
+                true
+            } else {
+                false
+            }
+        };
+        (want_red && fire(&mut e.0), want_cmt && fire(&mut e.1))
+    };
+    if !do_red && !do_cmt {
+        return;
+    }
+    let ncm = ncm.clone();
+    let tracks = tracks.clone();
+    tokio::spawn(async move {
+        const BACKFILL_TIMEOUT: Duration = Duration::from_secs(2);
+        let (red, cmt) = tokio::join!(
+            async {
+                if do_red {
+                    tokio::time::timeout(BACKFILL_TIMEOUT, ncm.song_red_count(tid))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                } else {
+                    None
+                }
+            },
+            async {
+                if do_cmt {
+                    tokio::time::timeout(BACKFILL_TIMEOUT, ncm.song_comments(tid, 1))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .map(|(_, total)| total)
+                } else {
+                    None
+                }
+            }
+        );
+        let mut updated = false;
+        {
+            let mut ts = tracks.write().unwrap_or_else(|e| e.into_inner());
+            // 按 id 匹配写回（不依赖 cur_idx：写错索引会污染其他曲的状态）
+            if let Some(t) = ts.iter_mut().find(|t| t.id == tid) {
+                // Some(0) 也写入：取到过就显示 *0，便于识别接口失败
+                if let Some(n) = red {
+                    t.like_count = Some(n);
+                    t.red_fetched = true;
+                    updated = true;
+                }
+                if let Some(n) = cmt {
+                    t.comment_count = Some(n);
+                    t.cmt_fetched = true;
+                    updated = true;
+                }
+            }
+        }
+        if updated {
+            mark_dirty(); // 暂停/无 time-pos 时状态栏也立刻重画
+        }
+    });
+}
+
 #[cfg(unix)]
 async fn overlay_loop(
     sock: &Path,
@@ -518,6 +615,8 @@ async fn overlay_loop(
     let mut last_sec: Option<u64> = None;
     let mut cur_t: f64 = 0.0;
     let mut dur: Option<f64> = None;
+    // 补取去抖记录（切曲/每秒事件共用，防同曲 6s 内重复请求）
+    let attempts: BackfillAttempts = std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
     let mut lines = TokioBufReader::new(read).lines();
     loop {
         // 400ms 轮询：toast 清底行后无事件（暂停/停秒）也要立即重画，防歌词滞留
@@ -555,70 +654,21 @@ async fn overlay_loop(
                         last_sec = None;
                         cur_t = 0.0;
                         dur = None;
-                        // 歌单/搜索来源 Track 无 likeCount/评论数：切曲时并行补取
-                        //（各自 1s 超时；成功才置 fetched，失败下次切回自动重试；
-                        // FM/日推自带值或已取到则跳过，避免重复请求）
+                        // 歌单/搜索来源 Track 无 likeCount/评论数：切曲时发起后台
+                        // 补取（2s 超时不阻塞事件循环，按曲 id 去抖 6s，失败自动重试）
                         {
-                            let (tid, need_red, need_cmt) = {
+                            let (tid, want_red, want_cmt) = {
                                 let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
                                 match ts.get(cur_idx) {
                                     Some(t) => (
                                         t.id,
-                                        t.like_count.is_none() && !t.red_fetched,
-                                        disp.show_comments
-                                            && t.comment_count.is_none()
-                                            && !t.cmt_fetched,
+                                        t.like_count.is_none(),
+                                        disp.show_comments && t.comment_count.is_none(),
                                     ),
                                     None => (0, false, false),
                                 }
                             };
-                            if need_red || need_cmt {
-                                // 并行发两个请求，任一失败只影响自己的字段
-                                let red_fut = async {
-                                    if need_red {
-                                        tokio::time::timeout(
-                                            Duration::from_secs(1),
-                                            ncm.song_red_count(tid),
-                                        )
-                                        .await
-                                        .ok()
-                                        .and_then(Result::ok)
-                                    } else {
-                                        None
-                                    }
-                                };
-                                let cmt_fut = async {
-                                    if need_cmt {
-                                        tokio::time::timeout(
-                                            Duration::from_secs(1),
-                                            ncm.song_comments(tid, 1),
-                                        )
-                                        .await
-                                        .ok()
-                                        .and_then(Result::ok)
-                                        .map(|(_, total)| total)
-                                    } else {
-                                        None
-                                    }
-                                };
-                                let (red, cmt) = tokio::join!(red_fut, cmt_fut);
-                                let mut ts = tracks.write().unwrap_or_else(|e| e.into_inner());
-                                if let Some(t) = ts.get_mut(cur_idx) {
-                                    if t.id != tid {
-                                        // 读写锁间隙已切走，丢弃过期结果
-                                    } else {
-                                        // Some(0) 也写入：取到过就显示 *0，便于识别接口失败
-                                        if let Some(n) = red {
-                                            t.like_count = Some(n);
-                                            t.red_fetched = true;
-                                        }
-                                        if let Some(n) = cmt {
-                                            t.comment_count = Some(n);
-                                            t.cmt_fetched = true;
-                                        }
-                                    }
-                                }
-                            }
+                            spawn_backfill(ncm, tracks, &attempts, tid, want_red, want_cmt);
                         }
                         let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
                         // 切曲往滚动历史打一行歌名（先清底行，行独立可回翻）；
@@ -642,6 +692,22 @@ async fn overlay_loop(
                 Some("time-pos") => {
                     if let Some(t) = ev["data"].as_f64() {
                         cur_t = t;
+                        // 每秒再查一次补取（去抖 6s 由 attempts 控制）：
+                        // 切曲事件补取失败/被跳过时，播放中会持续重试直到取到
+                        {
+                            let (tid, want_red, want_cmt) = {
+                                let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+                                match ts.get(cur_idx) {
+                                    Some(t) => (
+                                        t.id,
+                                        t.like_count.is_none(),
+                                        disp.show_comments && t.comment_count.is_none(),
+                                    ),
+                                    None => (0, false, false),
+                                }
+                            };
+                            spawn_backfill(ncm, tracks, &attempts, tid, want_red, want_cmt);
+                        }
                         let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
                         let line = current_line(ts.as_slice(), cur_idx, t);
                         let sec = t as u64;
@@ -830,14 +896,18 @@ fn print_row(
         _ => String::new(),
     };
     // 状态栏收藏/热度段：♥ 已收藏、\ 未收藏等宽占位（show_heart 门控）；
-    // *N 喜欢人数（>0 才显示，soft_blue，≥1万 显示 x.x万）
+    // 红心歌单模式下集合未加载完也先显示 ♥（整单皆红心，用 \ 会造成困惑），
+    // 加载完成后若该曲确实不在集合（刚被 u 移除）则不显示；
+    // *N 喜欢人数（取到即显示，soft_blue，≥1万 显示 x.x万）
     let mut status = String::new();
     if let Some(tr) = track {
         if disp.show_heart {
             let lk = liked.read().unwrap_or_else(|e| e.into_inner());
             if lk.ids.contains(&tr.id) {
                 status.push_str(&disp.heart_sym);
-            } else {
+            } else if disp.in_loves && !lk.loaded {
+                status.push_str(&disp.heart_sym); // 红心歌单且集合未就绪：默认已收藏
+            } else if !disp.in_loves {
                 status.push('\\'); // 与 ♥ 同宽占位，状态栏列位不跳
             }
         }

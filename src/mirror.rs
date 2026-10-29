@@ -21,12 +21,13 @@ static BASE: OnceLock<Vec<String>> = OnceLock::new();
 static CLIENT: OnceLock<Client> = OnceLock::new();
 
 /// 启动时初始化（main 调用一次）。
-/// 优先级：`--mirror` > `NCM_MIRROR` > 默认 localhost:3000,3100；
+/// 优先级：`--mirror` > `NCM_MIRROR` > `config mirror` 键 > 默认 localhost:3000,3100；
 /// 值为 `none`（不区分大小写）时禁用；逗号分隔多个候选地址依次尝试。
 pub fn init(cli: Option<&str>) {
     let raw = cli
         .map(str::to_string)
         .or_else(|| std::env::var("NCM_MIRROR").ok())
+        .or_else(crate::config::mirror)
         .unwrap_or_else(|| DEFAULT.to_string());
     let val = raw.trim();
     let bases: Vec<String> = if val.eq_ignore_ascii_case("none") || val.is_empty() {

@@ -47,6 +47,9 @@
   `play.like-key` 播放收藏键（默认 `l`）、
   `play.unlike-key` 播放取消收藏键（默认 `u`）、
   `play.show-comments` 播放状态栏是否显示评论数（默认 `false`，开启后切曲并行补取），
+  `download.jobs` 默认并发下载数（默认 `1`，1-16，`-j` 未指定时回退）、
+  `mirror` 解锁音源地址（默认 `127.0.0.1:3000,3100`，`none` 禁用，逗号分隔多候选）、
+  `play.prefetch` 分批取址预取首数（默认 `6`，1-64，防网易直链过期 403 雪崩）、
   `quality` 默认音质（standard/exhigh/lossless/hires，play/download 共用回退）、
   `download.confirm` 多条目下载是否 y/N 确认（默认 `true`）、
   `profile.<板块>` 会话绑定；`ncm config get/list/unset` 查改删
@@ -188,7 +191,7 @@ ncm recommend -t fm,radar
 | `-t, --template` | `{artists} - {track}` | 文件名模板 |
 | `--skip-existing` | 关 | 跳过已存在文件 |
 | `--allow-trial` | 关 | 放行 30 秒试听 |
-| `-j, --jobs` | `1` | 并发下载数（2-16；>1 关闭逐曲动画） |
+| `-j, --jobs` | `download.jobs` | 并发下载数（1-16；未指定回退 config，>1 关闭逐曲动画） |
 | `--m3u` | — | 完成后导出 M3U（成功曲目，路径相对列表文件） |
 | `--json` | 关 | 机器可读输出 |
 
@@ -209,9 +212,10 @@ ncm recommend -t fm,radar
 （`--no-lyric` 关闭；ffplay 无歌词显示，建议装 mpv）。底行实时显示
 `♪ [i/N] mm:ss/mm:ss [进度条] 当前歌词`（每秒刷新，非 TTY 场景自动静默）。
 状态栏尾部显示收藏状态（`play.show-liked` 门控，符号 `play.heart-symbol` 可改）与
-喜欢人数（`*N`，FM/日推自带，歌单等来源切曲时并行补取，失败下次切回自动重试）；
-评论数默认不显示，`ncm config set play.show-comments true` 开启后切曲并行补取并在
-状态栏显示 `评N`（`play.show-comments=false` 关闭）。
+喜欢人数（`*N`，FM/日推自带，歌单等来源切曲时后台补取，失败 6s 后自动重试直到取到）；
+评论数默认不显示，`ncm config set play.show-comments true` 开启后同样后台补取并在
+状态栏显示 `评N`（`play.show-comments=false` 关闭）。播放红心歌单（我喜欢的音乐）
+时按已收藏显示 `♥`（加载中默认 ♥，不再显示易困惑的斜杠占位）。
 
 ## FLAC 取址
 
@@ -239,7 +243,7 @@ NCM_MIRROR=http://127.0.0.1:3000,http://127.0.0.1:3100 ncm play --daily  # 多�
 NCM_MIRROR=none ncm download 186016            # 禁用本地 mirror（第三方直连仍生效）
 ```
 
-- 本地 mirror 优先级：`--mirror` > 环境变量 `NCM_MIRROR` > 默认 `http://127.0.0.1:3000,http://127.0.0.1:3100`；`none` 禁用
+- 本地 mirror 优先级：`--mirror` > 环境变量 `NCM_MIRROR` > `config mirror` 键 > 默认 `http://127.0.0.1:3000,http://127.0.0.1:3100`；`none` 禁用
 - 单次匹配超时 30s；全部兜底失败时来源标 `官方·试听（无完整源）`，报错并入失败原因
 - 成功时来源显示为 `mirror·<音源>`，下载校验按未知码率处理（不误判体积）
 

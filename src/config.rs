@@ -7,9 +7,13 @@
 //! - `play.download-key`：播放时快捷下载的 mpv 按键（默认 `d`）
 //! - `play.heart-symbol`：切曲行「我已收藏」标记符号（默认 `♥`；字体缺字形可换 `♡` 等）
 //! - `play.heat-symbol`：切曲行喜欢人数前缀符号（默认 `*`）
-//! - `play.show-liked`：切曲行是否显示「我已收藏」标记（默认 true；播放红心歌单时强制隐藏）
+//! - `play.show-liked`：切曲行是否显示「我已收藏」标记（默认 true；播放红心歌单时按已收藏显示 ♥）
+//! - `play.show-comments`：切曲行是否显示评论总数 `评N`（默认 false，开启后切曲后台补取）
+//! - `download.jobs`：默认并发下载数（默认 1，1-16，`-j` 未指定时回退）
+//! - `mirror`：解锁音源地址（默认 `127.0.0.1:3000,3100`，`none` 禁用，逗号分隔多候选）
+//! - `play.prefetch`：分批取址预取首数（默认 6，1-64，防网易直链过期 403 雪崩）
 //! - `profile.<板块>`：板块 → 登录会话 profile 名（`login --profile <名>` 保存的凭据）
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 
@@ -64,7 +68,7 @@ fn validate_key(key: &str) -> Result<()> {
     match key {
         "download-dir" | "play.download-key" | "play.like-key" | "play.unlike-key"
         | "play.heart-symbol" | "play.heat-symbol" | "play.show-liked" | "play.show-comments"
-        | "quality" | "download.confirm" => Ok(()),
+        | "quality" | "download.confirm" | "download.jobs" | "mirror" | "play.prefetch" => Ok(()),
         _ => {
             if let Some(sec) = key.strip_prefix("profile.") {
                 if SECTIONS.contains(&sec) {
@@ -72,7 +76,7 @@ fn validate_key(key: &str) -> Result<()> {
                 }
             }
             bail!(
-                "未知配置键 {key}；可用: download-dir, quality, download.confirm, play.download-key, play.like-key, play.unlike-key, play.heart-symbol, play.heat-symbol, play.show-liked, play.show-comments, profile.<{}>",
+                "未知配置键 {key}；可用: download-dir, quality, download.confirm, download.jobs, mirror, play.download-key, play.like-key, play.unlike-key, play.heart-symbol, play.heat-symbol, play.show-liked, play.show-comments, play.prefetch, profile.<{}>",
                 SECTIONS.join("|")
             )
         }
@@ -101,10 +105,28 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     if matches!(key, "play.show-liked" | "play.show-comments") && !matches!(v, "true" | "false") {
         bail!("{key} 只能是 true/false");
     }
-    if (key == "play.heart-symbol" || key == "play.heat-symbol")
-        && v.chars().any(char::is_whitespace)
+    if matches!(key, "play.heart-symbol" | "play.heat-symbol") && v.chars().any(char::is_whitespace)
     {
         bail!("符号不能含空白");
+    }
+    if key == "download.jobs" {
+        let n: u32 = v
+            .parse()
+            .map_err(|_| anyhow!("download.jobs 只能是 1-16 的整数"))?;
+        if !(1..=16).contains(&n) {
+            bail!("download.jobs 只能是 1-16 的整数");
+        }
+    }
+    if key == "play.prefetch" {
+        let n: usize = v
+            .parse()
+            .map_err(|_| anyhow!("play.prefetch 只能是 1-64 的整数"))?;
+        if !(1..=64).contains(&n) {
+            bail!("play.prefetch 只能是 1-64 的整数");
+        }
+    }
+    if key == "mirror" && v.chars().any(char::is_whitespace) {
+        bail!("mirror 地址不能含空白（多个用逗号分隔）");
     }
     let mut m = load_all();
     m.insert(key.to_string(), Value::String(v.to_string()));
@@ -154,6 +176,9 @@ pub fn all_keys() -> &'static [(&'static str, &'static str)] {
         ("play.heat-symbol", "*"),
         ("play.show-liked", "true"),
         ("play.show-comments", "false"),
+        ("download.jobs", "1"),
+        ("mirror", "127.0.0.1:3000,3100"),
+        ("play.prefetch", "6"),
     ]
 }
 
@@ -223,6 +248,31 @@ pub fn play_show_liked() -> bool {
 /// 切曲状态栏是否显示评论总数（默认 false——切曲补取需额外一次 API，按需开启）
 pub fn play_show_comments() -> bool {
     get("play.show-comments").ok().flatten().as_deref() == Some("true")
+}
+
+/// 默认并发下载数（`download.jobs`，1-16；`-j` 未指定时回退）
+pub fn download_jobs() -> u32 {
+    get("download.jobs")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .filter(|n: &u32| (1..=16).contains(n))
+        .unwrap_or(1)
+}
+
+/// 解锁音源地址（`mirror`，未配置返回 None → 用 mirror.rs 默认/环境变量）
+pub fn mirror() -> Option<String> {
+    get("mirror").ok().flatten()
+}
+
+/// 分批取址预取首数（`play.prefetch`，1-64；防网易直链 ~10min 过期 403 雪崩）
+pub fn play_prefetch() -> usize {
+    get("play.prefetch")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .filter(|n: &usize| (1..=64).contains(n))
+        .unwrap_or(6)
 }
 
 /// 板块绑定的会话 profile 名（未绑定返回 None → 回退默认凭据）
@@ -316,6 +366,31 @@ pub(crate) mod tests {
         set("play.show-comments", "false").unwrap();
         assert!(!play_show_comments());
         assert!(set("play.show-comments", "yes").is_err());
+    }
+
+    /// 新键 mirror / play.prefetch / download.jobs：默认值与取值校验
+    #[test]
+    fn mirror_prefetch_jobs_keys() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        fresh("mirror-prefetch-jobs");
+        assert_eq!(mirror(), None);
+        assert_eq!(play_prefetch(), 6);
+        assert_eq!(download_jobs(), 1);
+        set("mirror", "127.0.0.1:3000,127.0.0.1:3100").unwrap();
+        assert_eq!(mirror().as_deref(), Some("127.0.0.1:3000,127.0.0.1:3100"));
+        set("mirror", "none").unwrap();
+        assert_eq!(mirror().as_deref(), Some("none"));
+        assert!(set("mirror", "a b").is_err());
+        set("play.prefetch", "12").unwrap();
+        assert_eq!(play_prefetch(), 12);
+        assert!(set("play.prefetch", "0").is_err());
+        assert!(set("play.prefetch", "65").is_err());
+        assert!(set("play.prefetch", "x").is_err());
+        set("download.jobs", "8").unwrap();
+        assert_eq!(download_jobs(), 8);
+        assert!(set("download.jobs", "17").is_err());
+        assert!(set("download.jobs", "0").is_err());
+        assert!(set("download.jobs", "x").is_err());
     }
 
     #[test]

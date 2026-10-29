@@ -495,9 +495,9 @@ struct DownloadArgs {
     /// 按编号选择要下载的项：1,3 / 5-8 / 1- / all（download 结果统一生效）
     #[arg(help_heading = "选择", short = 'd', long)]
     download: Option<String>,
-    /// 并发下载数（>1 时关闭逐曲转圈/行内进度，仅保留结果行）
-    #[arg(help_heading = "执行", short = 'j', long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=16))]
-    jobs: u32,
+    /// 并发下载数（>1 时关闭逐曲转圈/行内进度，仅保留结果行；未指定回退 config download.jobs）
+    #[arg(help_heading = "执行", short = 'j', long, value_parser = clap::value_parser!(u32).range(1..=16))]
+    jobs: Option<u32>,
     /// 多条目下载时跳过 y/N 确认（config download.confirm=false 可全局关闭确认）
     #[arg(help_heading = "执行", short = 'y', long)]
     yes: bool,
@@ -1052,10 +1052,14 @@ async fn run_batch(
     if opts.quality.is_none() {
         opts.quality = Some(config::default_quality());
     }
+    // -j 未指定回退 config download.jobs（单次显式指定优先）
+    if opts.jobs.is_none() {
+        opts.jobs = Some(config::download_jobs());
+    }
     let tty = !opts.json && std::io::IsTerminal::is_terminal(&std::io::stdin());
     let interactive = tty && opts.download.is_none();
     // 行内刷新：单任务批量下载时 step/进度原地覆盖，只固化结果行（离开 run_batch 恢复）
-    ui::set_live(tty && opts.jobs == 1 && !opts.dry_run);
+    ui::set_live(tty && opts.jobs.unwrap_or(1) == 1 && !opts.dry_run);
     struct LiveGuard;
     impl Drop for LiveGuard {
         fn drop(&mut self) {
@@ -1190,6 +1194,8 @@ async fn download_songs(
     if opts.dry_run && opts.json {
         bail!("--dry-run 与 --json 互斥");
     }
+    // -j 未指定回退 config download.jobs（快捷下载等直调路径也统一生效）
+    let jobs = opts.jobs.unwrap_or_else(config::download_jobs);
     if songs.is_empty() {
         ui::fail("没有可处理的曲目");
         return Ok((1, Vec::new()));
@@ -1280,7 +1286,7 @@ async fn download_songs(
         }
     };
 
-    if opts.jobs > 1 {
+    if jobs > 1 {
         // 并发分支：--jobs N 限流，结果行按完成顺序即时输出，最后按原下标排序出报告
         // 注：future 在 for 循环里直接构造（闭包写法会触发 spawn 的 HRTB 泛型提升失败）
         use futures_util::StreamExt;
@@ -1311,7 +1317,7 @@ async fn download_songs(
             futs.push(fut);
         }
         let mut paired: Vec<(usize, ItemResult)> = Vec::new();
-        let mut stream = futures_util::stream::iter(futs).buffer_unordered(opts.jobs as usize);
+        let mut stream = futures_util::stream::iter(futs).buffer_unordered(jobs as usize);
         while let Some((i, r)) = stream.next().await {
             show(i, &r);
             paired.push((i, r));
@@ -1683,9 +1689,6 @@ fn report(
     Ok(if failed.is_empty() { 0 } else { 1 })
 }
 
-// 播放在线地址预取窗口：网易直链约 10 分钟过期，只先喂前 N 首，其余随播随取
-const PLAY_PREFETCH: usize = 6;
-
 /// 并发检测已存各 profile 的 VIP，返回第一个 VIP 的 profile 名；全非 VIP/仅 default → None
 async fn detect_vip_profile() -> Option<String> {
     let profiles = session::list_profiles();
@@ -1871,8 +1874,8 @@ async fn run_login(cli: Cli) -> Result<i32> {
         saved
     } else {
         ui::info(&format!(
-            "未保存凭据。用法:\n  ncm login --session <pyncm文件>\n  ncm login --cookie \"MUSIC_U=...; __csrf=...\"\n  ncm login --profile <名称>  保存/查看指定 profile（多账号）\n  ncm login --logout [--profile <名称>]  登出\n凭据将保存到 {}",
-            session::cookie_path(prof).display()
+            "未保存凭据。用法:\n  ncm login --session <pyncm文件>\n  ncm login --cookie \"MUSIC_U=...; __csrf=...\"\n  ncm login --profile <档名|uid|用户名>  保存/查看指定 profile（多账号，档名/uid/用户名均可选中）\n  ncm login --logout [--profile <名称>]  登出\n凭据连同 uid/用户名一并保存到 {}",
+            session::sessions_path().display()
         ));
         return Ok(0);
     };
@@ -1881,7 +1884,8 @@ async fn run_login(cli: Cli) -> Result<i32> {
     match ncm.whoami().await? {
         Some((uid, name)) => {
             if given {
-                let path = session::save_profile(prof, &auth_str)?;
+                // whoami 元数据（uid/用户名）一并入库：之后 --profile 可按二者反查
+                let path = session::save_profile(prof, &auth_str, Some(uid), Some(&name))?;
                 ui::ok(&format!(
                     "登录成功并已保存：{name} (uid {uid})\n  凭据: {}",
                     path.display()
@@ -2443,7 +2447,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     artist: false,
                     json: false,
                     download: None,
-                    jobs: 1,
+                    jobs: Some(1),
                     yes: false,
                     m3u: None,
                 };
@@ -2460,10 +2464,14 @@ async fn run(cli: Cli) -> Result<i32> {
                     }
                 }
             }
-            // 分批取址：mpv+unix 下只预取前 PLAY_PREFETCH 首在线地址（网易直链
+            // 分批取址：mpv+unix 下只预取前 play.prefetch 首在线地址（网易直链
             // 约 10 分钟过期，全量预取会让长队列后段 403 雪崩），其余随播随取
             let batching = cfg!(unix) && is_mpv;
-            let prefetch = if batching { PLAY_PREFETCH } else { usize::MAX };
+            let prefetch = if batching {
+                config::play_prefetch()
+            } else {
+                usize::MAX
+            };
             let missing: Vec<usize> = slots
                 .iter()
                 .enumerate()
@@ -2569,6 +2577,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 std::sync::Arc::new(std::sync::RwLock::new(player::LikedCtx {
                     ids: std::collections::HashSet::new(),
                     red_pid: None,
+                    loaded: false,
                 }));
             // 异步加载红心集合（登录态）：whoami → 红心歌单 → trackIds 一次拉全量；
             // 加载完成前切曲行不带 ♥，完成后自动出现（不阻塞开播）
@@ -2593,6 +2602,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         let mut g = liked.write().unwrap_or_else(|e| e.into_inner());
                         g.ids = ids.into_iter().collect();
                         g.red_pid = Some(pid);
+                        g.loaded = true;
                         drop(g);
                         // 加载完成即重画：暂停/无 time-pos 时状态栏 ♥ 也要立刻出现
                         player::mark_dirty();
@@ -2622,17 +2632,20 @@ async fn run(cli: Cli) -> Result<i32> {
             ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
             // 开播异步展示当前曲热度：红心状态 + 评论总数（不阻塞开播，
             // 查到后经 toast 在第二行短暂显示；匿名时仅评论数）
-            // 红心状态部分受 play.show-liked 门控（关闭/红心歌单时免 3 次 API）
+            // 红心状态受 play.show-liked 门控（关闭时免 3 次 API）；红心歌单
+            // 模式下歌单内即已收藏，直接显示不查接口
             #[cfg(unix)]
             {
                 let info_ncm = ncm.clone();
                 let first_id = play_tracks.first().map(|t| t.id);
-                let show_heart = config::play_show_liked() && !is_loves_playlist;
+                let show_heart = config::play_show_liked();
                 tokio::spawn(async move {
                     let Some(id) = first_id else { return };
                     let mut parts: Vec<String> = Vec::new();
                     if show_heart {
-                        if let Ok(Some((uid, _))) = info_ncm.whoami().await {
+                        if is_loves_playlist {
+                            parts.push(format!("已喜欢 {}", config::play_heart_symbol()));
+                        } else if let Ok(Some((uid, _))) = info_ncm.whoami().await {
                             if let Ok(lists) = info_ncm.user_playlists(uid).await {
                                 let pid = lists
                                     .iter()
@@ -2753,11 +2766,13 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             let mut overlay = if want_lyric {
                 args.push("--term-playing-msg=".to_string());
-                // 切曲行显示配置：符号可配；♥ 在关闭 show-liked 或红心歌单时隐藏
+                // 切曲行显示配置：符号可配；♥ 受 show-liked 门控，红心歌单
+                // 模式也显示（集合未就绪时先按已收藏显示，避免 \ 占位困惑）
                 let disp = player::DisplayCfg {
                     heart_sym: config::play_heart_symbol(),
                     heat_sym: config::play_heat_symbol(),
-                    show_heart: config::play_show_liked() && !is_loves_playlist,
+                    show_heart: config::play_show_liked(),
+                    in_loves: is_loves_playlist,
                     show_comments: config::play_show_comments(),
                 };
                 Some(player::spawn_overlay(
@@ -3023,7 +3038,8 @@ async fn run(cli: Cli) -> Result<i32> {
                             let disp = player::DisplayCfg {
                                 heart_sym: config::play_heart_symbol(),
                                 heat_sym: config::play_heat_symbol(),
-                                show_heart: config::play_show_liked() && !is_loves_playlist,
+                                show_heart: config::play_show_liked(),
+                                in_loves: is_loves_playlist,
                                 show_comments: config::play_show_comments(),
                             };
                             Some(player::spawn_overlay(
@@ -3946,7 +3962,7 @@ async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, qual
         artist: false,
         json: false,
         download: None,
-        jobs: 1,
+        jobs: Some(1),
         yes: false,
         m3u: None,
     };
