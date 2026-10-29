@@ -23,8 +23,12 @@ pub struct LyricTrack {
     /// 喜欢人数（每日推荐/私人FM 自带；歌单来源切曲时经 song_red_count 补取）
     /// 喜欢人数；None=未知（FM/日推来源数据自带 Some，歌单等切曲补取后置 Some 含 0）
     pub like_count: Option<u64>,
-    /// like_count 是否已尝试补取（含失败；防同曲反复请求）
+    /// like_count 是否已尝试补取且成功（失败不置位：下次切回该曲自动重试）
     pub red_fetched: bool,
+    /// 评论总数；None=未知（play.show-comments 开启时切曲补取）
+    pub comment_count: Option<u64>,
+    /// comment_count 是否已尝试补取且成功（失败不置位，同 red_fetched）
+    pub cmt_fetched: bool,
 }
 
 /// 播放会话共享红心状态：已收藏曲 id 集合 + 红心歌单 id。
@@ -45,6 +49,8 @@ pub struct DisplayCfg {
     pub heat_sym: String,
     /// 是否显示「我已收藏」（play.show-liked 且非红心歌单）
     pub show_heart: bool,
+    /// 状态栏是否显示评论总数（play.show-comments，默认关）
+    pub show_comments: bool,
 }
 
 /// 快捷请求类型（键盘接管键触发）
@@ -549,36 +555,66 @@ async fn overlay_loop(
                         last_sec = None;
                         cur_t = 0.0;
                         dur = None;
-                        // 歌单/搜索来源 Track 无 likeCount：切曲时现场补取红心人数
-                        //（1s 超时静默失败；FM/日推自带值或已试过则跳过）
+                        // 歌单/搜索来源 Track 无 likeCount/评论数：切曲时并行补取
+                        //（各自 1s 超时；成功才置 fetched，失败下次切回自动重试；
+                        // FM/日推自带值或已取到则跳过，避免重复请求）
                         {
-                            let (tid, need) = {
+                            let (tid, need_red, need_cmt) = {
                                 let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
                                 match ts.get(cur_idx) {
-                                    Some(t) => (t.id, t.like_count.is_none() && !t.red_fetched),
-                                    None => (0, false),
+                                    Some(t) => (
+                                        t.id,
+                                        t.like_count.is_none() && !t.red_fetched,
+                                        disp.show_comments
+                                            && t.comment_count.is_none()
+                                            && !t.cmt_fetched,
+                                    ),
+                                    None => (0, false, false),
                                 }
                             };
-                            if need {
-                                if let Ok(Ok(n)) = tokio::time::timeout(
-                                    Duration::from_secs(1),
-                                    ncm.song_red_count(tid),
-                                )
-                                .await
-                                {
-                                    let mut ts = tracks.write().unwrap_or_else(|e| e.into_inner());
-                                    if let Some(t) = ts.get_mut(cur_idx) {
-                                        if t.id == tid {
-                                            // Some(0) 也写入：取到过就显示 *0，便于识别接口失败
-                                            t.like_count = Some(n);
-                                        }
-                                        t.red_fetched = true;
+                            if need_red || need_cmt {
+                                // 并行发两个请求，任一失败只影响自己的字段
+                                let red_fut = async {
+                                    if need_red {
+                                        tokio::time::timeout(
+                                            Duration::from_secs(1),
+                                            ncm.song_red_count(tid),
+                                        )
+                                        .await
+                                        .ok()
+                                        .and_then(Result::ok)
+                                    } else {
+                                        None
                                     }
-                                } else {
-                                    let mut ts = tracks.write().unwrap_or_else(|e| e.into_inner());
-                                    if let Some(t) = ts.get_mut(cur_idx) {
-                                        if t.id == tid {
+                                };
+                                let cmt_fut = async {
+                                    if need_cmt {
+                                        tokio::time::timeout(
+                                            Duration::from_secs(1),
+                                            ncm.song_comments(tid, 1),
+                                        )
+                                        .await
+                                        .ok()
+                                        .and_then(Result::ok)
+                                        .map(|(_, total)| total)
+                                    } else {
+                                        None
+                                    }
+                                };
+                                let (red, cmt) = tokio::join!(red_fut, cmt_fut);
+                                let mut ts = tracks.write().unwrap_or_else(|e| e.into_inner());
+                                if let Some(t) = ts.get_mut(cur_idx) {
+                                    if t.id != tid {
+                                        // 读写锁间隙已切走，丢弃过期结果
+                                    } else {
+                                        // Some(0) 也写入：取到过就显示 *0，便于识别接口失败
+                                        if let Some(n) = red {
+                                            t.like_count = Some(n);
                                             t.red_fetched = true;
+                                        }
+                                        if let Some(n) = cmt {
+                                            t.comment_count = Some(n);
+                                            t.cmt_fetched = true;
                                         }
                                     }
                                 }
@@ -816,6 +852,20 @@ fn print_row(
             }
             status.push_str(&crate::ui::soft_blue(&format!("{}{n}", disp.heat_sym)));
         }
+        // 评论总数（play.show-comments 门控；未开启或未取到则不显示）
+        if disp.show_comments {
+            if let Some(cc) = tr.comment_count {
+                let n = if cc >= 10_000 {
+                    format!("{:.1}万", cc as f64 / 10_000.0)
+                } else {
+                    cc.to_string()
+                };
+                if !status.is_empty() {
+                    status.push(' ');
+                }
+                status.push_str(&crate::ui::dim(&format!("评{n}")));
+            }
+        }
     }
     // 按键就地反馈（音量/暂停）：状态栏右侧空一格拼接，2s 后自动消失
     let fb = feedback_now();
@@ -906,6 +956,8 @@ mod tests {
             id: 0,
             like_count: None,
             red_fetched: false,
+            comment_count: None,
+            cmt_fetched: false,
         }
     }
 

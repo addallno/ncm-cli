@@ -63,8 +63,8 @@ fn save(m: &Map<String, Value>) -> Result<()> {
 fn validate_key(key: &str) -> Result<()> {
     match key {
         "download-dir" | "play.download-key" | "play.like-key" | "play.unlike-key"
-        | "play.heart-symbol" | "play.heat-symbol" | "play.show-liked" | "quality"
-        | "download.confirm" => Ok(()),
+        | "play.heart-symbol" | "play.heat-symbol" | "play.show-liked" | "play.show-comments"
+        | "quality" | "download.confirm" => Ok(()),
         _ => {
             if let Some(sec) = key.strip_prefix("profile.") {
                 if SECTIONS.contains(&sec) {
@@ -72,7 +72,7 @@ fn validate_key(key: &str) -> Result<()> {
                 }
             }
             bail!(
-                "未知配置键 {key}；可用: download-dir, quality, download.confirm, play.download-key, play.like-key, play.unlike-key, play.heart-symbol, play.heat-symbol, play.show-liked, profile.<{}>",
+                "未知配置键 {key}；可用: download-dir, quality, download.confirm, play.download-key, play.like-key, play.unlike-key, play.heart-symbol, play.heat-symbol, play.show-liked, play.show-comments, profile.<{}>",
                 SECTIONS.join("|")
             )
         }
@@ -98,8 +98,8 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     if key == "download.confirm" && !matches!(v, "true" | "false") {
         bail!("download.confirm 只能是 true/false");
     }
-    if key == "play.show-liked" && !matches!(v, "true" | "false") {
-        bail!("play.show-liked 只能是 true/false");
+    if matches!(key, "play.show-liked" | "play.show-comments") && !matches!(v, "true" | "false") {
+        bail!("{key} 只能是 true/false");
     }
     if (key == "play.heart-symbol" || key == "play.heat-symbol")
         && v.chars().any(char::is_whitespace)
@@ -153,6 +153,7 @@ pub fn all_keys() -> &'static [(&'static str, &'static str)] {
         ("play.heart-symbol", "♥"),
         ("play.heat-symbol", "*"),
         ("play.show-liked", "true"),
+        ("play.show-comments", "false"),
     ]
 }
 
@@ -217,6 +218,11 @@ pub fn play_heat_symbol() -> String {
 /// 切曲行是否显示「我已收藏」标记（默认 true；播放红心歌单时 overlay 侧强制隐藏）
 pub fn play_show_liked() -> bool {
     get("play.show-liked").ok().flatten().as_deref() != Some("false")
+}
+
+/// 切曲状态栏是否显示评论总数（默认 false——切曲补取需额外一次 API，按需开启）
+pub fn play_show_comments() -> bool {
+    get("play.show-comments").ok().flatten().as_deref() == Some("true")
 }
 
 /// 板块绑定的会话 profile 名（未绑定返回 None → 回退默认凭据）
@@ -297,6 +303,19 @@ pub(crate) mod tests {
         assert!(set("play.show-liked", "no").is_err());
         assert!(set("play.heart-symbol", "a b").is_err());
         assert!(set("play.heat-symbol", " ").is_err());
+    }
+
+    /// 评论数显示开关：默认关闭，配置 true 才开；取值校验 true/false
+    #[test]
+    fn play_show_comments_key() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        fresh("play-comments");
+        assert!(!play_show_comments());
+        set("play.show-comments", "true").unwrap();
+        assert!(play_show_comments());
+        set("play.show-comments", "false").unwrap();
+        assert!(!play_show_comments());
+        assert!(set("play.show-comments", "yes").is_err());
     }
 
     #[test]

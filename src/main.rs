@@ -1831,6 +1831,111 @@ fn parse_id_or_url(s: &str) -> Result<u64> {
     anyhow::bail!("无法识别的歌曲目标: {s}")
 }
 
+/// `ncm login`：显式凭据解析并保存，或用已保存凭据检查状态（不依赖全局凭据解析，
+/// 避免 profile 绑定失效/NCM_COOKIE 非法时无法自举修复）
+async fn run_login(cli: Cli) -> Result<i32> {
+    let Commands::Login {
+        session,
+        cookie,
+        logout,
+        profile,
+    } = cli.cmd.expect("run_login 仅处理 Login")
+    else {
+        unreachable!("run_login 仅处理 Login");
+    };
+    let prof = profile.as_deref();
+    if logout {
+        let had = session::clear_profile(prof)?;
+        let name = prof.unwrap_or("默认");
+        if had {
+            ui::ok(&format!("已删除 {name} profile 的登录凭据"));
+        } else {
+            ui::info(&format!("{name} profile 没有已保存的凭据"));
+        }
+        return Ok(0);
+    }
+    // 显式输入 → 解析并保存；无输入 → 用已保存凭据检查状态
+    let given = session.is_some() || cookie.is_some();
+    let auth_str = if let Some(p) = &session {
+        let raw =
+            std::fs::read(p).with_context(|| format!("读取 session 文件失败: {}", p.display()))?;
+        session::parse_session(&raw)
+            .with_context(|| format!("解析 session 文件失败: {}", p.display()))?
+    } else if let Some(c) = &cookie {
+        let c = c.trim();
+        if !c.contains('=') {
+            bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
+        }
+        c.to_string()
+    } else if let Some(saved) = session::load_profile(prof) {
+        saved
+    } else {
+        ui::info(&format!(
+            "未保存凭据。用法:\n  ncm login --session <pyncm文件>\n  ncm login --cookie \"MUSIC_U=...; __csrf=...\"\n  ncm login --profile <名称>  保存/查看指定 profile（多账号）\n  ncm login --logout [--profile <名称>]  登出\n凭据将保存到 {}",
+            session::cookie_path(prof).display()
+        ));
+        return Ok(0);
+    };
+    let ncm = Ncm::with_cookie(Some(&auth_str))?;
+    let _sp = ui::Spinner::start("检查登录状态…");
+    match ncm.whoami().await? {
+        Some((uid, name)) => {
+            if given {
+                let path = session::save_profile(prof, &auth_str)?;
+                ui::ok(&format!(
+                    "登录成功并已保存：{name} (uid {uid})\n  凭据: {}",
+                    path.display()
+                ));
+            } else {
+                ui::ok(&format!(
+                    "已保存凭据有效：{name} (uid {uid})（ncm login --logout 可登出）"
+                ));
+            }
+            Ok(0)
+        }
+        None => {
+            if given {
+                bail!("凭据无效或已过期，未保存");
+            }
+            bail!("已保存凭据已失效，请重新 ncm login --session/--cookie");
+        }
+    }
+}
+
+/// `ncm config`：读写本地配置文件（不依赖任何远端凭据）
+fn run_config(action: &ConfigAction) -> Result<i32> {
+    match action {
+        ConfigAction::Set { key, value } => {
+            config::set(key, value)?;
+            ui::ok(&format!("{key} = {value}"));
+        }
+        ConfigAction::Get { key } => match config::get(key)? {
+            Some(v) => println!("{key} = {v}"),
+            None => ui::info(&format!("{key} 未配置（ncm config set {key} <值>）")),
+        },
+        ConfigAction::List => {
+            let all = config::list();
+            for (k, v) in &all {
+                println!("{k} = {v}");
+            }
+            for (k, dv) in config::all_keys() {
+                if !all.iter().any(|(ek, _)| ek == k) {
+                    println!("{k} = {dv}（默认）");
+                }
+            }
+            ui::info(&format!("配置文件: {}", config::config_path().display()));
+        }
+        ConfigAction::Unset { key } => {
+            if config::unset(key)? {
+                ui::ok(&format!("已删除 {key}"));
+            } else {
+                ui::info(&format!("{key} 未配置"));
+            }
+        }
+    }
+    Ok(0)
+}
+
 async fn run(cli: Cli) -> Result<i32> {
     ui::set_color(!cli.no_color && std::env::var_os("NO_COLOR").is_none());
     mirror::init(cli.mirror.as_deref());
@@ -1844,6 +1949,15 @@ async fn run(cli: Cli) -> Result<i32> {
         .cookie
         .clone()
         .or_else(|| std::env::var("NCM_COOKIE").ok());
+    // Login/Logout/Config 是本地文件操作，不依赖任何远端凭据。
+    // 必须在全局 resolve_auth_for 之前分流：否则 profile.default 绑定了无凭据的
+    // profile、或 NCM_COOKIE 为非法格式时，`ncm login` 会先 bail，无法自举修复。
+    if let Some(Commands::Login { .. }) = &cli.cmd {
+        return run_login(cli).await;
+    }
+    if let Some(Commands::Config { action }) = &cli.cmd {
+        return run_config(action);
+    }
     // download 且未显式指定凭据时，自动检测已存 profile 的 VIP 并优先
     let user = if cli.user.is_some()
         || session.is_some()
@@ -2441,6 +2555,8 @@ async fn run(cli: Cli) -> Result<i32> {
                             id: t.id,
                             like_count: t.like_count,
                             red_fetched: false,
+                            comment_count: None,
+                            cmt_fetched: false,
                         })
                         .collect();
                     Some(std::sync::Arc::new(std::sync::RwLock::new(lts)))
@@ -2642,6 +2758,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     heart_sym: config::play_heart_symbol(),
                     heat_sym: config::play_heat_symbol(),
                     show_heart: config::play_show_liked() && !is_loves_playlist,
+                    show_comments: config::play_show_comments(),
                 };
                 Some(player::spawn_overlay(
                     sock.clone(),
@@ -2907,6 +3024,7 @@ async fn run(cli: Cli) -> Result<i32> {
                                 heart_sym: config::play_heart_symbol(),
                                 heat_sym: config::play_heat_symbol(),
                                 show_heart: config::play_show_liked() && !is_loves_playlist,
+                                show_comments: config::play_show_comments(),
                             };
                             Some(player::spawn_overlay(
                                 sock.clone(),
@@ -2989,102 +3107,6 @@ async fn run(cli: Cli) -> Result<i32> {
                 "播放完毕 · {} 首",
                 n_play + fed.load(std::sync::atomic::Ordering::Relaxed)
             ));
-            Ok(0)
-        }
-        Some(Commands::Login {
-            session,
-            cookie,
-            logout,
-            profile,
-        }) => {
-            let prof = profile.as_deref();
-            if logout {
-                let had = session::clear_profile(prof)?;
-                let name = prof.unwrap_or("默认");
-                if had {
-                    ui::ok(&format!("已删除 {name} profile 的登录凭据"));
-                } else {
-                    ui::info(&format!("{name} profile 没有已保存的凭据"));
-                }
-                return Ok(0);
-            }
-            // 显式输入 → 解析并保存；无输入 → 用已保存凭据检查状态
-            let given = session.is_some() || cookie.is_some();
-            let auth_str = if let Some(p) = &session {
-                let raw = std::fs::read(p)
-                    .with_context(|| format!("读取 session 文件失败: {}", p.display()))?;
-                session::parse_session(&raw)
-                    .with_context(|| format!("解析 session 文件失败: {}", p.display()))?
-            } else if let Some(c) = &cookie {
-                let c = c.trim();
-                if !c.contains('=') {
-                    bail!("cookie 格式应为 \"MUSIC_U=xxx; __csrf=yyy\"");
-                }
-                c.to_string()
-            } else if let Some(saved) = session::load_profile(prof) {
-                saved
-            } else {
-                ui::info(&format!(
-                    "未保存凭据。用法:\n  ncm login --session <pyncm文件>\n  ncm login --cookie \"MUSIC_U=...; __csrf=...\"\n  ncm login --profile <名称>  保存/查看指定 profile（多账号）\n  ncm login --logout [--profile <名称>]  登出\n凭据将保存到 {}",
-                    session::cookie_path(prof).display()
-                ));
-                return Ok(0);
-            };
-            let ncm = Ncm::with_cookie(Some(&auth_str))?;
-            let _sp = ui::Spinner::start("检查登录状态…");
-            match ncm.whoami().await? {
-                Some((uid, name)) => {
-                    if given {
-                        let path = session::save_profile(prof, &auth_str)?;
-                        ui::ok(&format!(
-                            "登录成功并已保存：{name} (uid {uid})\n  凭据: {}",
-                            path.display()
-                        ));
-                    } else {
-                        ui::ok(&format!(
-                            "已保存凭据有效：{name} (uid {uid})（ncm login --logout 可登出）"
-                        ));
-                    }
-                    Ok(0)
-                }
-                None => {
-                    if given {
-                        bail!("凭据无效或已过期，未保存");
-                    }
-                    bail!("已保存凭据已失效，请重新 ncm login --session/--cookie");
-                }
-            }
-        }
-        Some(Commands::Config { action }) => {
-            match action {
-                ConfigAction::Set { key, value } => {
-                    config::set(&key, &value)?;
-                    ui::ok(&format!("{key} = {value}"));
-                }
-                ConfigAction::Get { key } => match config::get(&key)? {
-                    Some(v) => println!("{key} = {v}"),
-                    None => ui::info(&format!("{key} 未配置（ncm config set {key} <值>）")),
-                },
-                ConfigAction::List => {
-                    let all = config::list();
-                    for (k, v) in &all {
-                        println!("{k} = {v}");
-                    }
-                    for (k, dv) in config::all_keys() {
-                        if !all.iter().any(|(ek, _)| ek == k) {
-                            println!("{k} = {dv}（默认）");
-                        }
-                    }
-                    ui::info(&format!("配置文件: {}", config::config_path().display()));
-                }
-                ConfigAction::Unset { key } => {
-                    if config::unset(&key)? {
-                        ui::ok(&format!("已删除 {key}"));
-                    } else {
-                        ui::info(&format!("{key} 未配置"));
-                    }
-                }
-            }
             Ok(0)
         }
         Some(Commands::Whoami) => {
@@ -3808,6 +3830,11 @@ async fn run(cli: Cli) -> Result<i32> {
             ui::ok(&msg);
             Ok(0)
         }
+        // Login/Config 已在 match 前分流处理（不依赖全局凭据解析，便于自举修复），
+        // 走到这里说明分流逻辑遗漏，属不可达分支
+        Some(Commands::Login { .. }) | Some(Commands::Config { .. }) => {
+            unreachable!("Login/Config 已在 match 前分流处理");
+        }
         // 无子命令（纯 flags 或空参数）：打印帮助
         None => {
             Cli::command().print_help()?;
@@ -4334,6 +4361,8 @@ async fn guard_loop(
                         id: t.id,
                         like_count: t.like_count,
                         red_fetched: false,
+                        comment_count: None,
+                        cmt_fetched: false,
                     });
             }
             queue.write().unwrap_or_else(|e| e.into_inner()).push((

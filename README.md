@@ -46,6 +46,7 @@
   `download-dir` 默认下载目录、`play.download-key` 播放快捷下载键（默认 `d`）、
   `play.like-key` 播放收藏键（默认 `l`）、
   `play.unlike-key` 播放取消收藏键（默认 `u`）、
+  `play.show-comments` 播放状态栏是否显示评论数（默认 `false`，开启后切曲并行补取），
   `quality` 默认音质（standard/exhigh/lossless/hires，play/download 共用回退）、
   `download.confirm` 多条目下载是否 y/N 确认（默认 `true`）、
   `profile.<板块>` 会话绑定；`ncm config get/list/unset` 查改删
@@ -207,6 +208,10 @@ ncm recommend -t fm,radar
 歌词同步：`ncm play` 自动拉 LRC 并通过 mpv IPC socket 跟随进度滚动显示
 （`--no-lyric` 关闭；ffplay 无歌词显示，建议装 mpv）。底行实时显示
 `♪ [i/N] mm:ss/mm:ss [进度条] 当前歌词`（每秒刷新，非 TTY 场景自动静默）。
+状态栏尾部显示收藏状态（`play.show-liked` 门控，符号 `play.heart-symbol` 可改）与
+喜欢人数（`*N`，FM/日推自带，歌单等来源切曲时并行补取，失败下次切回自动重试）；
+评论数默认不显示，`ncm config set play.show-comments true` 开启后切曲并行补取并在
+状态栏显示 `评N`（`play.show-comments=false` 关闭）。
 
 ## FLAC 取址
 

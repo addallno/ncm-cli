@@ -119,8 +119,14 @@ pub fn save_profile(profile: Option<&str>, cookie: &str) -> Result<std::path::Pa
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
     let path = cookie_path(profile);
-    // 新建文件直接以 0600 创建（避免"先写后 chmod"期间以默认权限裸奔）；
-    // 已存在的旧文件再补一次 chmod 覆盖历史权限
+    // 原子写：先写同目录临时文件（0600），再 rename 覆盖目标。
+    // rename 在同文件系统内是原子的，中途失败不会留下半截/损坏的凭据文件，
+    // 不会冲掉原本已保存的登录态。
+    // 临时文件名追加 .tmp（不用 with_extension，避免覆盖 cookie.<名> 的名字段，
+    // 导致多 profile 共用同一个临时文件互相冲突）
+    let mut os = path.clone().into_os_string();
+    os.push(".tmp");
+    let tmp = std::path::PathBuf::from(os);
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -130,15 +136,27 @@ pub fn save_profile(profile: Option<&str>, cookie: &str) -> Result<std::path::Pa
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("写入凭据失败: {}", path.display()))?;
+            .open(&tmp)
+            .with_context(|| format!("写入凭据失败: {}", tmp.display()))?;
         std::io::Write::write_all(&mut f, payload.as_bytes())
-            .with_context(|| format!("写入凭据失败: {}", path.display()))?;
+            .with_context(|| format!("写入凭据失败: {}", tmp.display()))?;
+        f.sync_all()
+            .with_context(|| format!("写入凭据失败: {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("写入凭据失败: {}", path.display())
+        })?;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
     #[cfg(not(unix))]
-    std::fs::write(&path, format!("{c}\n"))
-        .with_context(|| format!("写入凭据失败: {}", path.display()))?;
+    {
+        std::fs::write(&tmp, format!("{c}\n"))
+            .with_context(|| format!("写入凭据失败: {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("写入凭据失败: {}", path.display())
+        })?;
+    }
     Ok(path)
 }
 
