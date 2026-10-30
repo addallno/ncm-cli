@@ -107,9 +107,7 @@ async fn tp_vincentzyu(ncm: &Ncm, id: u64) -> anyhow::Result<String> {
 
 /// 第三方源解析 future 类型（源名 + 结果）；生命周期随 ncm 借用
 type TpFut<'a> = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = (&'static str, anyhow::Result<String>)> + Send + 'a,
-    >,
+    Box<dyn std::future::Future<Output = (&'static str, anyhow::Result<String>)> + Send + 'a>,
 >;
 
 /// 并发尝试第三方源（先到先得），返回 (直链, 源名, 最近一次错误)
