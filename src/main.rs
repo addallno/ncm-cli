@@ -4198,17 +4198,21 @@ async fn guard_loop(
             && last_refresh.elapsed() >= std::time::Duration::from_secs(60)
         {
             last_refresh = tokio::time::Instant::now();
-            // 快照待播项 (id, 旧src)；逐个从后往前替换避免索引移位
-            let snapshot: Vec<(u64, PlaySrc)> = {
+            // 快照待播项 (id, 绝对索引, 旧src)；从后往前逐项替换：insert-at abs
+            // 把旧项挤到 abs+1，删 abs+1——每轮净增 0 且不扰动更小的索引，
+            // 与 mpv 播放列表/ srcs / tracks 永远对齐（固定 pos+1 会删错曲目，
+            // 导致歌名与实际播放内容错位）
+            let snapshot: Vec<(u64, usize, PlaySrc)> = {
                 let q = queue.read().unwrap_or_else(|e| e.into_inner());
                 let s = srcs.read().unwrap_or_else(|e| e.into_inner());
                 q.iter()
                     .zip(s.iter())
+                    .enumerate()
                     .skip(pos as usize + 1)
-                    .map(|((id, _, _), src)| (*id, src.clone()))
+                    .map(|(i, ((id, _, _), src))| (*id, i, src.clone()))
                     .collect()
             };
-            for (id, old) in snapshot.into_iter().rev() {
+            for (id, abs, old) in snapshot.into_iter().rev() {
                 let PlaySrc::Url(old_url) = old else {
                     continue; // 本地文件无过期问题
                 };
@@ -4230,12 +4234,11 @@ async fn guard_loop(
                 else {
                     continue; // 取不到更新就保留旧的（恢复播放时 mpv 自己会跳过）
                 };
-                // mpv 0.38+ 支持 insert-at：新项插入 pos+1，旧项被挤到 pos+2；
+                // mpv 0.38+ 支持 insert-at：新项插入 abs，旧项被挤到 abs+1；
                 // 以 playlist-count 是否 +1 验证插入成功，成功才删旧项——
                 // 旧 mpv 拒绝该子命令时 count 不变，跳过本项（不删任何东西防错位）
-                let ins =
-                    serde_json::json!({"command": ["loadfile", new_url, "insert-at", (pos + 1)]})
-                        .to_string();
+                let ins = serde_json::json!({"command": ["loadfile", new_url, "insert-at", abs]})
+                    .to_string();
                 if player::ipc_send(&sock, &ins).await.is_err() {
                     break; // socket 断了，mpv 即将退出，别再折腾
                 }
@@ -4251,14 +4254,10 @@ async fn guard_loop(
                     ui::warn("当前 mpv 不支持 insert-at，暂停期链接刷新已停用（升级 mpv 可恢复）");
                     break;
                 }
-                // 删被挤到 pos+2 的旧项，srcs 槽位换新 URL，索引保持与 mpv 一致
-                let rm = serde_json::json!({"command": ["playlist-remove", (pos + 2)]}).to_string();
+                // 删被挤到 abs+1 的旧项，srcs 槽位换新 URL，索引保持与 mpv 一致
+                let rm = serde_json::json!({"command": ["playlist-remove", (abs + 1)]}).to_string();
                 let _ = player::ipc_send(&sock, &rm).await; // 失败仅多一残影项，不致命
-                if let Some(slot) = srcs
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get_mut(pos as usize + 1)
-                {
+                if let Some(slot) = srcs.write().unwrap_or_else(|e| e.into_inner()).get_mut(abs) {
                     *slot = PlaySrc::Url(new_url);
                 }
             }
