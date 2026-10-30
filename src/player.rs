@@ -494,7 +494,7 @@ fn spawn_backfill(
         return;
     }
     let now = std::time::Instant::now();
-    const BACKFILL_GAP: std::time::Duration = std::time::Duration::from_secs(6);
+    const BACKFILL_GAP: std::time::Duration = std::time::Duration::from_secs(3);
     let (do_red, do_cmt) = {
         let mut m = attempts.lock().unwrap_or_else(|e| e.into_inner());
         let e = m.entry(tid).or_insert((now, now));
@@ -514,7 +514,9 @@ fn spawn_backfill(
     let ncm = ncm.clone();
     let tracks = tracks.clone();
     tokio::spawn(async move {
-        const BACKFILL_TIMEOUT: Duration = Duration::from_secs(2);
+        // 慢网络下单请求常超 2s，超时过短会导致整首播完都取不到（时显时不显）；
+        // 8s 覆盖慢网络，去抖 3s 保证失败后较快重试
+        const BACKFILL_TIMEOUT: Duration = Duration::from_secs(8);
         let (red, cmt) = tokio::join!(
             async {
                 if do_red {

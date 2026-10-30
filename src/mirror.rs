@@ -13,8 +13,9 @@ use std::time::Duration;
 /// 默认候选地址（逗号分隔，unm 常见部署端口：npx 默认 3000，本项目 Termux 脚本 3100）
 pub const DEFAULT: &str = "http://127.0.0.1:3000,http://127.0.0.1:3100";
 
-/// 每次匹配请求的超时（unm 跨平台搜索冷启动可达 20s+，需留足余量）
-const MATCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// 每次匹配请求的超时（unm 冷启动慢时跳过 mirror 走第三方兜底；
+/// 30s 会让开播取址整体拖到数十秒，10s 足够热启动的本地服务）
+const MATCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 候选地址列表（空 = 禁用）；`--mirror`/`NCM_MIRROR` 支持逗号分隔多个
 static BASE: OnceLock<Vec<String>> = OnceLock::new();

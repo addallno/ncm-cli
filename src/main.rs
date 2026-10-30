@@ -3915,11 +3915,15 @@ async fn fetch_urls(
     .await
 }
 
-/// 并发预取 LRC 歌词（data.lrc.lyric → 时间轴）；失败/空返回 None
+/// 并发预取 LRC 歌词（data.lrc.lyric → 时间轴）；失败/空返回 None。
+/// 每首 4s 超时：单首接口卡住不能拖住整个开播链（歌词是锦上添花，慢就先空着）
 async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>> {
     use futures_util::future::join_all;
     join_all(ids.iter().map(|&id| async move {
-        let v = ncm.lyric(id).await.ok()?;
+        let v = tokio::time::timeout(std::time::Duration::from_secs(4), ncm.lyric(id))
+            .await
+            .ok()?
+            .ok()?;
         let lines = lrc::timeline_from_lyric(&v);
         (!lines.is_empty()).then_some(lines)
     }))

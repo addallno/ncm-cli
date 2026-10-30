@@ -105,40 +105,50 @@ async fn tp_vincentzyu(ncm: &Ncm, id: u64) -> anyhow::Result<String> {
     dig_url(&body).ok_or_else(|| anyhow::anyhow!("响应无可用 url"))
 }
 
-/// 按优先级尝试第三方源，返回 (直链, 源名, 最近一次错误)
+/// 第三方源解析 future 类型（源名 + 结果）；生命周期随 ncm 借用
+type TpFut<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = (&'static str, anyhow::Result<String>)> + Send + 'a,
+    >,
+>;
+
+/// 并发尝试第三方源（先到先得），返回 (直链, 源名, 最近一次错误)
+/// 串行时每个失败源都要等满超时（3 源最坏 ~3× 超时），并发后最坏 1× 超时
 pub async fn resolve_lossless(ncm: &Ncm, id: u64) -> (Option<String>, &'static str, String) {
+    let mut futs: Vec<TpFut<'_>> = Vec::new();
+    // 已熔断的源不启动，省一次注定失败的请求
+    if !is_down("xuanluoge") {
+        futs.push(Box::pin(async move {
+            ("xuanluoge", tp_xuanluoge(ncm, id).await)
+        }));
+    }
+    if !is_down("kangqiovo") {
+        futs.push(Box::pin(async move {
+            ("kangqiovo", tp_kangqiovo(ncm, id).await)
+        }));
+    }
+    if !is_down("vincentzyu") {
+        futs.push(Box::pin(async move {
+            ("vincentzyu", tp_vincentzyu(ncm, id).await)
+        }));
+    }
     let mut last_err = String::new();
-    let try_next = |name: &'static str,
-                    fut: std::pin::Pin<
-        Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
-    >| async move {
-        if is_down(name) {
-            return Ok(None);
-        }
-        match fut.await {
-            Ok(url) => Ok(Some((url, name))),
+    let mut pending = futs;
+    while !pending.is_empty() {
+        let ((name, res), _idx, rest) = futures_util::future::select_all(pending).await;
+        pending = rest;
+        match res {
+            Ok(url) => return (Some(url), name, last_err),
             Err(err) => {
                 let text = err.to_string();
                 mark_down(name, &text);
-                Err(format!("{name}: {}", truncate(&text, 80)))
+                let msg = format!("{name}: {}", truncate(&text, 80));
+                if last_err.trim().is_empty() {
+                    last_err = msg;
+                } else {
+                    last_err = format!("{last_err}；{msg}");
+                }
             }
-        }
-    };
-    for (name, boxed) in [
-        (
-            "xuanluoge",
-            Box::pin(tp_xuanluoge(ncm, id))
-                as std::pin::Pin<
-                    Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>,
-                >,
-        ),
-        ("kangqiovo", Box::pin(tp_kangqiovo(ncm, id))),
-        ("vincentzyu", Box::pin(tp_vincentzyu(ncm, id))),
-    ] {
-        match try_next(name, boxed).await {
-            Ok(Some((url, name))) => return (Some(url), name, last_err),
-            Ok(None) => {}
-            Err(e) => last_err = e,
         }
     }
     (None, "", last_err)
