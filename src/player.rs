@@ -197,6 +197,18 @@ pub fn spawn_key_reader(
                         feedback(format!("♪ 音量 {v:.0}%"));
                     }
                 }
+                b'?' => {
+                    // 完整键位帮助：清底行后打到滚动区，随后 overlay 重画恢复底行
+                    let _g = canvas_lock();
+                    clear_overlay_rows_locked();
+                    eprintln!(
+                        "{}",
+                        crate::ui::dim(
+                            "键位: 空格 暂停 · 0/9 音量 · ←/→ 快退快进 · </> 上/下曲 · ,/. 微调 · m 静音 · f 全屏 · d 下载 · l 收藏 · u 取消 · q 退出"
+                        )
+                    );
+                    CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 0x03 | b'q' => {
                     // Ctrl+C（raw 下 ISIG 已关，字节直达）与 q：经 IPC 优雅退出，
                     // 主流程 wait 返回后 Drop 恢复 termios 并收尾；

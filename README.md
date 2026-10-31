@@ -206,7 +206,11 @@ ncm recommend -t fm,radar
 | `d` | 下载当前曲（键可改：`ncm config set play.download-key <键>`） |
 | `l` | 收藏当前曲到红心歌单（键可改：`ncm config set play.like-key <键>`） |
 | `u` | 取消收藏当前曲（键可改：`ncm config set play.unlike-key <键>`） |
+| `?` | 显示完整键位帮助（开播卡片只列常用键，不再每次刷全表） |
 | `q` | 退出 |
+
+开播卡片按终端高度自适应：队列能在一屏内放下时逐首列出，否则折叠为
+`… 共 N 首` 摘要（半截列表不如不显示）；所有卡片行右侧留 2 列空白，超宽自动截断。
 
 歌词同步：`ncm play` 自动拉 LRC 并通过 mpv IPC socket 跟随进度滚动显示
 （`--no-lyric` 关闭；ffplay 无歌词显示，建议装 mpv）。底行实时显示

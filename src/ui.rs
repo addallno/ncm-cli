@@ -15,6 +15,13 @@ fn term_width() -> usize {
         .unwrap_or(80)
 }
 
+/// 终端行高；取不到（非 TTY/异常）回退 24
+pub fn term_rows() -> usize {
+    terminal_size::terminal_size_of(std::io::stdout())
+        .map(|(_, h)| h.0 as usize)
+        .unwrap_or(24)
+}
+
 /// JSON 模式：静默全部人类可读输出与动画，保证 stdout 是纯 JSON
 static JSON_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -158,7 +165,14 @@ pub fn info(msg: &str) {
     if json_mode() || quiet() {
         return;
     }
-    println!("  {}", dim(msg));
+    // TTY 下按屏宽截断并右侧留 2 列空白：长行不顶到边缘、不自动换行
+    //（println 另加 2 列前缀，故预算再减 2）
+    if is_tty() {
+        let clipped = truncate_width(msg, term_width().saturating_sub(4));
+        println!("  {}", dim(&clipped));
+    } else {
+        println!("  {}", dim(msg));
+    }
 }
 
 /// 交互确认；非 TTY 或 quiet/json 模式下直接返回 false（安全默认）

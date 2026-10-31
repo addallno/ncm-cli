@@ -2629,7 +2629,7 @@ async fn run(cli: Cli) -> Result<i32> {
             let n_play = entries.len();
             let n_queue = n_play + pending.lock().unwrap_or_else(|e| e.into_inner()).len();
             sp_collect.shutdown();
-            ui::step(&format!("▶ {desc} · 播放 {n_queue} 首 · {prog}"));
+            ui::step(&format!("{desc} · 播放 {n_queue} 首 · {prog}"));
             // 开播异步展示当前曲热度：红心状态 + 评论总数（不阻塞开播，
             // 查到后经 toast 在第二行短暂显示；匿名时仅评论数）
             // 红心状态受 play.show-liked 门控（关闭时免 3 次 API）；红心歌单
@@ -2677,15 +2677,11 @@ async fn run(cli: Cli) -> Result<i32> {
                     }
                 });
             }
-            // 播放队列卡片：歌名/歌手 · 来源/音质（试听曲标警告；热度标 *）
-            let show_n = n_play.min(10);
-            for (i, (label, _, source, br)) in entries.iter().take(show_n).enumerate() {
-                let br = *br;
-                let quality = match br {
-                    0 => String::new(),
-                    b if b >= 999_000 => " · 无损".to_string(),
-                    b => format!(" · {}kbps", b / 1000),
-                };
+            // 播放队列卡片：队列能在一屏内放下就逐首全列，否则只留摘要
+            //（半截列表比不显示更乱；当前曲目/进度已由播放底行常驻显示）
+            let show_all = n_queue <= ui::term_rows().saturating_sub(10);
+            let show_n = if show_all { n_play } else { 0 };
+            for (i, (label, _, source, _)) in entries.iter().take(show_n).enumerate() {
                 let trial = if source.contains("试听") {
                     format!(" {}", ui::warn("△ 30s试听"))
                 } else {
@@ -2706,27 +2702,19 @@ async fn run(cli: Cli) -> Result<i32> {
                     }
                     _ => String::new(),
                 };
-                ui::info(&format!(
-                    "  {}. {label}{heat} · {source}{quality}{trial}",
-                    i + 1
-                ));
+                ui::info(&format!("  {:>2}. {label}{heat}{trial}", i + 1));
             }
-            if n_queue > show_n {
-                ui::info(&format!("  … 共 {n_queue} 首"));
+            if !show_all {
+                ui::info(&format!("  … 共 {n_queue} 首（终端高度不足，列表已折叠）"));
             }
             if !pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
                 ui::info("  分批加载 · 链接过期前自动续取后段曲目");
             }
             if is_mpv {
                 #[cfg(unix)]
-                ui::info(&format!(
-                    "mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · {} 下载当前曲 · {} 收藏当前曲 · {} 取消收藏 · q 退出",
-                    config::play_download_key(),
-                    config::play_like_key(),
-                    config::play_unlike_key()
-                ));
+                ui::info("  空格 暂停 · ←/→ 快退快进 · </> 切曲 · ? 完整键位 · q 退出");
                 #[cfg(not(unix))]
-                ui::info("mpv 键位: 空格 暂停 · 0/9 音量 · ←/→ 快退/快进 · </> 上/下曲 · / 搜索 · q 退出");
+                ui::info("  空格 暂停 · ←/→ 快退快进 · </> 切曲 · q 退出");
             }
             if !no_lyric && !cfg!(unix) && is_mpv {
                 ui::info("当前平台不支持 mpv IPC 歌词同步，已跳过");
