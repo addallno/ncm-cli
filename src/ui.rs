@@ -160,6 +160,34 @@ pub fn fail(msg: &str) {
     clear_cur_line();
     eprintln!("  {} {}", bad("×"), msg);
 }
+/// 统一键值行：2 空格缩进，标签左对齐到固定列宽（至少空 2 列），值用暗色。
+/// 用于开播卡片等需要「秩序感」的分组信息（标签列对齐后各行长度差异不再刺眼）
+pub fn kv(key: &str, value: &str) {
+    clear_cur_line();
+    if json_mode() || quiet() {
+        return;
+    }
+    // 标签列宽 6 列（2 个全角字符 + 2 列间隔），更长标签按实际宽度自适应
+    const KEY_W: usize = 6;
+    let pad = " ".repeat(KEY_W.saturating_sub(display_width(key)).max(2));
+    let line = format!("  {}{}{}", accent(key), pad, dim(value));
+    if is_tty() {
+        println!("{}", truncate_width(&line, term_width().saturating_sub(2)));
+    } else {
+        println!("{line}");
+    }
+}
+
+/// 区块间留白（TTY 下才输出，管道/重定向不插入空行）
+pub fn blank() {
+    if json_mode() || quiet() {
+        return;
+    }
+    if is_tty() {
+        println!();
+    }
+}
+
 pub fn info(msg: &str) {
     clear_cur_line();
     if json_mode() || quiet() {

@@ -1709,7 +1709,7 @@ async fn detect_vip_profile() -> Option<String> {
         .collect();
     let found = futures_util::future::join_all(checks).await;
     let hit = found.into_iter().flatten().next()?;
-    ui::info(&format!("检测到 profile `{hit}` 为 VIP，自动选用"));
+    ui::kv("VIP", &format!("profile `{hit}` 自动选用"));
     Some(hit)
 }
 
@@ -2629,7 +2629,9 @@ async fn run(cli: Cli) -> Result<i32> {
             let n_play = entries.len();
             let n_queue = n_play + pending.lock().unwrap_or_else(|e| e.into_inner()).len();
             sp_collect.shutdown();
-            ui::step(&format!("{desc} · 播放 {n_queue} 首 · {prog}"));
+            ui::blank();
+            ui::step(&format!("播放 · {desc}"));
+            ui::kv("队列", &format!("{n_queue} 首 · {prog}"));
             // 开播异步展示当前曲热度：红心状态 + 评论总数（不阻塞开播，
             // 查到后经 toast 在第二行短暂显示；匿名时仅评论数）
             // 红心状态受 play.show-liked 门控（关闭时免 3 次 API）；红心歌单
@@ -2702,24 +2704,31 @@ async fn run(cli: Cli) -> Result<i32> {
                     }
                     _ => String::new(),
                 };
-                ui::info(&format!("  {:>2}. {label}{heat}{trial}", i + 1));
+                // 序号右对齐到 4 列 + 2 空格，与 kv 行的值列（第 8 列）严格对齐
+                ui::info(&format!(
+                    "{:>4}  {label}{heat}{trial}",
+                    format!("{}.", i + 1)
+                ));
             }
             if !show_all {
-                ui::info(&format!("  … 共 {n_queue} 首（终端高度不足，列表已折叠）"));
+                ui::kv("列表", "已折叠（终端高度不足）");
             }
             if !pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
-                ui::info("  分批加载 · 链接过期前自动续取后段曲目");
+                ui::kv("提示", "分批加载 · 链接过期前自动续取后段曲目");
             }
             if is_mpv {
                 #[cfg(unix)]
-                ui::info("  空格 暂停 · ←/→ 快退快进 · </> 切曲 · ? 完整键位 · q 退出");
+                ui::kv(
+                    "键位",
+                    "空格 暂停 · ←/→ 快退快进 · </> 切曲 · ? 完整键位 · q 退出",
+                );
                 #[cfg(not(unix))]
-                ui::info("  空格 暂停 · ←/→ 快退快进 · </> 切曲 · q 退出");
+                ui::kv("键位", "空格 暂停 · ←/→ 快退快进 · </> 切曲 · q 退出");
             }
             if !no_lyric && !cfg!(unix) && is_mpv {
-                ui::info("当前平台不支持 mpv IPC 歌词同步，已跳过");
+                ui::kv("歌词", "当前平台不支持 mpv IPC 同步，已跳过");
             } else if lyric_tracks.is_some() && !is_mpv {
-                ui::info("歌词同步需要 mpv（当前播放器无 IPC 接口），已跳过");
+                ui::kv("歌词", "同步需要 mpv（当前播放器无 IPC），已跳过");
             }
 
             let mut args: Vec<String> = base_args.clone();
@@ -2799,7 +2808,7 @@ async fn run(cli: Cli) -> Result<i32> {
             #[cfg(unix)]
             let (mut guard_handle, mut key_reader, quick_tasks) = if guard_needed {
                 if roam {
-                    ui::info("漫游已开启 · 队列将尽时自动接私人FM续播");
+                    ui::kv("漫游", "队列将尽时自动接私人FM续播");
                 }
                 // 快捷下载/收藏任务句柄：播放器退出后 join，防 .part 截断
                 let quick_tasks = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
