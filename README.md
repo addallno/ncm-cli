@@ -54,7 +54,8 @@
   `download.confirm` 多条目下载是否 y/N 确认（默认 `true`）、
   `profile.<板块>` 会话绑定；`ncm config get/list/unset` 查改删
 - **歌词下载**：`--lrcs lrc,tlyric,romalrc,yrc,ass` 多类型（yrc 转 ASS），
-  `--lrc-dir A --lrc-dir B` 多路径，`--only-lrc` 只下歌词（无版权歌照样可用）
+  `--lrc-dir A --lrc-dir B` 多路径，`--only-lrc` 只下歌词（无版权歌照样可用）；
+  翻译/罗马音时间戳自动重钉到原文时间轴（接口常见全 0/整体偏移，导出不再错位）
 - **信息 / 补全**：`ncm info song <ID/链接/关键词>` 看详情（歌名/歌手/专辑/时长/费用/版权），
   `ncm info lyric <ID/链接/关键词>` 打印 LRC 歌词到标准输出（可重定向），
   `ncm info playlist/album/artist <ID/链接>` 浏览曲目（`-n` 前 N 首），

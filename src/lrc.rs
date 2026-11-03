@@ -119,6 +119,12 @@ pub fn write_lrcs(
                     continue;
                 }
             }
+            // 翻译/罗马音时间戳重钉到原文时间轴（接口常见全 0/整体偏移）
+            if matches!(*kind, "tlyric" | "romalrc") {
+                if let Some(orig) = got.get("lrc") {
+                    content = rebase_timestamps(&content, orig);
+                }
+            }
             let path = dir.join(format!("{base_name}.{}", suffix_of(kind)));
             if std::fs::write(&path, format!("{}\n", content.trim_end())).is_ok() {
                 written.push(path);
@@ -405,6 +411,69 @@ pub fn timeline_from_lyric(v: &serde_json::Value) -> Vec<(f64, String)> {
     lines
 }
 
+/// 把译文/罗马音类歌词的时间戳重钉到原文时间轴。
+/// 播放端 merge_translation 已容错（对齐/按序兜底），但导出文件若原样写出
+/// 会带上接口的错位时间戳（网易 tlyric/romalrc 常见全 0 或整体偏移）
+pub fn rebase_timestamps(trans: &str, orig: &str) -> String {
+    let orig_l = parse_lrc_timeline(orig);
+    let trans_l = parse_lrc_timeline(trans);
+    if orig_l.is_empty() || trans_l.is_empty() {
+        return trans.to_string();
+    }
+    // 与 merge_translation 相同的对齐：≤0.5s 取最近；几乎全失败且行数一致 → 按序
+    let match_idx = |t: f64| -> Option<usize> {
+        orig_l
+            .iter()
+            .enumerate()
+            .filter(|(_, (ot, _))| (ot - t).abs() <= 0.5)
+            .min_by(|a, b| {
+                (a.1 .0 - t)
+                    .abs()
+                    .partial_cmp(&(b.1 .0 - t).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+    };
+    let matched: Vec<Option<usize>> = trans_l.iter().map(|(t, _)| match_idx(*t)).collect();
+    let n_ok = matched.iter().filter(|m| m.is_some()).count();
+    let by_index = n_ok * 5 < trans_l.len() && orig_l.len() == trans_l.len();
+
+    // 元数据行（[ti:] [offset:] 等非时间标签）原样保留在头部
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in trans.lines() {
+        let l = line.trim();
+        let tag = l
+            .starts_with('[')
+            .then(|| l.find(']').map(|e| &l[1..e]))
+            .flatten();
+        if let Some(tag) = tag {
+            if parse_timestamp(tag).is_none() {
+                out_lines.push(l.to_string());
+            }
+        }
+    }
+    for (i, (t, text)) in trans_l.iter().enumerate() {
+        let ts = match matched[i] {
+            Some(oi) => orig_l[oi].0,
+            None if by_index => orig_l[i].0,
+            None => *t,
+        };
+        out_lines.push(format!("{}{}", fmt_ts(ts), text));
+    }
+    out_lines.join("\n")
+}
+
+/// 秒 → `[mm:ss.mmm]`
+fn fmt_ts(t: f64) -> String {
+    let ms = (t.max(0.0) * 1000.0).round() as u64;
+    format!(
+        "[{:02}:{:02}.{:03}]",
+        ms / 60_000,
+        ms / 1000 % 60,
+        ms % 1000
+    )
+}
+
 /// `[mm:ss]` / `[mm:ss.xx]` / `[mm:ss.xxx]` → 秒；非时间标签返回 None
 fn parse_timestamp(tag: &str) -> Option<f64> {
     let (mm, ss) = tag.split_once(':')?;
@@ -561,6 +630,44 @@ mod timeline_tests {
     fn timeline_from_lyric_missing_lrc() {
         let v: serde_json::Value = serde_json::json!({"nolyric": true});
         assert!(timeline_from_lyric(&v).is_empty());
+    }
+
+    /// 重钉：译文微小偏差（≤0.5s）对齐到原文时间戳，毫秒格式输出
+    #[test]
+    fn rebase_snaps_slight_offset() {
+        let orig = "[00:12.500]原文A\n[00:20.000]原文B";
+        let trans = "[00:12.900]译文甲\n[00:20.050]译文乙";
+        let out = rebase_timestamps(trans, orig);
+        assert_eq!(out, "[00:12.500]译文甲\n[00:20.000]译文乙");
+    }
+
+    /// 重钉：元数据行原样保留在头部
+    #[test]
+    fn rebase_keeps_metadata_lines() {
+        let orig = "[00:12.500]A";
+        let trans = "[ti:x]\n[by:y]\n[00:12.900]译文";
+        let out = rebase_timestamps(trans, orig);
+        assert!(
+            out.starts_with("[ti:x]\n[by:y]\n"),
+            "元数据行应在头部: {out}"
+        );
+        assert!(out.contains("[00:12.500]译文"));
+    }
+
+    /// 重钉：时间戳全 0 的译文按序兜底到原文时间戳
+    #[test]
+    fn rebase_index_fallback_when_all_zero() {
+        let orig = "[00:10.000]A\n[00:20.000]B";
+        let trans = "[00:00.000]甲\n[00:00.000]乙";
+        let out = rebase_timestamps(trans, orig);
+        assert_eq!(out, "[00:10.000]甲\n[00:20.000]乙");
+    }
+
+    /// 重钉：原文缺失时原样返回（不构造错位文件）
+    #[test]
+    fn rebase_noop_without_orig() {
+        let trans = "[ti:x]\n[00:12.900]译文";
+        assert_eq!(rebase_timestamps(trans, ""), trans);
     }
 
     /// 嵌入优先级：lrc > tlyric > romalrc > yrc（HashMap 顺序无关）
