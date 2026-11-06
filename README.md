@@ -203,6 +203,7 @@ ncm recommend -t fm,radar
 | `空格` | 暂停 / 继续 |
 | `←` / `→` | 快退 / 快进 5s（`Shift` 1s） |
 | `n` / `p` | 下一首 / 上一首 |
+| `<` / `>` | 上一首 / 下一首（`<` 自动先刷新目标曲链接再精确跳转，防旧链接过期连环上跳） |
 | `/` | 跳转搜索 |
 | `d` | 下载当前曲（键可改：`ncm config set play.download-key <键>`） |
 | `l` | 收藏当前曲到红心歌单（键可改：`ncm config set play.like-key <键>`） |

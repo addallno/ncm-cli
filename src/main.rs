@@ -2815,6 +2815,9 @@ async fn run(cli: Cli) -> Result<i32> {
                     tokio::task::JoinHandle<()>,
                 >::new(
                 )));
+                // 键盘 < 的回退请求队列（key_reader 推目标位，guard 消费）
+                let nav: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<usize>>> =
+                    std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
                 // 键盘接管：raw 模式就绪才接管（非 TTY 场景按键本就到不了）
                 let key_reader = raw_guard.as_ref().map(|_| {
                     player::spawn_key_reader(
@@ -2823,6 +2826,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         config::play_like_key(),
                         config::play_unlike_key(),
                         queue.clone(),
+                        nav.clone(),
                     )
                 });
                 let handle = Some(tokio::spawn(guard_loop(
@@ -2841,6 +2845,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     out_dir.clone(),
                     quick_tasks.clone(),
                     liked.clone(),
+                    nav.clone(),
                 )));
                 (handle, key_reader, Some(quick_tasks))
             } else {
@@ -3050,6 +3055,11 @@ async fn run(cli: Cli) -> Result<i32> {
                             None
                         };
                         if guard_needed {
+                            let nav: std::sync::Arc<
+                                std::sync::Mutex<std::collections::VecDeque<usize>>,
+                            > = std::sync::Arc::new(std::sync::Mutex::new(
+                                std::collections::VecDeque::new(),
+                            ));
                             key_reader = raw_guard.as_ref().map(|_| {
                                 player::spawn_key_reader(
                                     sock.clone(),
@@ -3057,6 +3067,7 @@ async fn run(cli: Cli) -> Result<i32> {
                                     config::play_like_key(),
                                     config::play_unlike_key(),
                                     queue.clone(),
+                                    nav.clone(),
                                 )
                             });
                             guard_handle = Some(tokio::spawn(guard_loop(
@@ -3077,6 +3088,7 @@ async fn run(cli: Cli) -> Result<i32> {
                                     std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))
                                 }),
                                 liked.clone(),
+                                nav.clone(),
                             )));
                         }
                     }
@@ -4116,6 +4128,66 @@ fn dispatch_quick_reqs(
     quick.lock().unwrap_or_else(|e| e.into_inner()).push(h);
 }
 
+/// 单槽位直链保鲜结果（回退跳转 / 暂停刷新 / 回退预热共用）
+#[cfg(unix)]
+enum RefreshResult {
+    Replaced,
+    Same,
+    Failed,
+    Unsupported,
+}
+
+/// 刷新单个队列槽位的在线直链（insert-at 原位替换，索引保持对齐）；
+/// 本地文件 Same、取不到新链或 IPC 失败 Failed、旧 mpv 不支持 insert-at Unsupported
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+async fn refresh_entry(
+    sock: &std::path::Path,
+    ncm: &Ncm,
+    vip_ncm: Option<&Ncm>,
+    quality: &str,
+    wanted_flac: bool,
+    srcs: &std::sync::Arc<std::sync::RwLock<Vec<PlaySrc>>>,
+    req_id: &mut u64,
+    id: u64,
+    abs: usize,
+    old: &PlaySrc,
+    count: u64,
+) -> RefreshResult {
+    let PlaySrc::Url(old_url) = old else {
+        return RefreshResult::Same; // 本地文件无过期问题
+    };
+    let (row, _, _, _) = fetch_row(ncm, vip_ncm, id, quality, true, wanted_flac, true).await;
+    let Some(new_url) = row
+        .as_ref()
+        .and_then(|r| r["url"].as_str())
+        .filter(|u| !u.is_empty() && *u != old_url)
+        .map(String::from)
+    else {
+        return RefreshResult::Failed;
+    };
+    // insert-at：新项插 abs 把旧项挤到 abs+1；以 playlist-count 是否 +1 验证
+    // 插入成功，成功才删旧项（旧 mpv 拒绝该子命令时 count 不变，跳过防错位）
+    let ins = serde_json::json!({"command": ["loadfile", new_url, "insert-at", abs]}).to_string();
+    if player::ipc_send(sock, &ins).await.is_err() {
+        return RefreshResult::Failed; // socket 断了，mpv 即将退出
+    }
+    *req_id += 1;
+    let new_count = player::ipc_get(sock, "playlist-count", *req_id)
+        .await
+        .and_then(|v| v.as_u64());
+    if new_count != Some(count + 1) {
+        return RefreshResult::Unsupported;
+    }
+    // 删被挤到 abs+1 的旧项，srcs 槽位换新 URL，索引保持与 mpv 一致
+    let rm = serde_json::json!({"command": ["playlist-remove", (abs + 1)]}).to_string();
+    let _ = player::ipc_send(sock, &rm).await; // 失败仅多一残影项，不致命
+    if let Some(slot) = srcs.write().unwrap_or_else(|e| e.into_inner()).get_mut(abs) {
+        *slot = PlaySrc::Url(new_url);
+    }
+    RefreshResult::Replaced
+}
+
 /// 播放守护：队尾将尽时把 pending 续入 mpv（在线地址现取防过期），pending
 /// 耗尽且开启漫游时拉私人FM补充；歌词容器与播放列表索引对齐；
 /// 消费快捷下载按键请求（<key> 下载当前曲，用 download 板块凭据）；
@@ -4140,6 +4212,7 @@ async fn guard_loop(
     dl_dir: PathBuf,
     quick: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     liked: player::SharedLiked,
+    nav: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<usize>>>,
 ) {
     let wanted_flac = matches!(quality.as_str(), "lossless" | "hires");
     let mut req_id: u64 = 9000;
@@ -4160,6 +4233,7 @@ async fn guard_loop(
     );
     let mut dup_streak: u32 = 0; // 连续整批重复计数（防服务端只回同一批时卡死）
     let mut last_refresh = tokio::time::Instant::now() - std::time::Duration::from_secs(60);
+    let mut last_back = tokio::time::Instant::now(); // 播放中前 3 首回退预热计时
     let mut refresh_supported = true; // mpv 不支持 insert-at 时关闭暂停刷新（提示一次）
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -4194,72 +4268,130 @@ async fn guard_loop(
             .await
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // 键盘 < 的回退请求：刷新目标曲链接后 playlist-play-index 精确定位，
+        // 免得旧直链过期时 mpv 沿失效项一路向上跳到队首回卷
+        let navs: Vec<usize> = {
+            let mut g = nav.lock().unwrap_or_else(|e| e.into_inner());
+            g.drain(..).collect()
+        };
+        // 键盘 < 的回退请求：刷新目标曲链接后 playlist-play-index 精确定位，
+        // 免得旧直链过期时 mpv 沿失效项一路向上跳到队首回卷
+        for abs in navs {
+            let (id, old) = {
+                let q = queue.read().unwrap_or_else(|e| e.into_inner());
+                let s = srcs.read().unwrap_or_else(|e| e.into_inner());
+                match q.get(abs).zip(s.get(abs)) {
+                    Some(((id, _, _), sc)) => (*id, sc.clone()),
+                    None => continue,
+                }
+            };
+            if let RefreshResult::Unsupported = refresh_entry(
+                &sock,
+                &ncm,
+                vip_ncm.as_ref(),
+                &quality,
+                wanted_flac,
+                &srcs,
+                &mut req_id,
+                id,
+                abs,
+                &old,
+                count,
+            )
+            .await
+            {
+                refresh_supported = false;
+                if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                    player::clear_overlay_rows();
+                }
+                ui::warn("当前 mpv 不支持 insert-at，链接保鲜已停用（升级 mpv 可恢复）");
+            }
+            // 换新失败也照常定位：旧链接未必已到过期时刻，能放就放
+            let cmd = serde_json::json!({"command": ["playlist-play-index", abs]}).to_string();
+            let _ = player::ipc_send(&sock, &cmd).await;
+        }
+        // 回退预热：播放中每 60s 保鲜当前曲前 3 首的直链，< 随时可回
+        if !paused && refresh_supported && last_back.elapsed() >= std::time::Duration::from_secs(60)
+        {
+            last_back = tokio::time::Instant::now();
+            let lo = pos.saturating_sub(3) as usize;
+            if (pos as usize) > lo {
+                let snapshot: Vec<(u64, usize, PlaySrc)> = {
+                    let q = queue.read().unwrap_or_else(|e| e.into_inner());
+                    let s = srcs.read().unwrap_or_else(|e| e.into_inner());
+                    q.iter()
+                        .zip(s.iter())
+                        .enumerate()
+                        .take(pos as usize)
+                        .skip(lo)
+                        .map(|(i, ((id, _, _), sc))| (*id, i, sc.clone()))
+                        .collect()
+                };
+                for (id, abs, old) in snapshot.into_iter().rev() {
+                    if let RefreshResult::Unsupported = refresh_entry(
+                        &sock,
+                        &ncm,
+                        vip_ncm.as_ref(),
+                        &quality,
+                        wanted_flac,
+                        &srcs,
+                        &mut req_id,
+                        id,
+                        abs,
+                        &old,
+                        count,
+                    )
+                    .await
+                    {
+                        refresh_supported = false;
+                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                            player::clear_overlay_rows();
+                        }
+                        ui::warn("当前 mpv 不支持 insert-at，链接保鲜已停用（升级 mpv 可恢复）");
+                        break;
+                    }
+                }
+            }
+        }
+        // 暂停中：周期性（≥60s）重取已入队 URL 并经 IPC 替换——网易直链
+        // ~10min 过期，暂停超时恢复播放会 403；含当前曲前 3 首（回退预热），本地文件跳过
         if paused
             && refresh_supported
             && last_refresh.elapsed() >= std::time::Duration::from_secs(60)
         {
             last_refresh = tokio::time::Instant::now();
-            // 快照待播项 (id, 绝对索引, 旧src)；从后往前逐项替换：insert-at abs
-            // 把旧项挤到 abs+1，删 abs+1——每轮净增 0 且不扰动更小的索引，
-            // 与 mpv 播放列表/ srcs / tracks 永远对齐（固定 pos+1 会删错曲目，
-            // 导致歌名与实际播放内容错位）
             let snapshot: Vec<(u64, usize, PlaySrc)> = {
                 let q = queue.read().unwrap_or_else(|e| e.into_inner());
                 let s = srcs.read().unwrap_or_else(|e| e.into_inner());
                 q.iter()
                     .zip(s.iter())
                     .enumerate()
-                    .skip(pos as usize + 1)
-                    .map(|(i, ((id, _, _), src))| (*id, i, src.clone()))
+                    .skip(pos.saturating_sub(3) as usize)
+                    .map(|(i, ((id, _, _), sc))| (*id, i, sc.clone()))
                     .collect()
             };
             for (id, abs, old) in snapshot.into_iter().rev() {
-                let PlaySrc::Url(old_url) = old else {
-                    continue; // 本地文件无过期问题
-                };
-                let (row, _, _, _) = fetch_row(
+                if let RefreshResult::Unsupported = refresh_entry(
+                    &sock,
                     &ncm,
                     vip_ncm.as_ref(),
-                    id,
                     &quality,
-                    true,
                     wanted_flac,
-                    true,
+                    &srcs,
+                    &mut req_id,
+                    id,
+                    abs,
+                    &old,
+                    count,
                 )
-                .await;
-                let Some(new_url) = row
-                    .as_ref()
-                    .and_then(|r| r["url"].as_str())
-                    .filter(|u| !u.is_empty() && *u != old_url)
-                    .map(String::from)
-                else {
-                    continue; // 取不到更新就保留旧的（恢复播放时 mpv 自己会跳过）
-                };
-                // mpv 0.38+ 支持 insert-at：新项插入 abs，旧项被挤到 abs+1；
-                // 以 playlist-count 是否 +1 验证插入成功，成功才删旧项——
-                // 旧 mpv 拒绝该子命令时 count 不变，跳过本项（不删任何东西防错位）
-                let ins = serde_json::json!({"command": ["loadfile", new_url, "insert-at", abs]})
-                    .to_string();
-                if player::ipc_send(&sock, &ins).await.is_err() {
-                    break; // socket 断了，mpv 即将退出，别再折腾
-                }
-                req_id += 1;
-                let new_count = player::ipc_get(&sock, "playlist-count", req_id)
-                    .await
-                    .and_then(|v| v.as_u64());
-                if new_count != Some(count + 1) {
+                .await
+                {
                     refresh_supported = false; // 整个会话只提示一次
                     if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                         player::clear_overlay_rows();
                     }
                     ui::warn("当前 mpv 不支持 insert-at，暂停期链接刷新已停用（升级 mpv 可恢复）");
                     break;
-                }
-                // 删被挤到 abs+1 的旧项，srcs 槽位换新 URL，索引保持与 mpv 一致
-                let rm = serde_json::json!({"command": ["playlist-remove", (abs + 1)]}).to_string();
-                let _ = player::ipc_send(&sock, &rm).await; // 失败仅多一残影项，不致命
-                if let Some(slot) = srcs.write().unwrap_or_else(|e| e.into_inner()).get_mut(abs) {
-                    *slot = PlaySrc::Url(new_url);
                 }
             }
         }

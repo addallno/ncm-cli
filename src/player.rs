@@ -128,6 +128,7 @@ pub fn spawn_key_reader(
     like_key: String,
     unlike_key: String,
     queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String, u64)>>>,
+    nav: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<usize>>>,
 ) -> tokio::task::JoinHandle<()> {
     use tokio::io::AsyncReadExt;
     tokio::spawn(async move {
@@ -189,6 +190,28 @@ pub fn spawn_key_reader(
                     )
                     .await;
                     feedback(if nv { "▷ 已暂停" } else { "▶ 播放中" });
+                }
+                b'<' => {
+                    // 回退键不直接转发：旧曲直链 ~10min 过期，mpv 沿失效项
+                    // 一路向上跳过直到回卷全单；改为把目标位交给 guard，
+                    // 刷新链接后 playlist-play-index 精确定位
+                    req_id += 1;
+                    let pos = ipc_get(&sock, "playlist-pos", req_id)
+                        .await
+                        .and_then(|v| v.as_i64());
+                    match pos {
+                        Some(p) if p > 0 => {
+                            nav.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push_back((p - 1) as usize);
+                            feedback("◀ 回退");
+                        }
+                        // 队首/位置未知：交回 mpv 默认行为
+                        _ => {
+                            let cmd = serde_json::json!({"command": ["keypress", "<"]}).to_string();
+                            let _ = ipc_send(&sock, &cmd).await;
+                        }
+                    }
                 }
                 b'9' | b'0' => {
                     // 与 mpv 默认一致：9 减、0 加
