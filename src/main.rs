@@ -4157,7 +4157,17 @@ async fn refresh_entry(
     let PlaySrc::Url(old_url) = old else {
         return RefreshResult::Same; // 本地文件无过期问题
     };
-    let (row, _, _, _) = fetch_row(ncm, vip_ncm, id, quality, true, wanted_flac, true).await;
+    // 取新链 6s 总超时：官方 API/第三方挂起时不再冻结 guard（回退跳转、
+    // 暂停保鲜、续喂都被这一步拖死过），超时用旧链继续（跳转仍要发生）
+    let Ok(fetched) = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        fetch_row(ncm, vip_ncm, id, quality, true, wanted_flac, true),
+    )
+    .await
+    else {
+        return RefreshResult::Failed;
+    };
+    let (row, _, _, _) = fetched;
     let Some(new_url) = row
         .as_ref()
         .and_then(|r| r["url"].as_str())
