@@ -2565,6 +2565,7 @@ async fn run(cli: Cli) -> Result<i32> {
                             red_fetched: false,
                             comment_count: None,
                             cmt_fetched: false,
+                            duration_ms: t.duration_ms,
                         })
                         .collect();
                     Some(std::sync::Arc::new(std::sync::RwLock::new(lts)))
@@ -4135,10 +4136,14 @@ enum RefreshResult {
     Same,
     Failed,
     Unsupported,
+    /// insert 后 playlist-remove 重验失败且重试无效：mpv 残留一项旧 URL，
+    /// 此后 mpv 索引比 ncm 队列永久 +1（显示名错位根因），需 guard 对账修复
+    Desync,
 }
 
 /// 刷新单个队列槽位的在线直链（insert-at 原位替换，索引保持对齐）；
-/// 本地文件 Same、取不到新链或 IPC 失败 Failed、旧 mpv 不支持 insert-at Unsupported
+/// 本地文件 Same、取不到新链或 IPC 失败 Failed、旧 mpv 不支持 insert-at Unsupported、
+/// remove 后 count 复验失败（残影项致索引漂移）Desync——后两者由调用方短路后续换链
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 async fn refresh_entry(
@@ -4189,9 +4194,25 @@ async fn refresh_entry(
     if new_count != Some(count + 1) {
         return RefreshResult::Unsupported;
     }
-    // 删被挤到 abs+1 的旧项，srcs 槽位换新 URL，索引保持与 mpv 一致
+    // 删被挤到 abs+1 的旧项：发送后重读 playlist-count 验证（期望回到原 count），
+    // 失败重试一次；仍不符则不写 srcs 直接返回 Desync——残影项会让 mpv 索引
+    // 比队列永久 +1（后续显示名整体错位），交给 guard 对账修复，勿半更新制造新错位
     let rm = serde_json::json!({"command": ["playlist-remove", (abs + 1)]}).to_string();
-    let _ = player::ipc_send(sock, &rm).await; // 失败仅多一残影项，不致命
+    *req_id += 1;
+    let _ = player::ipc_send(sock, &rm).await;
+    let after = player::ipc_get(sock, "playlist-count", *req_id)
+        .await
+        .and_then(|v| v.as_u64());
+    if after != Some(count) {
+        *req_id += 1; // 一次可能是瞬时 IPC 失败，重试并复验
+        let _ = player::ipc_send(sock, &rm).await;
+        let after2 = player::ipc_get(sock, "playlist-count", *req_id)
+            .await
+            .and_then(|v| v.as_u64());
+        if after2 != Some(count) {
+            return RefreshResult::Desync;
+        }
+    }
     if let Some(slot) = srcs.write().unwrap_or_else(|e| e.into_inner()).get_mut(abs) {
         *slot = PlaySrc::Url(new_url);
     }
@@ -4245,6 +4266,7 @@ async fn guard_loop(
     let mut last_refresh = tokio::time::Instant::now() - std::time::Duration::from_secs(60);
     let mut last_back = tokio::time::Instant::now(); // 播放中前 3 首回退预热计时
     let mut refresh_supported = true; // mpv 不支持 insert-at 时关闭暂停刷新（提示一次）
+    let mut desynced = false; // remove 复验失败：残影项致索引漂移，短路后续换链待对账
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         // 先消费快捷请求：不依赖 mpv 状态——空闲(pos=-1)/IPC 瞬时失败/即将退出
@@ -4271,6 +4293,98 @@ async fn guard_loop(
         };
         last_played.store(pos as usize, std::sync::atomic::Ordering::Relaxed);
         let mut count = count_v.as_u64().unwrap_or(0);
+        // 对账自愈：playlist-count 与 srcs 不等（残影/缺项 → 索引漂移、显示名错位）
+        // 或上轮 Desync 未清 → 拉 mpv playlist 与 srcs 逐项对齐；正常轮零额外 IPC
+        let srcs_len = srcs.read().unwrap_or_else(|e| e.into_inner()).len() as u64;
+        if count != srcs_len || desynced {
+            if count == srcs_len {
+                desynced = false; // 长度已一致（重试成功/瞬时误报），清标记
+            } else {
+                req_id += 1;
+                let aligned = if let Some(pl) = player::ipc_get(&sock, "playlist", req_id).await {
+                    let files: Vec<String> = pl
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|e| e["filename"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let expect: Vec<String> = srcs
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .map(|s| s.loc())
+                        .collect();
+                    // 两指针：对得上双双前进；mpv 多项记残影，srcs 多项记待补；
+                    // 无法归类（URL 对不上又非增非缺）则放弃本轮，勿雪上加霜
+                    let mut phantoms: Vec<usize> = Vec::new();
+                    let mut missing: Vec<usize> = Vec::new();
+                    let (mut i, mut j) = (0usize, 0usize);
+                    let mut ok = true;
+                    while i < files.len() && j < expect.len() {
+                        if files[i] == expect[j] {
+                            i += 1;
+                            j += 1;
+                        } else if files.get(i + 1) == Some(&expect[j]) {
+                            phantoms.push(i); // 下一项能接上 → files[i] 是残影
+                            i += 1;
+                        } else if files.get(i) == expect.get(j + 1) {
+                            missing.push(j); // mpv 侧能接上下一项 → expect[j] 缺失
+                            j += 1;
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        phantoms.extend(i..files.len()); // 尾部多余 = 残影
+                        missing.extend(j..expect.len()); // 尾部缺失
+                        let did = !phantoms.is_empty() || !missing.is_empty();
+                        // 先降序删残影（原 mpv 坐标），再按目标位升序补缺项
+                        for p in phantoms.into_iter().rev() {
+                            let rm =
+                                serde_json::json!({"command": ["playlist-remove", p]}).to_string();
+                            if player::ipc_send(&sock, &rm).await.is_err() {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            for m in missing {
+                                let ins = serde_json::json!({
+                                    "command": ["loadfile", expect[m], "insert-at", m]
+                                })
+                                .to_string();
+                                if player::ipc_send(&sock, &ins).await.is_err() {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok && did {
+                            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                                player::clear_overlay_rows();
+                            }
+                            ui::ok("队列已对账修复（残影/缺项已清理）");
+                        }
+                    }
+                    ok
+                } else {
+                    false // playlist 拉取失败：下轮重试
+                };
+                if aligned {
+                    count = srcs_len;
+                    desynced = false;
+                } else if !desynced {
+                    desynced = true; // 已 warn 过则静默重试
+                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                        player::clear_overlay_rows();
+                    }
+                    ui::warn("队列同步失败（索引漂移），暂停换链待对账修复");
+                }
+            }
+        }
         // 暂停中：周期性（≥60s）重取已入队的在线 URL 并经 IPC 替换——网易直链
         // ~10min 过期，暂停超时恢复播放会 403；本地文件与当前曲（已在解码器）不动
         req_id += 1;
@@ -4295,33 +4409,48 @@ async fn guard_loop(
                     None => continue,
                 }
             };
-            if let RefreshResult::Unsupported = refresh_entry(
-                &sock,
-                &ncm,
-                vip_ncm.as_ref(),
-                &quality,
-                wanted_flac,
-                &srcs,
-                &mut req_id,
-                id,
-                abs,
-                &old,
-                count,
-            )
-            .await
-            {
-                refresh_supported = false;
-                if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                    player::clear_overlay_rows();
+            if !desynced {
+                match refresh_entry(
+                    &sock,
+                    &ncm,
+                    vip_ncm.as_ref(),
+                    &quality,
+                    wanted_flac,
+                    &srcs,
+                    &mut req_id,
+                    id,
+                    abs,
+                    &old,
+                    count,
+                )
+                .await
+                {
+                    RefreshResult::Unsupported => {
+                        refresh_supported = false;
+                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                            player::clear_overlay_rows();
+                        }
+                        ui::warn("当前 mpv 不支持 insert-at，链接保鲜已停用（升级 mpv 可恢复）");
+                    }
+                    RefreshResult::Desync => {
+                        desynced = true;
+                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                            player::clear_overlay_rows();
+                        }
+                        ui::warn("队列同步失败（索引漂移），暂停换链待对账修复");
+                    }
+                    _ => {}
                 }
-                ui::warn("当前 mpv 不支持 insert-at，链接保鲜已停用（升级 mpv 可恢复）");
             }
             // 换新失败也照常定位：旧链接未必已到过期时刻，能放就放
             let cmd = serde_json::json!({"command": ["playlist-play-index", abs]}).to_string();
             let _ = player::ipc_send(&sock, &cmd).await;
         }
         // 回退预热：播放中每 60s 保鲜当前曲前 3 首的直链，< 随时可回
-        if !paused && refresh_supported && last_back.elapsed() >= std::time::Duration::from_secs(60)
+        if !paused
+            && refresh_supported
+            && !desynced
+            && last_back.elapsed() >= std::time::Duration::from_secs(60)
         {
             last_back = tokio::time::Instant::now();
             let lo = pos.saturating_sub(3) as usize;
@@ -4338,7 +4467,10 @@ async fn guard_loop(
                         .collect()
                 };
                 for (id, abs, old) in snapshot.into_iter().rev() {
-                    if let RefreshResult::Unsupported = refresh_entry(
+                    if desynced {
+                        break;
+                    }
+                    match refresh_entry(
                         &sock,
                         &ncm,
                         vip_ncm.as_ref(),
@@ -4353,12 +4485,25 @@ async fn guard_loop(
                     )
                     .await
                     {
-                        refresh_supported = false;
-                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                            player::clear_overlay_rows();
+                        RefreshResult::Unsupported => {
+                            refresh_supported = false;
+                            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                                player::clear_overlay_rows();
+                            }
+                            ui::warn(
+                                "当前 mpv 不支持 insert-at，链接保鲜已停用（升级 mpv 可恢复）",
+                            );
+                            break;
                         }
-                        ui::warn("当前 mpv 不支持 insert-at，链接保鲜已停用（升级 mpv 可恢复）");
-                        break;
+                        RefreshResult::Desync => {
+                            desynced = true;
+                            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                                player::clear_overlay_rows();
+                            }
+                            ui::warn("队列同步失败（索引漂移），暂停换链待对账修复");
+                            break;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -4367,6 +4512,7 @@ async fn guard_loop(
         // ~10min 过期，暂停超时恢复播放会 403；含当前曲前 3 首（回退预热），本地文件跳过
         if paused
             && refresh_supported
+            && !desynced
             && last_refresh.elapsed() >= std::time::Duration::from_secs(60)
         {
             last_refresh = tokio::time::Instant::now();
@@ -4381,7 +4527,10 @@ async fn guard_loop(
                     .collect()
             };
             for (id, abs, old) in snapshot.into_iter().rev() {
-                if let RefreshResult::Unsupported = refresh_entry(
+                if desynced {
+                    break;
+                }
+                match refresh_entry(
                     &sock,
                     &ncm,
                     vip_ncm.as_ref(),
@@ -4396,12 +4545,25 @@ async fn guard_loop(
                 )
                 .await
                 {
-                    refresh_supported = false; // 整个会话只提示一次
-                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                        player::clear_overlay_rows();
+                    RefreshResult::Unsupported => {
+                        refresh_supported = false; // 整个会话只提示一次
+                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                            player::clear_overlay_rows();
+                        }
+                        ui::warn(
+                            "当前 mpv 不支持 insert-at，暂停期链接刷新已停用（升级 mpv 可恢复）",
+                        );
+                        break;
                     }
-                    ui::warn("当前 mpv 不支持 insert-at，暂停期链接刷新已停用（升级 mpv 可恢复）");
-                    break;
+                    RefreshResult::Desync => {
+                        desynced = true;
+                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                            player::clear_overlay_rows();
+                        }
+                        ui::warn("队列同步失败（索引漂移），暂停换链待对账修复");
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -4521,6 +4683,7 @@ async fn guard_loop(
                         red_fetched: false,
                         comment_count: None,
                         cmt_fetched: false,
+                        duration_ms: t.duration_ms,
                     });
             }
             queue.write().unwrap_or_else(|e| e.into_inner()).push((

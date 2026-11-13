@@ -29,6 +29,8 @@ pub struct LyricTrack {
     pub comment_count: Option<u64>,
     /// comment_count 是否已尝试补取且成功（失败不置位，同 red_fetched）
     pub cmt_fetched: bool,
+    /// 元数据时长（ms）：与 mpv duration 对账（±5s）预警索引错位，0=未知不查
+    pub duration_ms: u64,
 }
 
 /// 播放会话共享红心状态：已收藏曲 id 集合 + 红心歌单 id。
@@ -213,9 +215,10 @@ pub fn spawn_key_reader(
                         }
                     }
                 }
-                b'9' | b'0' => {
-                    // 与 mpv 默认一致：9 减、0 加
-                    let step = if b == b'9' { -2 } else { 2 };
+                b'9' | b'0' | b'*' | b'/' => {
+                    // 与 mpv 默认一致：9/`/` 减、0/`*` 加；拦截统一给 toast
+                    // （转发时 mpv 改了音量但 ncm 无感知，`*` 无反馈的根因）
+                    let step = if b == b'9' || b == b'/' { -2 } else { 2 };
                     if let Some(v) = ipc_add_volume(&sock, step).await {
                         feedback(format!("♪ 音量 {v:.0}%"));
                     }
@@ -227,7 +230,7 @@ pub fn spawn_key_reader(
                     eprintln!(
                         "{}",
                         crate::ui::dim(
-                            "键位: 空格 暂停 · 0/9 音量 · ←/→ 快退快进 · </> 上/下曲 · ,/. 微调 · m 静音 · f 全屏 · d 下载 · l 收藏 · u 取消 · q 退出"
+                            "键位: 空格 暂停 · 0/9/*/ 音量 · ←/→ 快退快进 · </> 上/下曲 · ,/. 微调 · m 静音 · f 全屏 · d 下载 · l 收藏 · u 取消 · q 退出"
                         )
                     );
                     CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -652,6 +655,10 @@ async fn overlay_loop(
     let mut last_sec: Option<u64> = None;
     let mut cur_t: f64 = 0.0;
     let mut dur: Option<f64> = None;
+    // duration 对账：mpv 两事件到达顺序不定（duration 可能先于 playlist-pos），
+    // pending 标志保证任一顺序下都用「新时长 × 新 cur_idx」配对；同首只告警一次
+    let mut dur_check_pending = false;
+    let mut warned_mismatch: Option<usize> = None;
     // 补取去抖记录（切曲/每秒事件共用，防同曲 6s 内重复请求）
     let attempts: BackfillAttempts = std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
     let mut lines = TokioBufReader::new(read).lines();
@@ -691,8 +698,9 @@ async fn overlay_loop(
                         last_sec = None;
                         cur_t = 0.0;
                         dur = None;
-                        // 歌单/搜索来源 Track 无 likeCount/评论数：切曲时发起后台
-                        // 补取（2s 超时不阻塞事件循环，按曲 id 去抖 6s，失败自动重试）
+                        dur_check_pending = true; // 等本曲 duration 到达后与元数据对账
+                                                  // 歌单/搜索来源 Track 无 likeCount/评论数：切曲时发起后台
+                                                  // 补取（2s 超时不阻塞事件循环，按曲 id 去抖 6s，失败自动重试）
                         {
                             let (tid, want_red, want_cmt) = {
                                 let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
@@ -761,6 +769,33 @@ async fn overlay_loop(
                 Some("duration") => {
                     dur = ev["data"].as_f64().filter(|d| *d > 0.0);
                     let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+                    // 曲目信息与实际音频对账（±5s）：索引错位/元数据错位兜底告警。
+                    // pending 由 playlist-pos 置位（duration 可能先于 playlist-pos 到达，
+                    // 那时 cur_idx 仍是旧值，跳过本次宁缺勿滥；同首只告警一次）
+                    if dur_check_pending {
+                        dur_check_pending = false;
+                        if let Some(d) = dur {
+                            if let Some(t) = ts.get(cur_idx) {
+                                if t.duration_ms > 0
+                                    && warned_mismatch != Some(cur_idx)
+                                    && (d * 1000.0 - t.duration_ms as f64).abs() > 5000.0
+                                {
+                                    warned_mismatch = Some(cur_idx);
+                                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                                        clear_overlay_rows();
+                                        eprintln!(
+                                            "{}",
+                                            crate::ui::warn(&format!(
+                                                "⚠ 曲目信息与实际音频不符（元数据 {}s / 实际 {}s）",
+                                                t.duration_ms / 1000,
+                                                d as u64
+                                            ))
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     print_row(
                         ts.as_slice(),
                         cur_idx,
@@ -1065,6 +1100,7 @@ mod tests {
             red_fetched: false,
             comment_count: None,
             cmt_fetched: false,
+            duration_ms: 0,
         }
     }
 
