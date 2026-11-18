@@ -4386,10 +4386,7 @@ async fn guard_loop(
                         };
                         ok = verified;
                         if verified {
-                            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                                player::clear_overlay_rows();
-                            }
-                            ui::ok("队列已对账修复（残影/缺项已清理）");
+                            player::toast("✓ 队列已对账修复");
                         }
                     }
                 }
@@ -4406,17 +4403,11 @@ async fn guard_loop(
         } else if !desynced {
             desynced = true; // 已 warn 过则静默重试
             let detail = if count != srcs_len {
-                format!("mpv {count} 项 vs 内部 {srcs_len} 项")
+                format!("mpv {count} vs 内部 {srcs_len}")
             } else {
                 "顺序与内部队列不一致".to_string()
             };
-            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                player::clear_overlay_rows();
-            }
-            eprintln!(
-                "{}",
-                ui::warn(&format!("队列同步失败（{detail}），暂停换链待对账修复"))
-            );
+            player::toast(&format!("队列不同步（{detail}），暂停换链"));
         }
         // 暂停中：周期性（≥60s）重取已入队的在线 URL 并经 IPC 替换——网易直链
         // ~10min 过期，暂停超时恢复播放会 403；本地文件与当前曲（已在解码器）不动
@@ -4460,25 +4451,11 @@ async fn guard_loop(
                 {
                     RefreshResult::Unsupported => {
                         refresh_supported = false;
-                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                            player::clear_overlay_rows();
-                        }
-                        eprintln!(
-                            "{}",
-                            ui::warn(
-                                "当前 mpv 不支持 insert-at，链接保鲜已停用（升级 mpv 可恢复）"
-                            )
-                        );
+                        player::toast("mpv不支持insert-at，链接保鲜停用");
                     }
                     RefreshResult::Desync => {
                         desynced = true;
-                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                            player::clear_overlay_rows();
-                        }
-                        eprintln!(
-                            "{}",
-                            ui::warn("队列同步失败（索引漂移），暂停换链待对账修复")
-                        );
+                        player::toast("队列不同步（索引漂移），暂停换链");
                     }
                     _ => {}
                 }
@@ -4528,26 +4505,12 @@ async fn guard_loop(
                     {
                         RefreshResult::Unsupported => {
                             refresh_supported = false;
-                            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                                player::clear_overlay_rows();
-                            }
-                            eprintln!(
-                                "{}",
-                                ui::warn(
-                                    "当前 mpv 不支持 insert-at，链接保鲜已停用（升级 mpv 可恢复）",
-                                )
-                            );
+                            player::toast("mpv不支持insert-at，链接保鲜停用");
                             break;
                         }
                         RefreshResult::Desync => {
                             desynced = true;
-                            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                                player::clear_overlay_rows();
-                            }
-                            eprintln!(
-                                "{}",
-                                ui::warn("队列同步失败（索引漂移），暂停换链待对账修复")
-                            );
+                            player::toast("队列不同步（索引漂移），暂停换链");
                             break;
                         }
                         _ => {}
@@ -4594,26 +4557,12 @@ async fn guard_loop(
                 {
                     RefreshResult::Unsupported => {
                         refresh_supported = false; // 整个会话只提示一次
-                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                            player::clear_overlay_rows();
-                        }
-                        eprintln!(
-                            "{}",
-                            ui::warn(
-                                "当前 mpv 不支持 insert-at，暂停期链接刷新已停用（升级 mpv 可恢复）",
-                            )
-                        );
+                        player::toast("mpv不支持insert-at，暂停刷新停用");
                         break;
                     }
                     RefreshResult::Desync => {
                         desynced = true;
-                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                            player::clear_overlay_rows();
-                        }
-                        eprintln!(
-                            "{}",
-                            ui::warn("队列同步失败（索引漂移），暂停换链待对账修复")
-                        );
+                        player::toast("队列不同步（索引漂移），暂停换链");
                         break;
                     }
                     _ => {}
