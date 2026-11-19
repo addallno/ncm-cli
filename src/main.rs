@@ -3011,7 +3011,14 @@ async fn run(cli: Cli) -> Result<i32> {
                                     .filter(|u| !u.is_empty())
                                     .map(String::from)
                                 {
-                                    Some(u) => new_locations.push(u),
+                                    Some(u) => {
+                                        // srcs 同步新 URL：否则 mpv(新 URL) vs srcs(旧 URL)
+                                        // 两指针全不等 → reconcile 无法归类放行不修，
+                                        // 残影/缺项修不了、last_played 校正后仍可能漂
+                                        srcs.write().unwrap_or_else(|e| e.into_inner())[i] =
+                                            PlaySrc::Url(u.clone());
+                                        new_locations.push(u);
+                                    }
                                     None => {
                                         if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
                                             player::clear_overlay_rows();
@@ -4085,6 +4092,24 @@ fn dispatch_quick_reqs(
         }
         let Some(pid) = pid else { return };
         // 顺序逐首 add/del，每首即时 toast；一首失败不中断后续
+        // like/unlike 本地操作日志：服务端可能在 code 200 后置移除（版权/风控），
+        // 留痕便于对账；追加 <config>/like.log（epoch秒\t操作\tid\t歌名\t结果），写失败静默
+        fn like_log(op: &str, id: u64, label: &str, result: &str) {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let line = format!("{secs}\t{op}\t{id}\t{label}\t{result}\n");
+            let path = crate::session::config_dir().join("like.log");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                use std::io::Write;
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
         for (id, label, unlike) in like_batch {
             let op = if unlike { "del" } else { "add" };
             match like_ncm
@@ -4095,9 +4120,11 @@ fn dispatch_quick_reqs(
                     let mut g = liked.write().unwrap_or_else(|e| e.into_inner());
                     if unlike {
                         g.ids.remove(&id);
+                        like_log("unlike", id, &label, "ok");
                         crate::player::toast(&format!("✓ 已取消收藏「{label}」"));
                     } else {
                         g.ids.insert(id);
+                        like_log("like", id, &label, "ok");
                         crate::player::toast(&format!("✓ 已喜欢「{label}」"));
                     }
                 }
@@ -4108,6 +4135,7 @@ fn dispatch_quick_reqs(
                         .unwrap_or_else(|e| e.into_inner())
                         .ids
                         .remove(&id);
+                    like_log("unlike", id, &label, "gone");
                     crate::player::toast(&format!("◌ 「{label}」已不在歌单（{e:#}）"));
                 }
                 Err(e) if Ncm::is_duplicate_track_err(&e) => {
@@ -4117,10 +4145,17 @@ fn dispatch_quick_reqs(
                         .unwrap_or_else(|e| e.into_inner())
                         .ids
                         .insert(id);
+                    like_log("like", id, &label, "dup");
                     crate::player::toast(&format!("◌ 「{label}」已喜欢过"));
                 }
                 Err(e) => {
                     let what = if unlike { "取消收藏" } else { "喜欢" };
+                    like_log(
+                        if unlike { "unlike" } else { "like" },
+                        id,
+                        &label,
+                        &format!("fail: {e:#}"),
+                    );
                     crate::player::toast(&format!("× {what}失败「{label}」：{e:#}"));
                 }
             }
@@ -4345,12 +4380,18 @@ async fn guard_loop(
                 missing.extend(j..expect.len()); // 尾部缺失
                 let did = !phantoms.is_empty() || !missing.is_empty();
                 if did {
-                    // 先降序删残影（原 mpv 坐标），再按目标位升序补缺项
+                    // 先降序删残影（原 mpv 坐标），再按目标位升序补缺项；
+                    // 列表操作会平移当前曲的 mpv 坐标（音频不换）：同步校正
+                    // last_played，防重试 drain 截错位（usize::MAX=未知不校正）
                     for p in phantoms.into_iter().rev() {
                         let rm = serde_json::json!({"command": ["playlist-remove", p]}).to_string();
                         if player::ipc_send(&sock, &rm).await.is_err() {
                             ok = false;
                             break;
+                        }
+                        let lp = last_played.load(std::sync::atomic::Ordering::Relaxed);
+                        if lp != usize::MAX && p < lp {
+                            last_played.store(lp - 1, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     if ok {
@@ -4362,6 +4403,10 @@ async fn guard_loop(
                             if player::ipc_send(&sock, &ins).await.is_err() {
                                 ok = false;
                                 break;
+                            }
+                            let lp = last_played.load(std::sync::atomic::Ordering::Relaxed);
+                            if lp != usize::MAX && m <= lp {
+                                last_played.store(lp + 1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     }

@@ -659,8 +659,54 @@ async fn overlay_loop(
     // pending 标志保证任一顺序下都用「新时长 × 新 cur_idx」配对；同首只告警一次
     let mut dur_check_pending = false;
     let mut warned_mismatch: Option<usize> = None;
+    // 列表操作（reconcile remove/insert）会改 playlist-pos 数字但音频不换：此时
+    // ts[cur_idx] 仍对应当前音频，若跟着 pos 改 idx 会歌名/元数据错位。判据：
+    // 真换曲必伴随 time-pos 归零（observe 事件顺序不定，两种都兜）——
+    // reset_seen=time-pos 已归零；pending_pos=已见 pos 变化待确认。
+    let mut pending_pos: Option<usize> = None;
+    let mut reset_seen = false;
     // 补取去抖记录（切曲/每秒事件共用，防同曲 6s 内重复请求）
     let attempts: BackfillAttempts = std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
+    // 换曲应用：重置对账/底行状态、后台补取、歌名行进滚动历史、重画状态栏
+    //（定义须在 attempts 之后：宏卫生按定义点作用域解析局部变量）
+    macro_rules! apply_track_change {
+        ($i:expr) => {{
+            cur_idx = $i;
+            last_line = None; // 切曲后重置，等新 time-pos
+            last_sec = None;
+            cur_t = 0.0;
+            dur = None;
+            dur_check_pending = true; // 等本曲 duration 到达后与元数据对账
+                                      // 歌单/搜索来源 Track 无 likeCount/评论数：切曲时发起后台
+                                      // 补取（2s 超时不阻塞事件循环，按曲 id 去抖 6s，失败自动重试）
+            {
+                let (tid, want_red, want_cmt) = {
+                    let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+                    match ts.get(cur_idx) {
+                        Some(t) => (
+                            t.id,
+                            t.like_count.is_none(),
+                            disp.show_comments && t.comment_count.is_none(),
+                        ),
+                        None => (0, false, false),
+                    }
+                };
+                spawn_backfill(ncm, tracks, &attempts, tid, want_red, want_cmt);
+            }
+            let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
+            // 切曲往滚动历史打一行歌名（先清底行，行独立可回翻）；
+            // 收藏/热度已上移状态栏（行1），不再拼在歌名后
+            if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                let label = ts.get(cur_idx).map(|t| t.label.as_str()).unwrap_or("");
+                clear_overlay_rows(); // 清底行，歌名行进滚动历史
+                eprintln!(
+                    "{}",
+                    crate::ui::dim(&format!("▶ [{}/{}] {}", cur_idx + 1, ts.len(), label))
+                );
+            }
+            print_row(ts.as_slice(), cur_idx, None, None, None, liked, disp);
+        }};
+    }
     let mut lines = TokioBufReader::new(read).lines();
     loop {
         // 400ms 轮询：toast 清底行后无事件（暂停/停秒）也要立即重画，防歌词滞留
@@ -693,49 +739,34 @@ async fn overlay_loop(
             match ev["name"].as_str() {
                 Some("playlist-pos") => {
                     if let Some(i) = ev["data"].as_u64() {
-                        cur_idx = i as usize;
-                        last_line = None; // 切曲后重置，等新 time-pos
-                        last_sec = None;
-                        cur_t = 0.0;
-                        dur = None;
-                        dur_check_pending = true; // 等本曲 duration 到达后与元数据对账
-                                                  // 歌单/搜索来源 Track 无 likeCount/评论数：切曲时发起后台
-                                                  // 补取（2s 超时不阻塞事件循环，按曲 id 去抖 6s，失败自动重试）
-                        {
-                            let (tid, want_red, want_cmt) = {
-                                let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
-                                match ts.get(cur_idx) {
-                                    Some(t) => (
-                                        t.id,
-                                        t.like_count.is_none(),
-                                        disp.show_comments && t.comment_count.is_none(),
-                                    ),
-                                    None => (0, false, false),
-                                }
-                            };
-                            spawn_backfill(ncm, tracks, &attempts, tid, want_red, want_cmt);
+                        if reset_seen {
+                            // time-pos 已归零 → 真换曲，立即应用
+                            reset_seen = false;
+                            pending_pos = None;
+                            apply_track_change!(i as usize);
+                        } else {
+                            // 无归零信号：可能列表操作（remove/insert 改 pos 音频未换）
+                            // 挂 pending 等 time-pos 确认——>0 丢弃保持 cur_idx，=0 应用
+                            pending_pos = Some(i as usize);
                         }
-                        let ts = tracks.read().unwrap_or_else(|e| e.into_inner());
-                        // 切曲往滚动历史打一行歌名（先清底行，行独立可回翻）；
-                        // 收藏/热度已上移状态栏（行1），不再拼在歌名后
-                        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                            let label = ts.get(cur_idx).map(|t| t.label.as_str()).unwrap_or("");
-                            clear_overlay_rows(); // 清底行，歌名行进滚动历史
-                            eprintln!(
-                                "{}",
-                                crate::ui::dim(&format!(
-                                    "▶ [{}/{}] {}",
-                                    cur_idx + 1,
-                                    ts.len(),
-                                    label
-                                ))
-                            );
-                        }
-                        print_row(ts.as_slice(), cur_idx, None, None, None, liked, disp);
                     }
                 }
                 Some("time-pos") => {
                     if let Some(t) = ev["data"].as_f64() {
+                        if t <= 0.05 {
+                            // 归零=真换曲信号：有挂起的 pos 变化则立即应用
+                            reset_seen = true;
+                            if let Some(i) = pending_pos.take() {
+                                reset_seen = false;
+                                apply_track_change!(i);
+                                continue; // 已按新曲重画，本条 0 不再走下方歌词逻辑
+                            }
+                        } else {
+                            // 时间正常推进：挂起的 pos 变化未等到归零 → 列表操作，
+                            // 丢弃并保持 cur_idx（音频未换，ts[cur_idx] 仍正确）
+                            reset_seen = false;
+                            pending_pos = None;
+                        }
                         cur_t = t;
                         // 每秒再查一次补取（去抖 6s 由 attempts 控制）：
                         // 切曲事件补取失败/被跳过时，播放中会持续重试直到取到
