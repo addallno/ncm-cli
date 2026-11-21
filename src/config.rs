@@ -68,7 +68,8 @@ fn validate_key(key: &str) -> Result<()> {
     match key {
         "download-dir" | "play.download-key" | "play.like-key" | "play.unlike-key"
         | "play.heart-symbol" | "play.heat-symbol" | "play.show-liked" | "play.show-comments"
-        | "quality" | "download.confirm" | "download.jobs" | "mirror" | "play.prefetch" => Ok(()),
+        | "quality" | "download.confirm" | "download.jobs" | "mirror" | "play.prefetch"
+        | "default-profile" => Ok(()),
         _ => {
             if let Some(sec) = key.strip_prefix("profile.") {
                 if SECTIONS.contains(&sec) {
@@ -76,7 +77,7 @@ fn validate_key(key: &str) -> Result<()> {
                 }
             }
             bail!(
-                "未知配置键 {key}；可用: download-dir, quality, download.confirm, download.jobs, mirror, play.download-key, play.like-key, play.unlike-key, play.heart-symbol, play.heat-symbol, play.show-liked, play.show-comments, play.prefetch, profile.<{}>",
+                "未知配置键 {key}；可用: download-dir, quality, download.confirm, download.jobs, mirror, default-profile, play.download-key, play.like-key, play.unlike-key, play.heart-symbol, play.heat-symbol, play.show-liked, play.show-comments, play.prefetch, profile.<{}>",
                 SECTIONS.join("|")
             )
         }
@@ -179,6 +180,7 @@ pub fn all_keys() -> &'static [(&'static str, &'static str)] {
         ("download.jobs", "1"),
         ("mirror", "127.0.0.1:3000,3100"),
         ("play.prefetch", "6"),
+        ("default-profile", ""),
     ]
 }
 

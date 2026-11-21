@@ -67,8 +67,8 @@ pub fn resolve_auth_for(
              先 `ncm login --profile {prof}`，或 ncm config set profile.{section} 换绑"
         );
     }
-    // 回退：ncm login 持久化的默认凭据
-    Ok(load_saved())
+    // 回退：default 档 → config default-profile → 唯一非 default 档
+    Ok(load_default_chain())
 }
 
 /// profile 名合法性：仅 [A-Za-z0-9._-] 且非 `.`/`..`、非空、≤64 字符
@@ -272,6 +272,20 @@ pub fn save_profile(
     })?;
     set_entry(&mut sessions, &name, c, uid, user_name)?;
     save_sessions(&sessions)?;
+    // 首个非 default 档自动设为默认（无 default 档且未手动配置 default-profile 时）：
+    // 只 `login --profile X` 不建默认档也能被后续无 --user 命令解析到
+    if name != "default" {
+        let has_default = sessions["profiles"]
+            .get("default")
+            .is_some_and(|v| v["cookie"].as_str().is_some_and(|s| s.contains('=')));
+        let configured = crate::config::get("default-profile")
+            .ok()
+            .flatten()
+            .is_some();
+        if !has_default && !configured {
+            let _ = crate::config::set("default-profile", &name);
+        }
+    }
     // 该档旧纯文本一并清掉：避免旧 cookie 残留被后续读回造成双源不一致
     let _ = std::fs::remove_file(legacy_cookie_path(&name));
     Ok(sessions_path())
@@ -320,6 +334,47 @@ pub fn saved_cookie_path() -> std::path::PathBuf {
 /// 读取默认 profile 凭据（不存在或损坏返回 None）
 pub fn load_saved() -> Option<String> {
     load_profile(None)
+}
+
+/// 扫描配置目录下全部遗留纯文本 `cookie.<名>` 并迁入 sessions.json
+/// （旧版 login --profile 写纯文本不入档，导致默认凭据解析不到该用户）
+fn migrate_legacy_cookies() {
+    let Ok(rd) = std::fs::read_dir(config_dir()) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let fname = e.file_name().to_string_lossy().into_owned();
+        if let Some(name) = fname.strip_prefix("cookie.") {
+            if !name.is_empty() {
+                let _ = load_profile(Some(name)); // load_profile 命中旧文件即迁移并删除
+            }
+        }
+    }
+}
+
+/// 默认凭据解析链（resolve_auth_for 尾部回退）：
+/// ① 扫入遗留纯文本 cookie.*；② default 档；③ `ncm config set default-profile <名>`
+/// 指定档；④ 仅存一个非 default 档时自动用它（`login --profile X` 单档场景）
+pub fn load_default_chain() -> Option<String> {
+    migrate_legacy_cookies();
+    if let Some(c) = load_profile(None) {
+        return Some(c);
+    }
+    if let Some(prof) = crate::config::get("default-profile").ok().flatten() {
+        if let Some(c) = load_profile(Some(&prof)) {
+            return Some(c);
+        }
+    }
+    let sessions = load_sessions();
+    let mut singles: Vec<String> = sessions
+        .get("profiles")
+        .and_then(Value::as_object)
+        .map(|o| o.keys().filter(|k| *k != "default").cloned().collect())
+        .unwrap_or_default();
+    if singles.len() == 1 {
+        return load_profile(Some(&singles.remove(0)));
+    }
+    None
 }
 
 /// 列举全部已保存 profile 名（default 表示默认档）；按名排序。
@@ -621,6 +676,85 @@ mod persist_tests {
         let _ = clear_profile(None);
         let _ = clear_profile(Some("vip"));
         let _ = crate::config::unset("profile.download");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 默认凭据回退链：migrate 扫入 cookie.* → default 档 → default-profile 指定档 → 唯一非 default 档
+    #[test]
+    fn load_default_chain_fallbacks() {
+        let _g = crate::config::tests::LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ncm-chain-test-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let _ = clear_profile(None);
+        let _ = clear_profile(Some("alpha"));
+        let _ = clear_profile(Some("beta"));
+        let _ = crate::config::unset("default-profile");
+        std::fs::create_dir_all(dir.join("ncm")).unwrap();
+
+        // ① 遗留纯文本 cookie.alpha 扫入 sessions.json 后可用（无 default 档 → 唯一档回退）
+        std::fs::write(dir.join("ncm/cookie.alpha"), "MUSIC_U=legacy; __csrf=z\n").unwrap();
+        assert_eq!(
+            load_default_chain().as_deref(),
+            Some("MUSIC_U=legacy; __csrf=z"),
+            "cookie.alpha 应被扫描迁入并作为唯一档命中"
+        );
+        let sessions = load_sessions();
+        assert_eq!(
+            sessions["profiles"]["alpha"]["cookie"].as_str(),
+            Some("MUSIC_U=legacy; __csrf=z"),
+            "cookie.alpha 应已迁入 sessions.json"
+        );
+        assert!(!dir.join("ncm/cookie.alpha").exists(), "旧文件应已删除");
+
+        // ② 存入 default 档 → default 优先于唯一档回退
+        assert!(save_profile(None, "MUSIC_U=main; x=1", None, None).is_ok());
+        assert_eq!(
+            load_default_chain().as_deref(),
+            Some("MUSIC_U=main; x=1"),
+            "default 档优先"
+        );
+
+        // ③ 无 default 档时走 config default-profile 指定档
+        let _ = clear_profile(None);
+        assert!(save_profile(Some("beta"), "MUSIC_U=beta; y=2", None, None).is_ok());
+        assert!(crate::config::set("default-profile", "beta").is_ok());
+        assert_eq!(
+            load_default_chain().as_deref(),
+            Some("MUSIC_U=beta; y=2"),
+            "default-profile 配置指定档应回退命中"
+        );
+
+        // ④ 两档并存且无 default/配置 → 唯一档规则不适用 → None
+        let _ = clear_profile(Some("beta"));
+        assert!(save_profile(Some("alpha"), "MUSIC_U=a1; k=1", None, None).is_ok());
+        assert!(save_profile(Some("beta"), "MUSIC_U=b1; k=2", None, None).is_ok());
+        let _ = crate::config::unset("default-profile");
+        assert_eq!(load_default_chain(), None, "两档并存无法唯一确定");
+
+        // ⑤ save_profile 首档自动设 default-profile（无 default 档时）
+        let _ = crate::config::unset("default-profile");
+        let _ = clear_profile(Some("alpha"));
+        let _ = clear_profile(Some("beta"));
+        let _ = clear_profile(None);
+        assert!(save_profile(Some("solo"), "MUSIC_U=solo; s=1", None, None).is_ok());
+        assert_eq!(
+            crate::config::get("default-profile")
+                .ok()
+                .flatten()
+                .as_deref(),
+            Some("solo"),
+            "首个非 default 档应自动设为 default-profile"
+        );
+        assert_eq!(
+            load_default_chain().as_deref(),
+            Some("MUSIC_U=solo; s=1"),
+            "自动设默认后应经链命中"
+        );
+
+        let _ = clear_profile(Some("solo"));
+        let _ = crate::config::unset("default-profile");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

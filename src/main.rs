@@ -148,7 +148,7 @@ enum Commands {
         /// 登出：删除已保存的凭据
         #[arg(long)]
         logout: bool,
-        /// 会话 profile 名（多账号：保存到 ~/.config/ncm/cookie.<名>；配 profile.<板块> 绑定到板块）
+        /// 会话 profile 名（多账号：保存到 ~/.config/ncm/sessions.json；配 profile.<板块> 绑定到板块）
         #[arg(long, value_name = "名称")]
         profile: Option<String>,
     },
@@ -1891,8 +1891,12 @@ async fn run_login(cli: Cli) -> Result<i32> {
                     path.display()
                 ));
             } else {
+                // 已保存凭据检查：whoami 元数据一并补全（旧档 uid/name 可能为 null，
+                // 补全后 --profile 才能按 uid/用户名反查）
+                let path = session::save_profile(prof, &auth_str, Some(uid), Some(&name))?;
                 ui::ok(&format!(
-                    "已保存凭据有效：{name} (uid {uid})（ncm login --logout 可登出）"
+                    "已保存凭据有效：{name} (uid {uid})（ncm login --logout 可登出）\n  凭据: {}",
+                    path.display()
                 ));
             }
             Ok(0)
@@ -3147,7 +3151,7 @@ async fn run(cli: Cli) -> Result<i32> {
             let ncm = Ncm::with_cookie(auth.as_deref())?;
             match ncm.whoami().await? {
                 Some((uid, name)) => {
-                    let via = if session::load_saved().is_some() {
+                    let via = if session::load_default_chain().is_some() {
                         "（持久化凭据）"
                     } else {
                         "（本次会话凭据）"
