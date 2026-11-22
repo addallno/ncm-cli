@@ -308,6 +308,8 @@ fn ass_time(seconds: f64) -> String {
 /// 过滤 `[ar:]` 等元数据行与空文本行
 pub fn parse_lrc_timeline(text: &str) -> Vec<(f64, String)> {
     let mut out: Vec<(f64, String)> = Vec::new();
+    // [offset:xx] 全局偏移（毫秒，正=歌词提前）：可能出现在任意行，先收集后统一应用
+    let mut offset_ms: f64 = 0.0;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -336,7 +338,15 @@ pub fn parse_lrc_timeline(text: &str) -> Vec<(f64, String)> {
             rest = &rest[end + 1..];
         }
         if times.is_empty() {
-            continue; // 元数据行 [ti:..] / [offset:..]
+            // 元数据行 [ti:..] 等跳过；[offset:xx] 收集为全局偏移
+            if let Some(after) = line.strip_prefix("[offset:") {
+                if let Some(end) = after.find(']') {
+                    if let Ok(ms) = after[..end].trim().parse::<f64>() {
+                        offset_ms = ms;
+                    }
+                }
+            }
+            continue;
         }
         let content = rest.trim();
         if content.is_empty() {
@@ -344,6 +354,13 @@ pub fn parse_lrc_timeline(text: &str) -> Vec<(f64, String)> {
         }
         for t in times {
             out.push((t, content.to_string()));
+        }
+    }
+    // 应用全局偏移：t - offset/1000（正偏移歌词提前），下限 0 防负时间
+    if offset_ms != 0.0 {
+        let shift = offset_ms / 1000.0;
+        for (t, _) in out.iter_mut() {
+            *t = (*t - shift).max(0.0);
         }
     }
     out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -520,10 +537,11 @@ mod timeline_tests {
     }
 
     #[test]
-    fn parse_offset_tag_ignored() {
+    fn parse_offset_tag_applied() {
+        // [offset:500]（毫秒，正=歌词提前）→ 1.0 - 0.5 = 0.5
         let lrc = "[offset:500]\n[00:01]词\n";
         let v = parse_lrc_timeline(lrc);
-        assert_eq!(v, vec![(1.0, "词".to_string())]);
+        assert_eq!(v, vec![(0.5, "词".to_string())]);
     }
 
     /// 译文紧跟同刻原文之后且时间戳完全相等（player 配对判定依赖精确相等）

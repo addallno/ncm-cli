@@ -4502,15 +4502,16 @@ async fn guard_loop(
             .await
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        // 键盘 < 的回退请求：刷新目标曲链接后 playlist-play-index 精确定位，
-        // 免得旧直链过期时 mpv 沿失效项一路向上跳到队首回卷
+        // 键盘 < / > 的跳转请求：目标在双向保鲜窗口（前后各 5 首）内时链接
+        // 必新鲜（60s 内刷过、10min 才过期）直接定位免等刷新；窗口外仍先
+        // refresh 再跳，防旧直链过期时 mpv 沿失效项一路跳到队首回卷
         let navs: Vec<usize> = {
             let mut g = nav.lock().unwrap_or_else(|e| e.into_inner());
             g.drain(..).collect()
         };
-        // 键盘 < 的回退请求：刷新目标曲链接后 playlist-play-index 精确定位，
-        // 免得旧直链过期时 mpv 沿失效项一路向上跳到队首回卷
         for abs in navs {
+            let cur = pos as usize;
+            let in_window = abs.abs_diff(cur) <= 5;
             let (id, old) = {
                 let q = queue.read().unwrap_or_else(|e| e.into_inner());
                 let s = srcs.read().unwrap_or_else(|e| e.into_inner());
@@ -4519,7 +4520,7 @@ async fn guard_loop(
                     None => continue,
                 }
             };
-            if !desynced {
+            if !desynced && !in_window {
                 match refresh_entry(
                     &sock,
                     &ncm,
@@ -4550,57 +4551,58 @@ async fn guard_loop(
             let cmd = serde_json::json!({"command": ["playlist-play-index", abs]}).to_string();
             let _ = player::ipc_send(&sock, &cmd).await;
         }
-        // 回退预热：播放中每 60s 保鲜当前曲前 3 首的直链，< 随时可回
+        // 双向保鲜：播放中每 60s 刷当前曲前/后各 5 首的直链（跳过当前曲——
+        // 已在解码器不动），< / > 在窗口内随时可跳且链接必新鲜（60s 刷过、
+        // 10min 才过期），免去跳转时同步等刷新的延迟
         if !paused
             && refresh_supported
             && !desynced
             && last_back.elapsed() >= std::time::Duration::from_secs(60)
         {
             last_back = tokio::time::Instant::now();
-            let lo = pos.saturating_sub(3) as usize;
-            if (pos as usize) > lo {
-                let snapshot: Vec<(u64, usize, PlaySrc)> = {
-                    let q = queue.read().unwrap_or_else(|e| e.into_inner());
-                    let s = srcs.read().unwrap_or_else(|e| e.into_inner());
-                    q.iter()
-                        .zip(s.iter())
-                        .enumerate()
-                        .take(pos as usize)
-                        .skip(lo)
-                        .map(|(i, ((id, _, _), sc))| (*id, i, sc.clone()))
-                        .collect()
-                };
-                for (id, abs, old) in snapshot.into_iter().rev() {
-                    if desynced {
+            let cur = pos as usize;
+            let lo = cur.saturating_sub(5);
+            let hi = (cur + 6).min(count as usize); // [cur-5, cur+5]，上界含 cur+5
+            let snapshot: Vec<(u64, usize, PlaySrc)> = {
+                let q = queue.read().unwrap_or_else(|e| e.into_inner());
+                let s = srcs.read().unwrap_or_else(|e| e.into_inner());
+                q.iter()
+                    .zip(s.iter())
+                    .enumerate()
+                    .filter(|(i, _)| *i >= lo && *i < hi && *i != cur)
+                    .map(|(i, ((id, _, _), sc))| (*id, i, sc.clone()))
+                    .collect()
+            };
+            for (id, abs, old) in snapshot.into_iter().rev() {
+                if desynced {
+                    break;
+                }
+                match refresh_entry(
+                    &sock,
+                    &ncm,
+                    vip_ncm.as_ref(),
+                    &quality,
+                    wanted_flac,
+                    &srcs,
+                    &mut req_id,
+                    id,
+                    abs,
+                    &old,
+                    count,
+                )
+                .await
+                {
+                    RefreshResult::Unsupported => {
+                        refresh_supported = false;
+                        player::toast("mpv不支持insert-at，链接保鲜停用");
                         break;
                     }
-                    match refresh_entry(
-                        &sock,
-                        &ncm,
-                        vip_ncm.as_ref(),
-                        &quality,
-                        wanted_flac,
-                        &srcs,
-                        &mut req_id,
-                        id,
-                        abs,
-                        &old,
-                        count,
-                    )
-                    .await
-                    {
-                        RefreshResult::Unsupported => {
-                            refresh_supported = false;
-                            player::toast("mpv不支持insert-at，链接保鲜停用");
-                            break;
-                        }
-                        RefreshResult::Desync => {
-                            desynced = true;
-                            player::toast("队列不同步（索引漂移），暂停换链");
-                            break;
-                        }
-                        _ => {}
+                    RefreshResult::Desync => {
+                        desynced = true;
+                        player::toast("队列不同步（索引漂移），暂停换链");
+                        break;
                     }
+                    _ => {}
                 }
             }
         }

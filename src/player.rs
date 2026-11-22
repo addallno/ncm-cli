@@ -215,6 +215,29 @@ pub fn spawn_key_reader(
                         }
                     }
                 }
+                b'>' => {
+                    // 下一首同样接管（与 < 对称）：直接转发会让 mpv playlist-next
+                    // 播未保鲜的过期直链（403 失败致队列错乱）；目标位交 guard，
+                    // 双向保鲜窗口内免刷新直跳，窗口外先刷新再定位
+                    req_id += 1;
+                    let pos = ipc_get(&sock, "playlist-pos", req_id)
+                        .await
+                        .and_then(|v| v.as_i64());
+                    let qlen = queue.read().unwrap_or_else(|e| e.into_inner()).len() as i64;
+                    match pos {
+                        Some(p) if p >= 0 && p + 1 < qlen => {
+                            nav.lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push_back((p + 1) as usize);
+                            feedback("▶ 下一曲");
+                        }
+                        // 队尾/位置未知：交回 mpv 默认行为（不回卷）
+                        _ => {
+                            let cmd = serde_json::json!({"command": ["keypress", ">"]}).to_string();
+                            let _ = ipc_send(&sock, &cmd).await;
+                        }
+                    }
+                }
                 b'9' | b'0' | b'*' | b'/' => {
                     // 与 mpv 默认一致：9/`/` 减、0/`*` 加；拦截统一给 toast
                     // （转发时 mpv 改了音量但 ncm 无感知，`*` 无反馈的根因）
