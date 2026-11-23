@@ -60,7 +60,7 @@ src/
 | `ncm info subs [-t album,artist]` | 收藏的专辑/歌手列表（需登录；`-t` 逗号分隔选类型，默认两类、`-n` 每类条数） |
 | `ncm info mv <ID> [--res 1080] [--play]` | MV 详情 + 播放地址（240/480/720/1080）；`--play` 交 mpv 播放，`--json` 取链接 |
 | `ncm info cloud [-n] [--offset]` | 云盘歌曲列表（需登录；标准表，下载用 `ncm download <ID>`，暂不支持上传） |
-| `ncm fm like/trash/skip/get` | 私人FM 操作（需登录）：`like <ID> [--unlike]` 红心、`trash <ID>` 踩、`skip <ID>` 跳过并拉下批、`get -n` 拉取 |
+| `ncm recommend -t fm` | 私人FM 拉取一批（需登录；模式由 config `fm.mode`/`fm.scene`/`fm.limit` 控制） |
 | `ncm completions <shell>` | 生成 bash/zsh/fish/powershell 补全 |
 
 严格子命令：未知首参由 clap 报 `unrecognized subcommand 'xxx'`（`ncm 123` 不再

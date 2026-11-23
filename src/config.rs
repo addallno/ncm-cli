@@ -67,9 +67,9 @@ fn save(m: &Map<String, Value>) -> Result<()> {
 fn validate_key(key: &str) -> Result<()> {
     match key {
         "download-dir" | "play.download-key" | "play.like-key" | "play.unlike-key"
-        | "play.heart-symbol" | "play.heat-symbol" | "play.show-liked" | "play.show-comments"
-        | "quality" | "download.confirm" | "download.jobs" | "mirror" | "play.prefetch"
-        | "default-profile" => Ok(()),
+        | "play.trash-key" | "play.heart-symbol" | "play.heat-symbol" | "play.show-liked"
+        | "play.show-comments" | "quality" | "download.confirm" | "download.jobs" | "mirror"
+        | "play.prefetch" | "default-profile" | "fm.mode" | "fm.scene" | "fm.limit" => Ok(()),
         _ => {
             if let Some(sec) = key.strip_prefix("profile.") {
                 if SECTIONS.contains(&sec) {
@@ -77,7 +77,7 @@ fn validate_key(key: &str) -> Result<()> {
                 }
             }
             bail!(
-                "未知配置键 {key}；可用: download-dir, quality, download.confirm, download.jobs, mirror, default-profile, play.download-key, play.like-key, play.unlike-key, play.heart-symbol, play.heat-symbol, play.show-liked, play.show-comments, play.prefetch, profile.<{}>",
+                "未知配置键 {key}；可用: download-dir, quality, download.confirm, download.jobs, mirror, default-profile, play.download-key, play.like-key, play.unlike-key, play.trash-key, play.heart-symbol, play.heat-symbol, play.show-liked, play.show-comments, play.prefetch, fm.mode, fm.scene, fm.limit, profile.<{}>",
                 SECTIONS.join("|")
             )
         }
@@ -91,11 +91,35 @@ pub fn set(key: &str, value: &str) -> Result<()> {
     if v.is_empty() {
         bail!("配置值不能为空");
     }
-    if key == "play.download-key" && v.chars().any(char::is_whitespace) {
+    if matches!(
+        key,
+        "play.download-key" | "play.like-key" | "play.unlike-key" | "play.trash-key"
+    ) && v.chars().any(char::is_whitespace)
+    {
         bail!("按键名不能含空白");
     }
-    if matches!(key, "play.like-key" | "play.unlike-key") && v.chars().any(char::is_whitespace) {
-        bail!("按键名不能含空白");
+    if key == "fm.mode"
+        && !matches!(
+            v,
+            "DEFAULT"
+                | "FAMILIAR"
+                | "EXPLORE"
+                | "SCENE_RCMD"
+                | "default"
+                | "familiar"
+                | "explore"
+                | "scene_rcmd"
+        )
+    {
+        bail!("fm.mode 只能是 DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD");
+    }
+    if key == "fm.limit" {
+        let n: u32 = v
+            .parse()
+            .map_err(|_| anyhow!("fm.limit 只能是 1-50 的整数"))?;
+        if !(1..=50).contains(&n) {
+            bail!("fm.limit 只能是 1-50 的整数");
+        }
     }
     if key == "quality" && !matches!(v, "standard" | "exhigh" | "lossless" | "hires") {
         bail!("音质只能是 standard/exhigh/lossless/hires");
@@ -173,6 +197,7 @@ pub fn all_keys() -> &'static [(&'static str, &'static str)] {
         ("play.download-key", "d"),
         ("play.like-key", "l"),
         ("play.unlike-key", "u"),
+        ("play.trash-key", "t"),
         ("play.heart-symbol", "♥"),
         ("play.heat-symbol", "*"),
         ("play.show-liked", "true"),
@@ -181,6 +206,9 @@ pub fn all_keys() -> &'static [(&'static str, &'static str)] {
         ("mirror", "127.0.0.1:3000,3100"),
         ("play.prefetch", "6"),
         ("default-profile", ""),
+        ("fm.mode", "FAMILIAR"),
+        ("fm.scene", ""),
+        ("fm.limit", "10"),
     ]
 }
 
@@ -224,6 +252,39 @@ pub fn play_unlike_key() -> String {
         .ok()
         .flatten()
         .unwrap_or_else(|| "u".to_string())
+}
+
+/// 播放快捷「踩/减少推荐」键（未配置默认 `t`，仅漫游续播有效）
+pub fn play_trash_key() -> String {
+    get("play.trash-key")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "t".to_string())
+}
+
+/// 私人漫游推歌模式（`fm.mode`：DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD，未配置默认 FAMILIAR）
+/// 输出统一大写，与 eapi `/v1/radio/get` 的 mode 参数一致
+pub fn fm_mode() -> String {
+    let v = get("fm.mode")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "FAMILIAR".to_string());
+    v.to_uppercase()
+}
+
+/// 私人漫游场景子模式（`fm.scene`：SCENE_RCMD 时如 EXERCISE/FOCUS/NIGHT_EMO；空=不传）
+pub fn fm_scene() -> String {
+    get("fm.scene").ok().flatten().unwrap_or_default()
+}
+
+/// 私人漫游单次拉取条数（`fm.limit`，1-50；默认 10）
+pub fn fm_limit() -> u32 {
+    get("fm.limit")
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .filter(|n: &u32| (1..=50).contains(n))
+        .unwrap_or(10)
 }
 
 /// 切曲行「我已收藏」标记符号（默认 `♥`；Nerd Font 缺字形时可换 `♡`/`❤` 等）
@@ -355,6 +416,30 @@ pub(crate) mod tests {
         assert!(set("play.show-liked", "no").is_err());
         assert!(set("play.heart-symbol", "a b").is_err());
         assert!(set("play.heat-symbol", " ").is_err());
+    }
+
+    /// 播放踩键与 FM 模式键：默认值与取值校验
+    #[test]
+    fn trash_and_fm_keys() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        fresh("trash-fm");
+        assert_eq!(play_trash_key(), "t");
+        assert_eq!(fm_mode(), "FAMILIAR");
+        assert_eq!(fm_scene(), "");
+        assert_eq!(fm_limit(), 10);
+        set("play.trash-key", "x").unwrap();
+        assert_eq!(play_trash_key(), "x");
+        assert!(set("play.trash-key", "a b").is_err());
+        set("fm.mode", "explore").unwrap();
+        assert_eq!(fm_mode(), "EXPLORE");
+        assert!(set("fm.mode", "random").is_err());
+        set("fm.scene", "EXERCISE").unwrap();
+        assert_eq!(fm_scene(), "EXERCISE");
+        set("fm.limit", "3").unwrap();
+        assert_eq!(fm_limit(), 3);
+        assert!(set("fm.limit", "0").is_err());
+        assert!(set("fm.limit", "51").is_err());
+        assert!(set("fm.limit", "x").is_err());
     }
 
     /// 评论数显示开关：默认关闭，配置 true 才开；取值校验 true/false

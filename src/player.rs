@@ -66,6 +66,7 @@ pub enum Quick {
     Download,
     Like,
     Unlike,
+    Trash,
 }
 
 /// 快捷请求队列：(类型, 曲 id, 标签)。
@@ -129,6 +130,7 @@ pub fn spawn_key_reader(
     dl_key: String,
     like_key: String,
     unlike_key: String,
+    trash_key: String,
     queue: std::sync::Arc<std::sync::RwLock<Vec<(u64, String, u64)>>>,
     nav: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<usize>>>,
 ) -> tokio::task::JoinHandle<()> {
@@ -138,6 +140,7 @@ pub fn spawn_key_reader(
         let dl = dl_key.as_bytes().first().copied();
         let lk = like_key.as_bytes().first().copied();
         let ul = unlike_key.as_bytes().first().copied();
+        let tk = trash_key.as_bytes().first().copied();
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1];
         loop {
@@ -253,7 +256,7 @@ pub fn spawn_key_reader(
                     eprintln!(
                         "{}",
                         crate::ui::dim(
-                            "键位: 空格 暂停 · 0/9/*/ 音量 · ←/→ 快退快进 · </> 上/下曲 · ,/. 微调 · m 静音 · f 全屏 · d 下载 · l 收藏 · u 取消 · q 退出"
+                            "键位: 空格 暂停 · 0/9/*/ 音量 · ←/→ 快退快进 · </> 上/下曲 · ,/. 微调 · m 静音 · f 全屏 · d 下载 · l 收藏 · u 取消 · t 踩 · q 退出"
                         )
                     );
                     CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -273,16 +276,19 @@ pub fn spawn_key_reader(
                 }
                 _ if dl.is_some_and(|k| k == b)
                     || lk.is_some_and(|k| k == b)
-                    || ul.is_some_and(|k| k == b) =>
+                    || ul.is_some_and(|k| k == b)
+                    || tk.is_some_and(|k| k == b) =>
                 {
                     // 按下瞬间取 playlist-pos 锁定曲目（防后续切曲错位）
-                    // 同键配置多动作时优先级 d > l > u（与 download/like 既有行为一致）
+                    // 同键配置多动作时优先级 d > l > u > t（与既有行为一致）
                     let kind = if dl.is_some_and(|k| k == b) {
                         Quick::Download
                     } else if lk.is_some_and(|k| k == b) {
                         Quick::Like
-                    } else {
+                    } else if ul.is_some_and(|k| k == b) {
                         Quick::Unlike
+                    } else {
+                        Quick::Trash
                     };
                     req_id += 1;
                     let locked = async {

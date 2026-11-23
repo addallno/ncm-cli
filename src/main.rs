@@ -45,7 +45,7 @@ struct Cli {
     /// 解锁音源服务地址（UnblockNeteaseMusic-utils；NCM_MIRROR 同效，none=禁用）
     #[arg(long, global = true, value_name = "URL")]
     mirror: Option<String>,
-    /// 指定本次命令使用的 profile 名（优先级高于板块绑定；需已 ncm login --profile 保存）
+    /// 本次命令使用的 profile 名，优先级高于板块绑定
     #[arg(short = 'u', long = "user", global = true, value_name = "NAME")]
     user: Option<String>,
     #[command(subcommand)]
@@ -148,7 +148,7 @@ enum Commands {
         /// 登出：删除已保存的凭据
         #[arg(long)]
         logout: bool,
-        /// 会话 profile 名（多账号：保存到 ~/.config/ncm/sessions.json；配 profile.<板块> 绑定到板块）
+        /// 会话 profile 名，多账号用，保存于 sessions.json
         #[arg(long, value_name = "名称")]
         profile: Option<String>,
     },
@@ -174,11 +174,6 @@ enum Commands {
         /// 网页端签到（+1 经验；默认移动端 +4）
         #[arg(long)]
         web: bool,
-    },
-    /// 私人FM 操作：红心 / 踩 / 跳过（需登录）
-    Fm {
-        #[command(subcommand)]
-        action: FmAction,
     },
     /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 </> 切曲、←/→ 快退进、歌词同步滚动）
     Play {
@@ -391,40 +386,6 @@ enum PlaylistAction {
         /// 目标歌单名或 ID（默认"我喜欢的音乐"）
         #[arg(short = 'p', long = "playlist", value_name = "名或ID")]
         playlist: Option<String>,
-    },
-}
-
-/// 私人FM 操作子命令
-#[derive(Subcommand)]
-enum FmAction {
-    /// 红心当前 FM 歌曲（推荐算法会多推同类）
-    Like {
-        /// 歌曲 ID
-        id: u64,
-        /// 取消红心
-        #[arg(long)]
-        unlike: bool,
-    },
-    /// 踩：移除并少推同类
-    Trash {
-        /// 歌曲 ID
-        id: u64,
-    },
-    /// 跳过：拉下一批 FM 歌曲并列出
-    Skip {
-        /// 当前歌曲 ID（0 = 不上报）
-        #[arg(default_value_t = 0)]
-        id: u64,
-        #[command(flatten)]
-        opts: ViewArgs,
-    },
-    /// 拉取一批 FM 歌曲
-    Get {
-        /// 拉取条数
-        #[arg(short = 'n', long, default_value_t = 10)]
-        limit: u32,
-        #[command(flatten)]
-        opts: ViewArgs,
     },
 }
 
@@ -2150,7 +2111,10 @@ async fn run(cli: Cli) -> Result<i32> {
                         }
                         Err(e) => errors.push(format!("每日推荐失败: {e:#}")),
                     },
-                    RecKind::Fm => match ncm.radio_songs().await {
+                    RecKind::Fm => match ncm
+                        .radio_songs(&config::fm_mode(), &config::fm_scene(), config::fm_limit())
+                        .await
+                    {
                         Ok(mut s) => {
                             if s.len() > cap {
                                 s.truncate(cap);
@@ -2360,7 +2324,9 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             // 纯 --roam（无其它目标）：私人FM 首批即队列
             if songs.is_empty() && roam {
-                let s = ncm.radio_songs().await?;
+                let s = ncm
+                    .radio_songs(&config::fm_mode(), &config::fm_scene(), config::fm_limit())
+                    .await?;
                 if s.is_empty() {
                     bail!("私人FM为空（该接口需登录：ncm login --session/--cookie）");
                 }
@@ -2830,6 +2796,7 @@ async fn run(cli: Cli) -> Result<i32> {
                         config::play_download_key(),
                         config::play_like_key(),
                         config::play_unlike_key(),
+                        config::play_trash_key(),
                         queue.clone(),
                         nav.clone(),
                     )
@@ -3078,6 +3045,7 @@ async fn run(cli: Cli) -> Result<i32> {
                                     config::play_download_key(),
                                     config::play_like_key(),
                                     config::play_unlike_key(),
+                                    config::play_trash_key(),
                                     queue.clone(),
                                     nav.clone(),
                                 )
@@ -3501,67 +3469,6 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Fm { action }) => match action {
-            FmAction::Like { id, unlike } => {
-                let _sp = ui::Spinner::start("FM 处理中…");
-                let ncm = Ncm::with_cookie(auth.as_deref())?;
-                ncm.whoami()
-                    .await?
-                    .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
-                ncm.fm_like(id, !unlike).await?;
-                let verb = if unlike { "取消红心" } else { "红心" };
-                ui::ok(&format!("FM {verb} 曲目 {id}"));
-                Ok(0)
-            }
-            FmAction::Trash { id } => {
-                let _sp = ui::Spinner::start("FM 处理中…");
-                let ncm = Ncm::with_cookie(auth.as_deref())?;
-                ncm.whoami()
-                    .await?
-                    .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
-                ncm.fm_trash(id).await?;
-                ui::ok(&format!("已踩曲目 {id}，将少推同类"));
-                Ok(0)
-            }
-            FmAction::Skip { id, opts } => {
-                let _sp = ui::Spinner::start("FM 处理中…");
-                ui::set_json(opts.json);
-                ui::set_quiet(opts.quiet);
-                let ncm = Ncm::with_cookie(auth.as_deref())?;
-                ncm.whoami()
-                    .await?
-                    .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
-                if id > 0 {
-                    ncm.fm_skip(id).await?;
-                }
-                let songs = ncm.radio_songs().await?;
-                if opts.json {
-                    println!("{}", serde_json::to_string_pretty(&Value::Array(songs))?);
-                    return Ok(0);
-                }
-                print_search_table(&songs);
-                Ok(0)
-            }
-            FmAction::Get { limit, opts } => {
-                let _sp = ui::Spinner::start("读取私人FM…");
-                ui::set_json(opts.json);
-                ui::set_quiet(opts.quiet);
-                let ncm = Ncm::with_cookie(auth.as_deref())?;
-                ncm.whoami()
-                    .await?
-                    .context("登录态无效：ncm login --session/--cookie 保存登录后重试")?;
-                let mut songs = ncm.radio_songs().await?;
-                if limit > 0 {
-                    songs.truncate(limit as usize);
-                }
-                if opts.json {
-                    println!("{}", serde_json::to_string_pretty(&Value::Array(songs))?);
-                    return Ok(0);
-                }
-                print_search_table(&songs);
-                Ok(0)
-            }
-        },
         Some(Commands::Playlist { action }) => {
             let _sp = ui::Spinner::start("歌单操作…");
             let action = action.unwrap_or(PlaylistAction::List {
@@ -4060,6 +3967,17 @@ fn dispatch_quick_reqs(
                     continue;
                 }
                 like_batch.push((id, label, true));
+            }
+            player::Quick::Trash => {
+                // 踩/减少推荐：调私人FM反馈接口，成功后 toast（异步，不阻塞键读）
+                let ncm = dl_ncm.clone();
+                let msg = format!("▼ 「{label}」已踩 · 少推同类");
+                tokio::spawn(async move {
+                    match ncm.fm_trash(id).await {
+                        Ok(()) => crate::player::toast(&msg),
+                        Err(e) => crate::player::toast(&format!("× 踩失败: {e:#}")),
+                    }
+                });
             }
         }
     }
@@ -4665,7 +4583,10 @@ async fn guard_loop(
             if !roam {
                 continue;
             }
-            let fm = ncm.radio_songs().await.unwrap_or_default();
+            let fm = ncm
+                .radio_songs(&config::fm_mode(), &config::fm_scene(), config::fm_limit())
+                .await
+                .unwrap_or_default();
             if fm.is_empty() {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 continue;

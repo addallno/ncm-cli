@@ -465,14 +465,26 @@ impl Ncm {
         Ok(data["list"].as_array().cloned().unwrap_or_default())
     }
 
-    /// 私人FM 一批歌曲（播放漫游数据源，元素为标准 song 结构）
-    pub async fn radio_songs(&self) -> Result<Vec<Value>> {
-        let data = self.get_json("/api/v1/radio/get", &[]).await?;
-        let code = data["code"].as_i64().unwrap_or(-1);
+    /// 私人FM/漫游 一批歌曲（播放漫游数据源，元素为标准 song 结构）
+    ///
+    /// eapi `/v1/radio/get` 带推歌模式参数（真实 app 同款接口，2024-01 起）：
+    /// `mode` = DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD，`subMode` = 场景子模式（可空），
+    /// `limit` = 单次拉取条数。与裸 GET 相比曲目按模式重新推荐。
+    pub async fn radio_songs(&self, mode: &str, scene: &str, limit: u32) -> Result<Vec<Value>> {
+        let mut biz = serde_json::Map::from_iter([
+            ("e_r".into(), json!("true")),
+            ("mode".into(), json!(mode)),
+            ("limit".into(), json!(limit.to_string())),
+        ]);
+        if !scene.is_empty() {
+            biz.insert("subMode".into(), json!(scene));
+        }
+        let v = self.post_eapi("/v1/radio/get", biz).await?;
+        let code = v["code"].as_i64().unwrap_or(-1);
         if code != 200 {
             anyhow::bail!("私人FM失败 code={code}（需登录：ncm login）");
         }
-        Ok(data["data"].as_array().cloned().unwrap_or_default())
+        Ok(v["data"].as_array().cloned().unwrap_or_default())
     }
 
     /// 歌曲评论（明文读接口，可匿名）；返回 (热门评论列表, 总数)
@@ -510,37 +522,6 @@ impl Ncm {
             .or_else(|| v["data"]["redCount"].as_u64())
             .or_else(|| v["data"]["likedCount"].as_u64())
             .context("红心数响应缺 count 字段")
-    }
-
-    /// 私人FM 跳过（eapi，pyncm SetSkipRadioContent）
-    pub async fn fm_skip(&self, song_id: u64) -> Result<()> {
-        self.post_eapi(
-            "/v1/radio/get",
-            serde_json::Map::from_iter([
-                ("e_r".into(), json!("true")),
-                ("songId".into(), json!(song_id.to_string())),
-                ("alg".into(), json!("itembased")),
-                ("time".into(), json!("0")),
-            ]),
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// 私人FM 红心/取消红心（eapi，pyncm SetLikeRadioContent）
-    pub async fn fm_like(&self, track_id: u64, like: bool) -> Result<()> {
-        self.post_eapi(
-            "/v1/radio/like",
-            serde_json::Map::from_iter([
-                ("e_r".into(), json!("true")),
-                ("like".into(), json!(like.to_string().to_lowercase())),
-                ("trackId".into(), json!(track_id.to_string())),
-                ("alg".into(), json!("itembased")),
-                ("time".into(), json!("0")),
-            ]),
-        )
-        .await?;
-        Ok(())
     }
 
     /// 私人FM 踩/移除（eapi，pyncm SetTrashRadioContent）

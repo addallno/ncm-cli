@@ -66,7 +66,7 @@
   `ncm sign`（每日签到，移动端 +4 经验，`--web` 网页端 +1）、
   `ncm info subs`（收藏的专辑/歌手列表，`-t album,artist` 选类型）
 - **评论 / 私人FM / 云盘 / MV**：`ncm info comment <歌曲ID>` 热门评论（可匿名，
-  `-n` 条数）；`ncm fm like/trash/skip/get` 私人FM 红心/踩/跳过/拉取；
+  `-n` 条数）；`ncm recommend -t fm` 私人FM 拉取（播放中 `t` 踩、`l` 红心）；
   `ncm info cloud` 云盘歌曲列表（`--offset` 翻页，下载用 `ncm download <ID>`）；
   `ncm info mv <ID>` MV 详情 + 各清晰度地址（`--play` 交给 mpv，`--json` 取链接）
 - **VIP / 无版权解锁**：官方取址失败（`-110` 需 VIP / 404 无版权）或仅给 30s 试听时，
@@ -95,7 +95,7 @@ ncm pl add 123456 -p 我喜欢的音乐    # 歌单加歌（pl create/delete/ren
 ncm like 123456                     # 收藏到红心歌单（--unlike 取消）
 ncm sign                            # 每日签到（+4 经验，--web 网页端 +1）
 ncm info comment 27536479                # 歌曲热门评论（可匿名）
-ncm fm get -n 10                    # 私人FM 拉一批（fm like/trash/skip 操作）
+ncm recommend -t fm               # 私人FM 拉一批（播放中 t 踩 / l 红心）
 ncm info subs                            # 收藏的专辑 + 歌手（-t album 只看一类）
 ncm info cloud -n 30                     # 云盘歌曲列表（--offset 翻页）
 ncm info mv 5432915 --play               # MV 详情并交给 mpv 播放
