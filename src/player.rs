@@ -78,6 +78,11 @@ pub static QUICK_REQS: std::sync::Mutex<Vec<(Quick, u64, String)>> =
 /// 用户经 q/Ctrl+C 主动退出播放：置位后 mpv 退出不再自动重试（异常退出才重试）
 pub static USER_QUIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// nav 变更唤醒：key_reader push 目标位后立即通知 guard 消费，免等 2s 轮询
+///（否则反馈「下一曲」秒出、实际切曲延迟 2~4s，用户以为按键无效果）
+pub static NAV_NOTIFY: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(tokio::sync::Notify::new);
+
 /// 终端 raw 模式守卫：播放期关掉内核回显与规范模式（字符不再被回显、无需等回车），
 /// ISIG 一并关（Ctrl+C 作为字节交给键盘接管走优雅退出，Drop 恢复 termios）；
 /// Drop（含 panic 路径）恢复原设置
@@ -209,6 +214,7 @@ pub fn spawn_key_reader(
                             nav.lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .push_back((p - 1) as usize);
+                            NAV_NOTIFY.notify_one();
                             feedback("◀ 回退");
                         }
                         // 队首/位置未知：交回 mpv 默认行为
@@ -232,6 +238,7 @@ pub fn spawn_key_reader(
                             nav.lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .push_back((p + 1) as usize);
+                            NAV_NOTIFY.notify_one();
                             feedback("▶ 下一曲");
                         }
                         // 队尾/位置未知：交回 mpv 默认行为（不回卷）

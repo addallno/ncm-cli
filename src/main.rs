@@ -4281,7 +4281,11 @@ async fn guard_loop(
     let mut desynced = false; // remove 复验失败：残影项致索引漂移，短路后续换链待对账
     let mut unclass_toasted = false; // 顺序/URL 不一致提示去抖（对齐恢复后可再提示）
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // 2s 常规轮询；nav push 唤醒立即消费（否则反馈秒出、切曲等 2~4s）
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            _ = player::NAV_NOTIFY.notified() => {}
+        }
         // 先消费快捷请求：不依赖 mpv 状态——空闲(pos=-1)/IPC 瞬时失败/即将退出
         // 时按键意图也照常完成（在状态门之前，否则会被 continue 跳过静默丢失）
         dispatch_quick_reqs(&dl_ncm, &dl_dir, &quality, &quick, &liked);
