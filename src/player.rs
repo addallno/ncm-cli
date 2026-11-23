@@ -242,12 +242,10 @@ pub fn spawn_key_reader(
                     }
                 }
                 b'9' | b'0' | b'*' | b'/' => {
-                    // 与 mpv 默认一致：9/`/` 减、0/`*` 加；拦截统一给 toast
-                    // （转发时 mpv 改了音量但 ncm 无感知，`*` 无反馈的根因）
+                    // 与 mpv 默认一致：9/`/` 减、0/`*` 加；只发 IPC 不自报，
+                    // 音量 toast 由事件循环 observe volume 统一出口（防双 toast）
                     let step = if b == b'9' || b == b'/' { -2 } else { 2 };
-                    if let Some(v) = ipc_add_volume(&sock, step).await {
-                        feedback(format!("♪ 音量 {v:.0}%"));
-                    }
+                    let _ = ipc_add_volume(&sock, step).await;
                 }
                 b'?' => {
                     // 完整键位帮助：清底行后打到滚动区，随后 overlay 重画恢复底行
@@ -673,7 +671,17 @@ async fn overlay_loop(
         }
     };
     let (read, mut write) = stream.into_split();
-    for (id, prop) in [(1, "time-pos"), (2, "playlist-pos"), (3, "duration")] {
+    for (id, prop) in [
+        (1, "time-pos"),
+        (2, "playlist-pos"),
+        (3, "duration"),
+        // 播放器状态属性：mpv 侧变化（[] { } 0/9 * f m 等原生键、脚本）经
+        // property-change 统一 toast——ncm 不再靠自己按键推断状态
+        (4, "speed"),
+        (5, "volume"),
+        (6, "mute"),
+        (7, "fullscreen"),
+    ] {
         let cmd = format!("{{\"command\":[\"observe_property\",{id},\"{prop}\"]}}\n");
         write.write_all(cmd.as_bytes()).await?;
     }
@@ -694,6 +702,11 @@ async fn overlay_loop(
     // reset_seen=time-pos 已归零；pending_pos=已见 pos 变化待确认。
     let mut pending_pos: Option<usize> = None;
     let mut reset_seen = false;
+    // 播放器状态属性前值：observe 首推只记录不 toast，其后 diff 到变化才提示
+    let mut prev_speed: Option<f64> = None;
+    let mut prev_volume: Option<f64> = None;
+    let mut prev_mute: Option<bool> = None;
+    let mut prev_full: Option<bool> = None;
     // 补取去抖记录（切曲/每秒事件共用，防同曲 6s 内重复请求）
     let attempts: BackfillAttempts = std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
     // 换曲应用：重置对账/底行状态、后台补取、歌名行进滚动历史、重画状态栏
@@ -867,6 +880,48 @@ async fn overlay_loop(
                         liked,
                         disp,
                     );
+                }
+                Some("speed") => {
+                    // 倍速变化（[] { } mpv 原生键、脚本）：diff 到变化才 toast，首推只记录
+                    if let Some(v) = ev["data"].as_f64() {
+                        if prev_speed.is_some_and(|p| (p - v).abs() > 0.01) {
+                            toast(&format!("倍速 {v}×"));
+                        }
+                        prev_speed = Some(v);
+                    } else {
+                        prev_speed = None;
+                    }
+                }
+                Some("volume") => {
+                    // 音量变化（9/0/* mpv 原生键与 ncm 拦截共用此出口，防双 toast）
+                    if let Some(v) = ev["data"].as_f64() {
+                        if prev_volume.is_some_and(|p| (p - v).abs() > 0.5) {
+                            toast(&format!("♪ 音量 {v:.0}%"));
+                        }
+                        prev_volume = Some(v);
+                    } else {
+                        prev_volume = None;
+                    }
+                }
+                Some("mute") => {
+                    if let Some(m) = ev["data"].as_bool() {
+                        if prev_mute.is_some_and(|p| p != m) {
+                            toast(if m { "静音" } else { "取消静音" });
+                        }
+                        prev_mute = Some(m);
+                    } else {
+                        prev_mute = None;
+                    }
+                }
+                Some("fullscreen") => {
+                    if let Some(f) = ev["data"].as_bool() {
+                        if prev_full.is_some_and(|p| p != f) {
+                            toast(if f { "全屏" } else { "退出全屏" });
+                        }
+                        prev_full = Some(f);
+                    } else {
+                        prev_full = None;
+                    }
                 }
                 _ => {}
             }

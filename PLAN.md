@@ -43,3 +43,14 @@
 - breaking 范围仅 `ncm fm` 子命令；`recommend -t fm`、`play --roam` 不受影响。
 - 场景模式 SCENE_RCMD 的 subMode 取值未穷举——scene 透传 config，空则不传。
 - UI 小项 b/c/d（process line / download toast / 存储目录显示）不在本计划，另行处理。
+
+---
+
+# 后续任务队列（PLAN 主任务已完成于 b423c09）
+
+1. **toast 状态源改读 mpv IPC**（用户 m0120）：observe speed/volume/mute/fullscreen → property-change 统一 toast（`[]`/`{ }` 倍速、音量、全屏、静音变化都显示）；key_reader 音量拦截去掉自 toast 改由 observe 统一；x/v 等 mpv 原生键保持转发。进行中。
+2. **CI 自动推二进制到远端**（用户 m0146）：「like fqdt repo, on actions auto push the binary to remote」——参照 fqdt `.github/workflows/build.yml` release job（ssh/scp → 47.95.13.125:48022，deploy key 走 GH secret），tag v* 时自动推 aarch64 二进制。待做。
+3. **`ncm version` 子命令**：已完成（b423c09 后本批，输出 `ncm <版本>`，section 归 default）。
+4. **UI b/c/d**：b 多处 process line/spinner 不显示；c 播放中按 d 改 status bar/toast 不用 ncm download 同款消息；d download 完成后显示存储目录。
+5. **CONFIG-INI.md**：用户稍后更新，到时重看。
+6. **0.4.0 发版拍板**：含 `ncm fm` 删除 breaking + FM 模式 + version 子命令；发版时走新 CI 自动部署。

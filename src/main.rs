@@ -169,6 +169,8 @@ enum Commands {
         /// 目标 shell
         shell: clap_complete::Shell,
     },
+    /// 显示版本号
+    Version,
     /// 每日签到（需登录；移动端 +4 经验）
     Sign {
         /// 网页端签到（+1 经验；默认移动端 +4）
@@ -3286,6 +3288,10 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Version) => {
+            println!("ncm {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
         Some(Commands::Sign { web }) => {
             let _sp = ui::Spinner::start("签到中…");
             let ncm = Ncm::with_cookie(auth.as_deref())?;
@@ -4853,6 +4859,7 @@ mod cli_tests {
             (vec!["ncm", "info", "subs"], "list"),
             (vec!["ncm", "info", "cloud"], "list"),
             (vec!["ncm", "whoami"], "default"),
+            (vec!["ncm", "version"], "default"),
         ];
         for (args, want) in cases {
             let cli = Cli::try_parse_from(args.clone()).expect("应解析成功");

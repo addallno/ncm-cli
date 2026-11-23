@@ -84,6 +84,20 @@ jobs:
           done
           cd dist && for f in *; do case "$f" in *.exe) ;; *) gzip -kf "$f";; esac; done
           ls -la
+      # aarch64 musl 静态二进制 scp 到远端 Termux（与 fqdt 同机同 key）
+      - name: Deploy（aarch64 → 远端 ~/cmd/ncm）
+        env:
+          SSH_KEY: ${{ secrets.FQDT_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          SSH_OPTS="-i ~/.ssh/id_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p 48022"
+          R=u0_a207@47.95.13.125
+          ssh $SSH_OPTS $R 'mkdir -p ~/cmd && chmod 700 ~/cmd'
+          scp -i ~/.ssh/id_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -P 48022 \
+            dist/ncm-linux-aarch64 $R:~/cmd/ncm
+          ssh $SSH_OPTS $R 'chmod 755 ~/cmd/ncm && ~/cmd/ncm --version'
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
