@@ -474,6 +474,17 @@ fn quality_br(q: &str) -> Result<u64> {
     }
 }
 
+/// 预估用均码（非请求峰值）：lossless/hires 实走第三方 FLAC，均码约 0.9Mbps
+/// （m0112 实测 hires 预估 103.7MB vs 实际 47.8MB，峰值 1.92M 虚高约 2.2×）
+fn quality_est_br(q: &str) -> u64 {
+    match q {
+        "standard" => 128_000,
+        "exhigh" => 320_000,
+        "lossless" | "hires" => 900_000,
+        _ => 900_000,
+    }
+}
+
 fn normalize_quality(q: &str) -> &'static str {
     match q {
         "lossless" => "lossless",
@@ -1118,7 +1129,7 @@ async fn run_batch(
         && config::download_confirm()
     {
         let total_ms: u64 = songs.iter().map(|s| Track::from_json(s).duration_ms).sum();
-        let br = quality_br(opts.quality.as_deref().unwrap_or("lossless"))?;
+        let br = quality_est_br(opts.quality.as_deref().unwrap_or("lossless"));
         let est = (total_ms as f64 / 1000.0) * br as f64 / 8.0;
         ui::info(&format!(
             "将下载 {} 首 · 总时长 {} · 音质 {} · 预估大小 {}",
