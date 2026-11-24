@@ -215,6 +215,7 @@ pub fn spawn_key_reader(
                                 .unwrap_or_else(|e| e.into_inner())
                                 .push_back((p - 1) as usize);
                             NAV_NOTIFY.notify_one();
+                            crate::log::info("key", &format!("◀ 回退 {p}→{}", p - 1));
                             feedback("◀ 回退");
                         }
                         // 队首/位置未知：交回 mpv 默认行为
@@ -239,6 +240,7 @@ pub fn spawn_key_reader(
                                 .unwrap_or_else(|e| e.into_inner())
                                 .push_back((p + 1) as usize);
                             NAV_NOTIFY.notify_one();
+                            crate::log::info("key", &format!("▶ 下一曲 {p}→{}", p + 1));
                             feedback("▶ 下一曲");
                         }
                         // 队尾/位置未知：交回 mpv 默认行为（不回卷）
@@ -348,6 +350,7 @@ pub fn cleanup_socket(path: &Path) {
 /// 播放期提示：overlay 活着时走第二行 FEEDBACK（2s 自动消失不留痕，
 /// 与按键反馈同位同风格）；overlay 停了才退回「清底行+滚动区打印」老路径
 pub fn toast(msg: &str) {
+    crate::log::info("toast", msg); // 单点：所有播放期提示（含 mpv stderr 过滤行）进日志
     use std::io::IsTerminal;
     if !std::io::stderr().is_terminal() {
         return;

@@ -4,6 +4,7 @@ mod config;
 mod crypto;
 mod dns;
 mod download;
+mod log;
 mod lrc;
 mod mirror;
 mod model;
@@ -1617,7 +1618,22 @@ fn report(
     ui::live_clear();
     ui::set_live(false);
     ui::step(&format!("完成 {done} · {}", parts.join(" · ")));
+    log::info("dl", &format!("完成 {done} · {}", parts.join(" · ")));
     if !skipped.is_empty() {
+        // 大批量测试定位用：跳过名单全量入日志（截断前 50 防爆行）
+        log::warn(
+            "dl",
+            &format!(
+                "跳过 {} 首：{:?}{}",
+                skipped.len(),
+                &skipped[..skipped.len().min(50)],
+                if skipped.len() > 50 {
+                    " …(截断)"
+                } else {
+                    ""
+                }
+            ),
+        );
         if opts.dry_run {
             ui::info(&format!(
                 "跳过 {}: {}",
@@ -1634,6 +1650,20 @@ fn report(
         }
     }
     if !failed.is_empty() {
+        // 失败名单进 ERROR 级（滚动区上表会滚走，日志才是可回查的全量证据）
+        log::error(
+            "dl",
+            &format!(
+                "失败 {} 首：{:?}{}",
+                failed.len(),
+                &failed[..failed.len().min(50)],
+                if failed.len() > 50 {
+                    " …(截断)"
+                } else {
+                    ""
+                }
+            ),
+        );
         if opts.dry_run {
             ui::fail(&format!(
                 "失败 {}: {}",
@@ -1679,10 +1709,13 @@ async fn detect_vip_profile() -> Option<String> {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    log::init(); // 运行日志尽早打开：后续所有 toast/对账/IPC 事件都入 ncm.run.log
     let code = match run(cli).await {
         Ok(c) => c,
         Err(e) => {
-            ui::fail(&format!("{e:#}"));
+            let msg = format!("{e:#}");
+            log::error("main", &msg); // 顶层失败也留痕（ui::fail 只进滚动区）
+            ui::fail(&msg);
             1
         }
     };
@@ -2766,7 +2799,9 @@ async fn run(cli: Cli) -> Result<i32> {
             if !player_args.is_empty() {
                 if is_ffplay {
                     ui::info("透传参数仅支持 mpv（ffplay 选项体系不同），已忽略");
+                    log::warn("mpv", &format!("ffplay 不兼容，忽略透传 {player_args:?}"));
                 } else {
+                    log::info("mpv", &format!("透传参数 {player_args:?}"));
                     args.extend(player_args);
                 }
             }
@@ -2869,6 +2904,14 @@ async fn run(cli: Cli) -> Result<i32> {
                 // 异常退出自动重试续播（共 3 次尝试）——仅 mpv+IPC 场景（guard 在跑、
                 // last_played 有观测）；用户 q/Ctrl+C 退出或正常播完不重试
                 let can_retry = cfg!(unix) && is_mpv;
+                log::info(
+                    "mpv",
+                    &format!(
+                        "spawn prog={prog} 参数{}项 locations={}",
+                        args.len(),
+                        locations.len()
+                    ),
+                );
                 let wanted_flac_retry = matches!(quality.as_str(), "lossless" | "hires");
                 let mut attempt = 1u32;
                 let mut cur_locations = locations;
@@ -4104,53 +4147,37 @@ enum RefreshResult {
     Desync,
 }
 
-/// 两指针分类（对账自愈纯逻辑）：mpv playlist 与内部 srcs 逐项比对——
-/// 对得上双双前进；mpv 多项记残影（phantoms，mpv 坐标）、srcs 多项记待补
-/// （missing，目标坐标）；URL 对不上又非增非缺 → Err（无法归类，放弃本轮）
-fn classify_playlist_diff(
-    files: &[String],
-    expect: &[String],
-) -> Result<(Vec<usize>, Vec<usize>), ()> {
+/// 集合差分类（对账 v2）：mpv files 与内部 expect 的多重集合差，O(n) HashMap。
+/// 总是可判定（无 Err）——旧两指针以「URL 文本全等」逐位比对，URL 每次刷新都变，
+/// 差异被误判成残影/缺项（没错却换）或归类失败（unclass 静默放行/误报），已废除。
+/// phantoms = files 多出项（按 mpv 出现位置）；missing = expect 缺项（按期望位置）。
+/// 重复 URL 用计数正确处理；顺序错位但 count 相等时输出为空——guard 结构操作
+///（insert/remove/add）必然改 count，纯换序不会自发产生，count 守门即结构守门，
+/// 差为空 = 信任对齐（宁不修不乱，与旧 Err 放行同边界但不再误报）。
+fn playlist_set_diff(files: &[String], expect: &[String]) -> (Vec<usize>, Vec<usize>) {
     let mut phantoms: Vec<usize> = Vec::new();
+    let mut want: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+    for e in expect {
+        *want.entry(e.as_str()).or_insert(0) += 1;
+    }
+    for (i, f) in files.iter().enumerate() {
+        match want.get_mut(f.as_str()) {
+            Some(c) if *c > 0 => *c -= 1,
+            _ => phantoms.push(i),
+        }
+    }
     let mut missing: Vec<usize> = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < files.len() && j < expect.len() {
-        if files[i] == expect[j] {
-            i += 1;
-            j += 1;
-        } else if files.get(i + 1) == Some(&expect[j]) {
-            // 存在性守卫：files[i] 的 URL 也出现在内部队列 → 是顺序错位而非残影，
-            // 误删会把正确曲目（尤其当前播放项）切掉导致列表连锁错位 → 放行不修
-            if expect.contains(&files[i]) {
-                return Err(());
-            }
-            phantoms.push(i); // 下一项能接上 → files[i] 是真残影
-            i += 1;
-        } else if files.get(i) == expect.get(j + 1) {
-            // 对称守卫：expect[j] 已在 mpv 列表中 → 顺序错位而非缺项，放行
-            if files.contains(&expect[j]) {
-                return Err(());
-            }
-            missing.push(j); // mpv 侧能接上下一项 → expect[j] 是真缺失
-            j += 1;
-        } else {
-            return Err(());
+    let mut have: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+    for f in files {
+        *have.entry(f.as_str()).or_insert(0) += 1;
+    }
+    for (j, e) in expect.iter().enumerate() {
+        match have.get_mut(e.as_str()) {
+            Some(c) if *c > 0 => *c -= 1,
+            _ => missing.push(j),
         }
     }
-    // 尾部多余/缺失同样过守卫（重复 URL 时尾部也可能是错位假象）
-    for (k, f) in files.iter().enumerate().skip(i) {
-        if expect.contains(f) {
-            return Err(());
-        }
-        phantoms.push(k);
-    }
-    for (k, e) in expect.iter().enumerate().skip(j) {
-        if files.contains(e) {
-            return Err(());
-        }
-        missing.push(k);
-    }
-    Ok((phantoms, missing))
+    (phantoms, missing)
 }
 
 /// 刷新单个队列槽位的在线直链（insert-at 原位替换，索引保持对齐）；
@@ -4278,8 +4305,15 @@ async fn guard_loop(
     let mut last_refresh = tokio::time::Instant::now() - std::time::Duration::from_secs(60);
     let mut last_back = tokio::time::Instant::now(); // 播放中前 3 首回退预热计时
     let mut refresh_supported = true; // mpv 不支持 insert-at 时关闭暂停刷新（提示一次）
-    let mut desynced = false; // remove 复验失败：残影项致索引漂移，短路后续换链待对账
-    let mut unclass_toasted = false; // 顺序/URL 不一致提示去抖（对齐恢复后可再提示）
+    let mut desynced = false; // 队列漂移（count 不等/修复失败）：短路换链与保鲜，对齐即清
+    let mut repair_fails: u32 = 0; // 连续修复失败计数：>5 转静默（保自愈重试不刷屏）
+    let mut was_aligned = true; // 上轮对齐态：漂移提示只在状态迁移时报一次
+    let mut last_logged_pos: i64 = -2; // 上次入日志的 pos（-2=哨兵）：pos 变化=切曲事件
+                                       // insert-at 能力判定：发送成功但复读长度零变化连续 3 次 = mpv 无此子命令
+                                       //（0.37 回 invalid parameter 且 ipc_send 不读响应，旧版会无限重试刷屏）
+    let mut insert_no_effect: u32 = 0;
+    let mut insert_unsupported = false; // 判定后停止对账重试（refresh_supported 同步关闭保鲜）
+    let mut last_halted_log = tokio::time::Instant::now(); // halted 状态行 60s 去抖
     loop {
         // 2s 常规轮询；nav push 唤醒立即消费（否则反馈秒出、切曲等 2~4s）
         tokio::select! {
@@ -4299,8 +4333,12 @@ async fn guard_loop(
             fails += 1;
             if fails >= 3 {
                 // mpv 已退出：补消费退出窗口内的按键（任务不依赖 mpv，join 收尾等到）
+                log::info("guard", "连续 3 次 IPC 无响应，guard 退出（mpv 已退出）");
                 dispatch_quick_reqs(&dl_ncm, &dl_dir, &quality, &quick, &liked);
                 return;
+            }
+            if fails == 1 {
+                log::warn("guard", "pos/count 拉取失败（mpv 未就绪或抖动）");
             }
             continue;
         };
@@ -4310,118 +4348,200 @@ async fn guard_loop(
         };
         last_played.store(pos as usize, std::sync::atomic::Ordering::Relaxed);
         let mut count = count_v.as_u64().unwrap_or(0);
-        // 对账自愈：playlist-count 与 srcs 不等（残影/缺项 → 索引漂移、显示名错位）
-        // 或上轮 Desync 未清 → 拉 mpv playlist 与 srcs 逐项对齐；正常轮零额外 IPC
+        // pos 变化 = 切曲事件（大规模播放测试看切曲序列/索引漂移的直接证据）
+        if pos as i64 != last_logged_pos {
+            last_logged_pos = pos as i64;
+            log::info("guard", &format!("pos → {pos}（count={count}）"));
+        }
         let srcs_len = srcs.read().unwrap_or_else(|e| e.into_inner()).len() as u64;
-        // 对账自愈：每轮拉 mpv playlist 与 srcs 两指针比对——count 不等（残影/缺项）与
-        // 等数顺序/URL 错位一并修；修复后复读 playlist 全等验证，不以 ipc_send 送达为准则
-        //（ipc_send 只管发，旧 mpv 拒 insert-at 时会假修复循环打成功提示）
-        req_id += 1;
-        // aligned=已对齐或修好；unclass=两指针无法归类（多为 URL 文本差异，非错位）
-        let (aligned, unclass) = if let Some(pl) = player::ipc_get(&sock, "playlist", req_id).await
-        {
-            let files: Vec<String> = pl
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|e| e["filename"].as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let expect: Vec<String> = srcs
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .map(|s| s.loc())
-                .collect();
-            // 分类抽为纯函数 classify_playlist_diff（误判场景有单测覆盖）
-            match classify_playlist_diff(&files, &expect) {
-                Err(_) => (false, true), // 无法归类：放弃本轮，勿雪上加霜
-                Ok((phantoms, missing)) => {
+        // 对账 v2：count 守门——guard 是唯一结构写者（insert/remove/add 必然改 count，
+        // 纯换序不会自发产生），count == srcs_len 即结构对齐，跳过全量拉取
+        //（常态轮零额外 IPC，< > 跳转亚秒响应）；count 不等 = 残影/缺项真漂移，
+        // 拉全量做集合差修复（playlist_set_diff 总可判定，消除旧两指针
+        //「URL 差异无法归类」的静默放行与误报）；toast 只在状态迁移时报
+        if count != srcs_len {
+            if was_aligned {
+                player::toast(&format!(
+                    "检测到队列漂移（mpv {count} vs 内部 {srcs_len}），修复中…"
+                ));
+            }
+            if insert_unsupported {
+                // 已判定 mpv 无法补缺项：停止重试防刷屏（旧版无限重试之弊），
+                // 60s 留一行状态供大规模测试日志回查
+                if last_halted_log.elapsed() >= std::time::Duration::from_secs(60) {
+                    last_halted_log = tokio::time::Instant::now();
+                    log::warn(
+                        "reconcile",
+                        &format!("halted：mpv {count} vs 内部 {srcs_len}，缺项待补但无 insert-at"),
+                    );
+                }
+            } else {
+                req_id += 1;
+                let mut repaired = false;
+                if let Some(pl) = player::ipc_get(&sock, "playlist", req_id).await {
+                    let files: Vec<String> = pl
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|e| e["filename"].as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let expect: Vec<String> = srcs
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .map(|s| s.loc())
+                        .collect();
+                    let len_before = files.len(); // insert 前长度：verify 后零变化 = insert 毫无效果
+                    let (phantoms, missing) = playlist_set_diff(&files, &expect);
+                    let (n_del, n_add) = (phantoms.len(), missing.len());
+                    // 对账详情进日志（大规模测试定位用）：残影/缺项位置截断前 30 项防爆行
+                    log::info(
+                        "reconcile",
+                        &format!(
+                            "repair files={} expect={} del={:?} add={:?}{}",
+                            files.len(),
+                            expect.len(),
+                            &phantoms[..n_del.min(30)],
+                            &missing[..n_add.min(30)],
+                            if n_del > 30 || n_add > 30 {
+                                " …(截断)"
+                            } else {
+                                ""
+                            }
+                        ),
+                    );
+                    // 先降序删残影（原 mpv 坐标），再按目标位升序补缺项；
+                    // 列表操作会平移当前曲的 mpv 坐标（音频不换）：同步校正
+                    // last_played，防重试 drain 截错位（usize::MAX=未知不校正）
                     let mut ok = true;
-                    let did = !phantoms.is_empty() || !missing.is_empty();
-                    if did {
-                        // 先降序删残影（原 mpv 坐标），再按目标位升序补缺项；
-                        // 列表操作会平移当前曲的 mpv 坐标（音频不换）：同步校正
-                        // last_played，防重试 drain 截错位（usize::MAX=未知不校正）
-                        for p in phantoms.into_iter().rev() {
-                            let rm =
-                                serde_json::json!({"command": ["playlist-remove", p]}).to_string();
-                            if player::ipc_send(&sock, &rm).await.is_err() {
+                    for p in phantoms.into_iter().rev() {
+                        let rm = serde_json::json!({"command": ["playlist-remove", p]}).to_string();
+                        if player::ipc_send(&sock, &rm).await.is_err() {
+                            log::warn("reconcile", &format!("playlist-remove 发送失败 idx={p}"));
+                            ok = false;
+                            break;
+                        }
+                        let lp = last_played.load(std::sync::atomic::Ordering::Relaxed);
+                        if lp != usize::MAX && p < lp {
+                            last_played.store(lp - 1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    if ok {
+                        for m in missing {
+                            let ins =
+                            serde_json::json!({"command": ["loadfile", expect[m], "insert-at", m]})
+                                .to_string();
+                            if player::ipc_send(&sock, &ins).await.is_err() {
+                                // mpv 0.37 拒 insert-at（invalid parameter）走这里吗——
+                                // ipc_send 只管发不读响应，被拒要靠 verify fail 行定位
+                                log::warn(
+                                    "reconcile",
+                                    &format!("loadfile insert-at 发送失败 idx={m}"),
+                                );
                                 ok = false;
                                 break;
                             }
                             let lp = last_played.load(std::sync::atomic::Ordering::Relaxed);
-                            if lp != usize::MAX && p < lp {
-                                last_played.store(lp - 1, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                        if ok {
-                            for m in missing {
-                                let ins = serde_json::json!({
-                                    "command": ["loadfile", expect[m], "insert-at", m]
-                                })
-                                .to_string();
-                                if player::ipc_send(&sock, &ins).await.is_err() {
-                                    ok = false;
-                                    break;
-                                }
-                                let lp = last_played.load(std::sync::atomic::Ordering::Relaxed);
-                                if lp != usize::MAX && m <= lp {
-                                    last_played.store(lp + 1, std::sync::atomic::Ordering::Relaxed);
-                                }
-                            }
-                        }
-                        if ok {
-                            // 复读验证：新 playlist 与 srcs 全等才算修好（防假修复成功提示）
-                            req_id += 1;
-                            let verified = match player::ipc_get(&sock, "playlist", req_id).await {
-                                Some(pl2) => {
-                                    let v: Vec<String> = pl2
-                                        .as_array()
-                                        .map(|a| {
-                                            a.iter()
-                                                .filter_map(|e| {
-                                                    e["filename"].as_str().map(String::from)
-                                                })
-                                                .collect()
-                                        })
-                                        .unwrap_or_default();
-                                    v == expect
-                                }
-                                None => false,
-                            };
-                            ok = verified;
-                            if verified {
-                                player::toast("✓ 队列已对账修复");
+                            if lp != usize::MAX && m <= lp {
+                                last_played.store(lp + 1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     }
-                    (ok, false)
+                    if ok {
+                        // 复读验证：新 playlist 与 srcs 全等才算修好（防假修复成功提示）
+                        req_id += 1;
+                        let v: Vec<String> = match player::ipc_get(&sock, "playlist", req_id).await
+                        {
+                            Some(pl2) => pl2
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|e| e["filename"].as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            None => {
+                                log::warn("reconcile", "复读验证拉取失败（IPC），按未修复计");
+                                Vec::new()
+                            }
+                        };
+                        if v == expect {
+                            repaired = true;
+                            repair_fails = 0;
+                            insert_no_effect = 0;
+                            count = srcs_len; // 结构已恢复：同轮同步，后续换链/保鲜即刻放行
+                            desynced = false;
+                            log::info("reconcile", "verify ok：复读全等");
+                            player::toast(&format!("✓ 队列已修复（删{n_del}补{n_add}）"));
+                        } else {
+                            // 验证失败详情（定位 insert-at 被拒/加载竞态等）：
+                            // 长度差 + 首个分歧位置 + 两侧前 3 项（500 首也不爆行）
+                            let nd = v
+                                .iter()
+                                .zip(expect.iter())
+                                .position(|(a, b)| a != b)
+                                .unwrap_or(v.len().min(expect.len()));
+                            log::warn(
+                            "reconcile",
+                            &format!(
+                                "verify fail: got {} want {} · first diff @{} · got[..]={:?} want[..]={:?}",
+                                v.len(),
+                                expect.len(),
+                                nd,
+                                &v[..v.len().min(3)],
+                                &expect[..expect.len().min(3)]
+                            ),
+                        );
+                            // 能力判定：发送成功但复读长度零变化 = insert-at 被静默拒绝
+                            //（mpv <0.38 回 invalid parameter，ipc_send 不读响应）。
+                            // 连续 3 次 → 与 refresh_entry 共享的 refresh_supported 关闭，
+                            // 此后停止对账重试与链接保鲜，明确告知而非无限刷失败
+                            if v.len() == len_before {
+                                insert_no_effect += 1;
+                            } else {
+                                insert_no_effect = 0; // 长度有变化=只是加载竞态，不判死
+                            }
+                            if insert_no_effect >= 3 && refresh_supported {
+                                refresh_supported = false;
+                                insert_unsupported = true;
+                                last_halted_log = tokio::time::Instant::now();
+                                log::error(
+                                "reconcile",
+                                "判定：mpv 无 insert-at（需 ≥0.38），缺项无法自动补——停止对账重试与链接保鲜",
+                            );
+                                player::toast("mpv 版本过旧（无 insert-at），缺项无法自动补——升级 mpv 或重启播放");
+                            }
+                        }
+                    }
+                    if !repaired {
+                        repair_fails += 1;
+                        desynced = true;
+                        // 连续失败 >5 次转静默：保留自愈重试但不刷屏（旧版无限报错之弊）
+                        if repair_fails <= 5 {
+                            player::toast(&format!(
+                                "× 队列修复失败（第{repair_fails}次），稍后重试"
+                            ));
+                        }
+                        // 静默期也留痕（否则第 6 次起日志无迹可查）
+                        log::warn(
+                            "reconcile",
+                            &format!("repair fail #{repair_fails}（ok={ok}）"),
+                        );
+                    }
+                } else {
+                    // playlist 拉取失败（IPC/网络瞬断）：静默下轮重试
+                    log::warn("reconcile", "playlist 拉取失败（IPC），下轮重试");
+                    desynced = true;
                 }
-            }
+            } // end !insert_unsupported
+            was_aligned = count == srcs_len;
         } else {
-            (false, false) // playlist 拉取失败：按未对账处理，下轮重试
-        };
-        if aligned {
-            count = srcs_len;
+            // 对齐：清修复计数与漂移态（修复成功后的下轮也走这里复位）
+            repair_fails = 0;
             desynced = false;
-            unclass_toasted = false; // 已对齐：下次不一致可再提示
-        } else if unclass && count == srcs_len {
-            desynced = false; // 长度一致但逐项比不了（URL 文本差异/顺序错位）：放行换链，不误报
-                              // 「检查不到」补检测：放行不再静默，提示一次（对齐恢复后可再提示）
-            if !unclass_toasted {
-                unclass_toasted = true;
-                player::toast("曲目顺序/链接与内部队列不一致，已跳过修复");
-            }
-        } else if !desynced {
-            desynced = true; // 已 warn 过则静默重试
-            let detail = if count != srcs_len {
-                format!("mpv {count} vs 内部 {srcs_len}")
-            } else {
-                "顺序与内部队列不一致".to_string()
-            };
-            player::toast(&format!("队列不同步（{detail}），暂停换链"));
+            was_aligned = true;
         }
         // 暂停中：周期性（≥60s）重取已入队的在线 URL 并经 IPC 替换——网易直链
         // ~10min 过期，暂停超时恢复播放会 403；本地文件与当前曲（已在解码器）不动
@@ -4440,6 +4560,10 @@ async fn guard_loop(
         for abs in navs {
             let cur = pos as usize;
             let in_window = abs.abs_diff(cur) <= 5;
+            log::info(
+                "nav",
+                &format!("goto {abs}（当前 {cur}，窗口内 {in_window}）"),
+            );
             let (id, old) = {
                 let q = queue.read().unwrap_or_else(|e| e.into_inner());
                 let s = srcs.read().unwrap_or_else(|e| e.into_inner());
@@ -4477,7 +4601,9 @@ async fn guard_loop(
             }
             // 换新失败也照常定位：旧链接未必已到过期时刻，能放就放
             let cmd = serde_json::json!({"command": ["playlist-play-index", abs]}).to_string();
-            let _ = player::ipc_send(&sock, &cmd).await;
+            if player::ipc_send(&sock, &cmd).await.is_err() {
+                log::warn("nav", &format!("playlist-play-index {abs} 发送失败"));
+            }
         }
         // 双向保鲜：播放中每 60s 刷当前曲前/后各 5 首的直链（跳过当前曲——
         // 已在解码器不动），< / > 在窗口内随时可跳且链接必新鲜（60s 刷过、
@@ -4777,70 +4903,49 @@ mod cli_tests {
         v.iter().map(|x| x.to_string()).collect()
     }
 
-    /// 真残影/真缺项：mpv 多尾项、srcs 缺尾项 → 正常归类
+    /// 真残影/真缺项：mpv 多尾项、srcs 缺尾项 → 集合差正常给出位置
     #[test]
-    fn classify_tail_phantom_and_missing() {
-        let (p, m) = classify_playlist_diff(&s(&["a", "b", "x"]), &s(&["a", "b"])).unwrap();
+    fn set_diff_tail_phantom_and_missing() {
+        let (p, m) = playlist_set_diff(&s(&["a", "b", "x"]), &s(&["a", "b"]));
         assert_eq!(p, vec![2]);
         assert!(m.is_empty());
-        let (p, m) = classify_playlist_diff(&s(&["a", "b"]), &s(&["a", "b", "c"])).unwrap();
+        let (p, m) = playlist_set_diff(&s(&["a", "b"]), &s(&["a", "b", "c"]));
         assert!(p.is_empty());
         assert_eq!(m, vec![2]);
         // 全等：无操作
-        let (p, m) = classify_playlist_diff(&s(&["a", "b"]), &s(&["a", "b"])).unwrap();
+        let (p, m) = playlist_set_diff(&s(&["a", "b"]), &s(&["a", "b"]));
         assert!(p.is_empty() && m.is_empty());
+        // 中段残影+缺项混合：删/补位置各自正确
+        let (p, m) = playlist_set_diff(&s(&["a", "x", "b"]), &s(&["a", "b", "c"]));
+        assert_eq!(p, vec![1]);
+        assert_eq!(m, vec![2]);
     }
 
-    /// 顺序交换（相邻错位）：C 是正确曲目只是位置不对，不得判残影删除
-    ///（误删当前播放项 = 用户症状「正确的音乐被切成下一首」）
+    /// 顺序交换（count 相等）：集合差为空 → 不修（宁不修不乱）。
+    /// 旧两指针此场景 Err 放行且伴随误报「队列不同步」（用户症状④），v2 静默信任。
     #[test]
-    fn classify_swap_must_not_delete_correct_track() {
-        // mpv=[a,c,b,d] vs 内部=[a,b,c,d]：c/b 交换
-        let r = classify_playlist_diff(&s(&["a", "c", "b", "d"]), &s(&["a", "b", "c", "d"]));
-        match r {
-            Err(()) => {} // 放行不修 = 正确（宁不修不乱）
-            Ok((p, m)) => {
-                // 若归类，则被删/补的项必须不在对方列表中（真残影/真缺项）
-                let expect = s(&["a", "b", "c", "d"]);
-                let files = s(&["a", "c", "b", "d"]);
-                for i in &p {
-                    assert!(
-                        !expect.contains(&files[*i]),
-                        "files[{}] = {} 是正确曲目，被判残影会误删切歌",
-                        i,
-                        files[*i]
-                    );
-                }
-                for j in &m {
-                    assert!(!files.contains(&expect[*j]), "expect[{}] 重复缺失", j);
-                }
-            }
-        }
+    fn set_diff_swap_is_not_touched() {
+        let (p, m) = playlist_set_diff(&s(&["a", "c", "b", "d"]), &s(&["a", "b", "c", "d"]));
+        assert!(
+            p.is_empty() && m.is_empty(),
+            "纯换序 count 相等不得产生修复动作"
+        );
     }
 
-    /// 重复 URL 歧义：同一 URL 出现两次时分类不可靠，不得误删
+    /// 重复 URL：multiset 计数——数量差正确归类，数量相等不误判
     #[test]
-    fn classify_duplicate_url_ambiguity() {
-        // mpv=[a,a,b] vs 内部=[a,b,a]（首项重复）
-        let r = classify_playlist_diff(&s(&["a", "a", "b"]), &s(&["a", "b", "a"]));
-        if let Ok((p, m)) = r {
-            let expect = s(&["a", "b", "a"]);
-            let files = s(&["a", "a", "b"]);
-            for i in &p {
-                assert!(
-                    !expect.contains(&files[*i]),
-                    "重复 URL 的 files[{}] 不得判残影",
-                    i
-                );
-            }
-            for j in &m {
-                assert!(
-                    !files.contains(&expect[*j]) || p.is_empty(),
-                    "重复 URL 场景归类不可靠"
-                );
-            }
-        }
-        // Err 放行同样可接受
+    fn set_diff_duplicate_url_multiset() {
+        // mpv=[a,a,b] vs 内部=[a,b,a]：同集合不同顺序 → 空
+        let (p, m) = playlist_set_diff(&s(&["a", "a", "b"]), &s(&["a", "b", "a"]));
+        assert!(p.is_empty() && m.is_empty());
+        // mpv 多一个 a → phantom 是第二个 a（位置 1）
+        let (p, m) = playlist_set_diff(&s(&["a", "a", "b"]), &s(&["a", "b"]));
+        assert_eq!(p, vec![1]);
+        assert!(m.is_empty());
+        // 内部多一个 a → missing 是期望位置 2 的 a
+        let (p, m) = playlist_set_diff(&s(&["a", "b"]), &s(&["a", "b", "a"]));
+        assert!(p.is_empty());
+        assert_eq!(m, vec![2]);
     }
 
     /// 命令 → 板块映射（决定用哪个 profile 凭据）

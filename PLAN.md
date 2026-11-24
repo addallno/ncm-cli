@@ -54,3 +54,50 @@
 4. **UI b/c/d**：b 多处 process line/spinner 不显示；c 播放中按 d 改 status bar/toast 不用 ncm download 同款消息；d download 完成后显示存储目录。
 5. **CONFIG-INI.md**：用户稍后更新，到时重看。
 6. **0.4.0 发版拍板**：含 `ncm fm` 删除 breaking + FM 模式 + version 子命令；发版时走新 CI 自动部署。
+
+---
+
+# PLAN：对账 v2 重写（m0242）
+
+现行为四症：①没错却静默换（URL 文本当标识误判）②错了报错不修（无法归类短路）
+③错了不吭声（unclass 静默放行）④没错却报错（URL 刷新差异误报）。
+根因 = 用「URL 文本全等 + 两指针 + Err 放行」对账；URL 每次刷新都变，非稳定标识。
+
+## 新思路：count 守门 + 集合差修复（guard 是唯一结构写者）
+
+1. **每轮只读 count**（已有 IPC）：`count == srcs_len` → 对齐，跳过全量（99% 轮零额外 IPC，
+   顺带修性能 #11/#1）；结构操作（insert/remove/add）必然改 count，纯换序不会自发产生 →
+   count 守门即结构守门（信任边界写注释）。
+2. **count 不等才拉全量** → `playlist_set_diff`（multiset 集合差，O(n) HashMap，**总可判定无 Err**）：
+   phantoms=files 多出、missing=expect 缺的；重复 URL 计数正确处理；
+   顺序错位 count 相等 → 差为空 → 不修（宁不修不乱）。
+3. **状态机简化**：删 unclass/unclass_toasted；desynced = 派生（count!=srcs_len 轮首置位，
+   修复成功清零）+ refresh Desync 即时置位保留；repair_fails 计数——失败 ≤5 每次报，
+   ≥6 静默继续试（保自愈不吵屏）。
+4. **toast 只在状态迁移**：进入漂移报一次「检测到漂移修复中」、成功报「✓ 已修复(删x补y)」、
+   失败报「× 修复失败(第n次)」。
+
+## 步骤与验收
+
+1. `playlist_set_diff` 纯函数替换 `classify_playlist_diff` → cargo check
+2. 单测改写（3 个 classify 测试 → set_diff 版：尾部残影/缺项、换序不修、重复 URL multiset）→ cargo test
+3. guard 对账块重写（fast 路径 + 集合差修复 + 迁移 toast + repair_fails）→ cargo check
+4. 三绿 fmt/clippy/test
+5. 行为探针：正常播放 60s 零误报；python 人为 playlist-remove 制造漂移 → 自动修复 + 明确 toast
+6. 中文 commit（与 C1 同批发版）
+
+---
+
+# PLAN：运行日志 ncm.run.log（m0245，100-500 首测试定位问题用）
+
+位置 `~/.config/ncm/ncm.run.log`；格式 `2026-11-24T12:34:56.789Z [INFO ] [tag] msg`（UTC 毫秒）。
+事件驱动、无逐轮心跳；启动 >5MB 归档 `.1`；std Mutex<File> 无新 crate。
+
+1. `src/log.rs`：`init()`（config 目录+归档+启动头）/`info/warn/error(tag,msg)` 纯包装
+   → cargo check
+2. 接线：toast（所有提示的单点，非终端分支也记）、mpv stderr 过滤行、guard 对账
+   （漂移/修复动作 phantom+missing 摘要/复读验证失败详情/失败计数）、IPC Err、
+   nav 关键事件（pos 切换）、mpv 启动参数
+   → cargo check
+3. 单测：行格式纯函数 → 三绿
+4. 探针：跑一轮确认文件生成、事件可读
