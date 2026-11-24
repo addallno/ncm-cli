@@ -467,17 +467,19 @@ impl Ncm {
 
     /// 私人FM/漫游 一批歌曲（播放漫游数据源，元素为标准 song 结构）
     ///
-    /// eapi `/v1/radio/get` 带推歌模式参数（真实 app 同款接口，2024-01 起）：
-    /// `mode` = DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD，`subMode` = 场景子模式（可空），
-    /// `limit` = 单次拉取条数。与裸 GET 相比曲目按模式重新推荐。
+    /// eapi `/v1/radio/get`（真实 app 同款）：
+    /// - `mode` = DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD（2024-01 模式选择，带 limit/subMode）
+    /// - `CLASSIC` = 经典私人FM：同端点不带 mode/limit（等价 weapi 空 body `/v1/radio/get`）
+    ///
+    /// 心动模式是另一条端点 `/playmode/intelligence/list`（需 song/playlist id），不在本函数。
     pub async fn radio_songs(&self, mode: &str, scene: &str, limit: u32) -> Result<Vec<Value>> {
-        let mut biz = serde_json::Map::from_iter([
-            ("e_r".into(), json!("true")),
-            ("mode".into(), json!(mode)),
-            ("limit".into(), json!(limit.to_string())),
-        ]);
-        if !scene.is_empty() {
-            biz.insert("subMode".into(), json!(scene));
+        let mut biz = serde_json::Map::from_iter([("e_r".into(), json!("true"))]);
+        if mode != "CLASSIC" {
+            biz.insert("mode".into(), json!(mode));
+            biz.insert("limit".into(), json!(limit.to_string()));
+            if !scene.is_empty() {
+                biz.insert("subMode".into(), json!(scene));
+            }
         }
         let v = self.post_eapi("/v1/radio/get", biz).await?;
         let code = v["code"].as_i64().unwrap_or(-1);

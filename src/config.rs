@@ -105,13 +105,15 @@ pub fn set(key: &str, value: &str) -> Result<()> {
                 | "FAMILIAR"
                 | "EXPLORE"
                 | "SCENE_RCMD"
+                | "CLASSIC"
                 | "default"
                 | "familiar"
                 | "explore"
                 | "scene_rcmd"
+                | "classic"
         )
     {
-        bail!("fm.mode 只能是 DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD");
+        bail!("fm.mode 只能是 DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD/CLASSIC");
     }
     if key == "fm.limit" {
         let n: u32 = v
@@ -206,7 +208,7 @@ pub fn all_keys() -> &'static [(&'static str, &'static str)] {
         ("mirror", "127.0.0.1:3000,3100"),
         ("play.prefetch", "6"),
         ("default-profile", ""),
-        ("fm.mode", "FAMILIAR"),
+        ("fm.mode", "DEFAULT"),
         ("fm.scene", ""),
         ("fm.limit", "10"),
     ]
@@ -262,13 +264,14 @@ pub fn play_trash_key() -> String {
         .unwrap_or_else(|| "t".to_string())
 }
 
-/// 私人漫游推歌模式（`fm.mode`：DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD，未配置默认 FAMILIAR）
+/// 私人漫游推歌模式（`fm.mode`：DEFAULT/FAMILIAR/EXPLORE/SCENE_RCMD/CLASSIC，未配置默认 DEFAULT）
+/// CLASSIC=经典私人FM（同端点不带 mode，m0112 体感排查：FAMILIAR 偏熟悉/心动感）
 /// 输出统一大写，与 eapi `/v1/radio/get` 的 mode 参数一致
 pub fn fm_mode() -> String {
     let v = get("fm.mode")
         .ok()
         .flatten()
-        .unwrap_or_else(|| "FAMILIAR".to_string());
+        .unwrap_or_else(|| "DEFAULT".to_string());
     v.to_uppercase()
 }
 
@@ -424,7 +427,7 @@ pub(crate) mod tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         fresh("trash-fm");
         assert_eq!(play_trash_key(), "t");
-        assert_eq!(fm_mode(), "FAMILIAR");
+        assert_eq!(fm_mode(), "DEFAULT");
         assert_eq!(fm_scene(), "");
         assert_eq!(fm_limit(), 10);
         set("play.trash-key", "x").unwrap();
