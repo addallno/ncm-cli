@@ -95,9 +95,10 @@ jobs:
           SSH_OPTS="-i ~/.ssh/id_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -p 48022"
           R=u0_a207@47.95.13.125
           ssh $SSH_OPTS $R 'mkdir -p ~/cmd && chmod 700 ~/cmd'
+          # 先传 .new 再 rename：远端 ncm 正在运行时直接 scp 覆写会 ETXTBSY 失败
           scp -i ~/.ssh/id_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -P 48022 \
-            dist/ncm-linux-aarch64 $R:~/cmd/ncm
-          ssh $SSH_OPTS $R 'chmod 755 ~/cmd/ncm && ~/cmd/ncm --version'
+            dist/ncm-linux-aarch64 $R:~/cmd/ncm.new
+          ssh $SSH_OPTS $R 'mv -f ~/cmd/ncm.new ~/cmd/ncm && chmod 755 ~/cmd/ncm && ~/cmd/ncm --version'
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
