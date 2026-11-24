@@ -37,12 +37,9 @@ fn emit(line: &str) {
 /// 顶层分组：(组名, 子命令)。组名不打印，只决定平铺顺序（HELP-DESIGN 规则 9）。
 const TOP_GROUPS: &[(&str, &[&str])] = &[
     ("播放", &["play"]),
-    ("查询", &["search", "info", "recommend", "daily"]),
+    ("查询", &["search", "info", "recommend"]),
     ("下载", &["download"]),
-    (
-        "管理",
-        &["playlist", "like", "login", "whoami", "sign", "config"],
-    ),
+    ("管理", &["playlist", "like", "login", "sign", "config"]),
     ("其他", &["completions", "version", "help"]),
 ];
 
@@ -315,7 +312,6 @@ fn sub_about(cmd: &Command, name: &str) -> String {
         first
     }
 }
-
 
 /// main() 开头的 help 拦截；命中则渲染并返回 true。
 pub(crate) fn try_help_intercept() -> bool {

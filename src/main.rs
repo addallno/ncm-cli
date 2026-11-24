@@ -118,14 +118,6 @@ enum Commands {
         #[arg(long)]
         unlike: bool,
     },
-    /// 列出每日推荐歌曲
-    Daily {
-        /// 只列出前 N 首，0 为全部
-        #[arg(short = 'n', long, default_value_t = 0)]
-        limit: u32,
-        #[command(flatten)]
-        opts: ViewArgs,
-    },
     /// 列出首页推荐歌曲
     Recommend {
         /// 推荐位，逗号分隔：daily 每日推荐 / toplist 榜单 / fm 私人FM / radar 私人雷达
@@ -157,8 +149,6 @@ enum Commands {
         #[arg(long, value_name = "名称")]
         profile: Option<String>,
     },
-    /// 查看当前登录状态
-    Whoami,
     /// 持久化配置
     Config {
         #[command(subcommand)]
@@ -1743,7 +1733,7 @@ fn section_of(cmd: Option<&Commands>) -> &'static str {
         Some(Commands::Search { .. }) => "search",
         Some(Commands::Download { .. }) => "download",
         Some(Commands::Info { .. }) | Some(Commands::Playlist { .. }) => "list",
-        Some(Commands::Daily { .. }) | Some(Commands::Recommend { .. }) => "recommend",
+        Some(Commands::Recommend { .. }) => "recommend",
         Some(Commands::Play { daily, roam, .. }) => {
             // 板块优先级与目标一致：漫游 > 每日推荐 > 普通播放
             if *roam {
@@ -2101,26 +2091,6 @@ async fn run(cli: Cli) -> Result<i32> {
             } else {
                 print_search_table(&songs);
                 ui::info(&format!("下载: ncm download \"{target}\" -d 编号"));
-            }
-            Ok(0)
-        }
-        Some(Commands::Daily { limit, opts }) => {
-            ui::set_json(opts.json);
-            ui::set_quiet(opts.quiet);
-            let ncm = Ncm::with_cookie(auth.as_deref())?;
-            let _sp = ui::Spinner::start("读取每日推荐…");
-            let mut songs = ncm.daily_songs().await?;
-            if songs.is_empty() {
-                bail!("每日推荐为空（该接口需登录：ncm login --session/--cookie 保存登录态）");
-            }
-            if limit > 0 {
-                songs.truncate(limit as usize);
-            }
-            if opts.json {
-                print_search_json(&songs)?;
-            } else {
-                print_search_table(&songs);
-                ui::info("下载: ncm download --daily -d 编号  ·  播放: ncm play --daily");
             }
             Ok(0)
         }
@@ -3173,25 +3143,6 @@ async fn run(cli: Cli) -> Result<i32> {
                 n_play + fed.load(std::sync::atomic::Ordering::Relaxed)
             ));
             Ok(0)
-        }
-        Some(Commands::Whoami) => {
-            let _sp = ui::Spinner::start("查询账号信息…");
-            let ncm = Ncm::with_cookie(auth.as_deref())?;
-            match ncm.whoami().await? {
-                Some((uid, name)) => {
-                    let via = if session::load_default_chain().is_some() {
-                        "（持久化凭据）"
-                    } else {
-                        "（本次会话凭据）"
-                    };
-                    ui::ok(&format!("{name} · uid {uid} {via}"));
-                    Ok(0)
-                }
-                None => {
-                    ui::info("未登录（ncm login --session/--cookie 保存登录态）");
-                    Ok(1)
-                }
-            }
         }
         Some(Commands::Info {
             action: InfoAction::Song { target, json },
@@ -5021,7 +4972,6 @@ mod cli_tests {
             (vec!["ncm", "play", "--roam", "--daily"], "roam"),
             (vec!["ncm", "play", "259138"], "play"),
             (vec!["ncm", "play", "daily"], "play"), // 旧别名已移除：daily 现按关键词搜索
-            (vec!["ncm", "daily"], "recommend"),
             (vec!["ncm", "recommend"], "recommend"),
             (vec!["ncm", "search", "moon"], "search"),
             (vec!["ncm", "info", "playlist", "1"], "list"),
@@ -5029,7 +4979,6 @@ mod cli_tests {
             (vec!["ncm", "info", "comment", "1"], "list"),
             (vec!["ncm", "info", "subs"], "list"),
             (vec!["ncm", "info", "cloud"], "list"),
-            (vec!["ncm", "whoami"], "default"),
             (vec!["ncm", "version"], "default"),
         ];
         for (args, want) in cases {
