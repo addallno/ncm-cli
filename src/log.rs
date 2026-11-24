@@ -6,10 +6,23 @@
 //! - std `Mutex<File>` 直写、无新 crate；任何失败静默降级——日志永不拖垮主流程
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 static SINK: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// 终端镜像开关（-v/--verbose）：默认关——日志只落盘、正常输出静默；
+/// 开启后每行 stderr 镜像，且 init 打印日志产出位置（except -v，m0116）
+static CONSOLE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_console(v: bool) {
+    CONSOLE.store(v, Ordering::Relaxed);
+}
+
+fn console() -> bool {
+    CONSOLE.load(Ordering::Relaxed)
+}
 
 /// 行格式（纯函数，单测覆盖）：`1970-01-01T00:00:00.000Z [INFO ] [tag] msg`
 fn fmt_line(epoch_ms: i64, level: &str, tag: &str, msg: &str) -> String {
@@ -47,6 +60,10 @@ pub fn init() {
         return;
     };
     let _ = SINK.set(Mutex::new(f));
+    // 日志产出位置只在 -v 时打印到终端（m0116：正常输出保持静默）
+    if console() {
+        eprintln!("  日志 → {}", path.display());
+    }
     info(
         "log",
         &format!(
@@ -83,7 +100,11 @@ fn write_line(level: &str, tag: &str, msg: &str) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    let _ = writeln!(f, "{}", fmt_line(ms, level, tag, msg));
+    let line = fmt_line(ms, level, tag, msg);
+    let _ = writeln!(f, "{line}");
+    if console() {
+        eprintln!("{line}"); // -v：stderr 镜像（fqdt core_log::set_console 先例）
+    }
 }
 
 #[cfg(test)]

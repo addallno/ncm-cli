@@ -4,6 +4,7 @@ mod config;
 mod crypto;
 mod dns;
 mod download;
+mod help;
 mod log;
 mod lrc;
 mod mirror;
@@ -33,22 +34,25 @@ use model::{first_artist, hms, resolve_list, resolve_target, sanitize, Track};
     about = "ncm — 网易云音乐搜索/下载/歌词工具",
     long_about = None
 )]
-struct Cli {
-    /// 禁用彩色输出（NO_COLOR 环境变量同样生效）
+pub(crate) struct Cli {
+    /// 禁用彩色输出，NO_COLOR 同效
     #[arg(long, global = true)]
     no_color: bool,
-    /// pyncm session dump 文件（兼容 PYNCM/legacy 两种格式；NCM_SESSION 同效）
+    /// pyncm 会话文件，NCM_SESSION 同效
     #[arg(long, global = true, value_name = "FILE")]
     session: Option<PathBuf>,
-    /// 登录 Cookie，如 "MUSIC_U=xxx; __csrf=yyy"（NCM_COOKIE 同效）
+    /// 登录 Cookie 字符串，NCM_COOKIE 同效
     #[arg(long, global = true, value_name = "STR")]
     cookie: Option<String>,
-    /// 解锁音源服务地址（UnblockNeteaseMusic-utils；NCM_MIRROR 同效，none=禁用）
+    /// 解锁音源服务地址，NCM_MIRROR 同效，none 禁用
     #[arg(long, global = true, value_name = "URL")]
     mirror: Option<String>,
-    /// 本次命令使用的 profile 名，优先级高于板块绑定
+    /// 指定 profile 名，优先级高于板块绑定
     #[arg(short = 'u', long = "user", global = true, value_name = "NAME")]
     user: Option<String>,
+    /// 详细日志输出到终端，日志位置仅此模式打印
+    #[arg(short = 'v', long = "verbose", global = true)]
+    verbose: bool,
     #[command(subcommand)]
     cmd: Option<Commands>,
 }
@@ -56,7 +60,7 @@ struct Cli {
 /// recommend 的推荐位枚举（clap ValueEnum 自动列出可能值）
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq)]
 pub enum RecKind {
-    /// 每日推荐歌曲（需登录）
+    /// 每日推荐歌曲
     Daily,
     /// 官方榜单
     Toplist,
@@ -68,12 +72,12 @@ pub enum RecKind {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// 搜索并列出表格（-t 选类型如 1,1000；下载用 ncm download <关键词>）
+    /// 搜索并列出表格
     Search {
-        /// 搜索关键词（可多个词，自动合并）
+        /// 搜索关键词，可多个自动合并
         #[arg(required = true)]
         keyword: Vec<String>,
-        /// 搜索类型，逗号分隔（数字或别名，多类型合并为一张表）
+        /// 搜索类型，逗号分隔，数字或别名
         #[arg(
             short = 't',
             long = "type",
@@ -83,46 +87,46 @@ enum Commands {
             long_help = searchtype::TYPE_HELP
         )]
         types: Vec<u32>,
-        /// 输出总条数（多类型时平分；0 = 全部）
+        /// 输出总条数，0 为全部
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 下载（唯一下载入口，别名 dl）：歌曲 ID / 歌单·专辑链接 / 关键词；--daily 下每日推荐
+    /// 下载歌曲、歌单或专辑
     #[command(name = "download", visible_alias = "dl")]
     Download {
         /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / 关键词
         targets: Vec<String>,
-        /// 下载每日推荐（需登录；可与其它目标叠加）
+        /// 下载每日推荐，可与其它目标叠加
         #[arg(long)]
         daily: bool,
         #[command(flatten)]
         opts: DownloadArgs,
     },
-    /// 歌单管理（需登录；list=查看我的歌单，默认操作"我喜欢的音乐"）
+    /// 管理我的歌单
     #[command(visible_alias = "pl")]
     Playlist {
         #[command(subcommand)]
         action: Option<PlaylistAction>,
     },
-    /// 喜欢/取消喜欢歌曲到"我喜欢的音乐"（需登录）
+    /// 喜欢或取消喜欢歌曲
     Like {
         /// 歌曲 ID / 链接，可多个
         ids: Vec<String>,
-        /// 取消喜欢（从红心歌单移除）
+        /// 取消喜欢，从红心歌单移除
         #[arg(long)]
         unlike: bool,
     },
-    /// 每日推荐歌曲（需登录；下载: ncm download --daily · 播放: ncm play --daily）
+    /// 列出每日推荐歌曲
     Daily {
-        /// 只列出前 N 首（0 = 全部）
+        /// 只列出前 N 首，0 为全部
         #[arg(short = 'n', long, default_value_t = 0)]
         limit: u32,
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 首页推荐（-t daily,toplist,fm,radar，默认 daily 只列每日推荐歌曲）
+    /// 列出首页推荐歌曲
     Recommend {
         /// 推荐位，逗号分隔：daily 每日推荐 / toplist 榜单 / fm 私人FM / radar 私人雷达
         #[arg(
@@ -132,15 +136,15 @@ enum Commands {
             default_value = "daily"
         )]
         types: Vec<crate::RecKind>,
-        /// 输出总条数（多推荐位平分；0 = 全部）
+        /// 输出总条数，0 为全部
         #[arg(short = 'n', long, default_value_t = 10)]
         limit: u32,
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 保存/查看/清除登录凭据（持久化到 ~/.config/ncm/，之后自动加载）
+    /// 管理登录凭据
     Login {
-        /// pyncm session dump 文件（与 --cookie 二选一）
+        /// pyncm 会话文件，与 --cookie 二选一
         #[arg(long, value_name = "FILE")]
         session: Option<PathBuf>,
         /// Cookie 字符串，如 "MUSIC_U=xxx; __csrf=yyy"
@@ -155,12 +159,12 @@ enum Commands {
     },
     /// 查看当前登录状态
     Whoami,
-    /// 持久化配置（download-dir / play.download-key / profile.<板块>，写入 ~/.config/ncm/config.json）
+    /// 持久化配置
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// 查询族：song 歌曲详情 / playlist·album·artist 曲目 / lyric 歌词 / comment 评论 / mv / cloud 云盘 / subs 我的收藏
+    /// 查询歌曲歌单歌词评论
     Info {
         #[command(subcommand)]
         action: InfoAction,
@@ -172,50 +176,50 @@ enum Commands {
     },
     /// 显示版本号
     Version,
-    /// 每日签到（需登录；移动端 +4 经验）
+    /// 每日签到
     Sign {
-        /// 网页端签到（+1 经验；默认移动端 +4）
+        /// 网页端签到 +1 经验，默认移动端 +4
         #[arg(long)]
         web: bool,
     },
-    /// 播放歌曲（队列喂给 mpv/ffplay，mpv 下 </> 切曲、←/→ 快退进、歌词同步滚动）
+    /// 播放歌曲队列
     Play {
-        /// 歌曲 ID / 链接 / 关键词（可多个，按序拼接）
+        /// 歌曲 ID、链接或关键词，可多个按序拼接
         target: Vec<String>,
-        /// 播放每日推荐队列（需登录；可与其它目标叠加，置于最前）
+        /// 播放每日推荐队列，可与其它目标叠加
         #[arg(help_heading = "队列", long)]
         daily: bool,
-        /// 从文件读取目标列表（每行一个，与命令行目标拼接）
+        /// 从文件读取目标列表，每行一个
         #[arg(short = 'f', long, value_name = "FILE")]
         file: Option<PathBuf>,
-        /// 最多播放 N 首（0 = 全部；关键词默认取最相关 1 首，-n 指定则取前 N 首连续播）
+        /// 最多播放 N 首，0 为全部
         #[arg(help_heading = "队列", short = 'n', long, default_value_t = 0)]
         limit: u32,
         /// 播放队列随机洗牌
         #[arg(help_heading = "队列", long)]
         shuffle: bool,
-        /// 指定播放器程序（默认探测 $NCM_PLAYER → mpv → ffplay）
+        /// 指定播放器程序，探测 NCM_PLAYER、mpv、ffplay
         #[arg(help_heading = "播放器", long, value_name = "CMD")]
         player: Option<String>,
-        /// 音质：lossless/standard/exhigh/hires（默认取 config quality，未配置为 lossless）
+        /// 音质，取值 lossless、standard、exhigh、hires
         #[arg(help_heading = "播放器", long, value_parser = ["lossless", "standard", "exhigh", "hires"])]
         quality: Option<String>,
-        /// 只输出播放队列 JSON（不调用播放器）
+        /// 只输出播放队列 JSON，不调用播放器
         #[arg(help_heading = "输出与保存", long)]
         json: bool,
         /// 播放前先下载到本地并播放本地文件
         #[arg(help_heading = "输出与保存", long)]
         save: bool,
-        /// 下载目录（--save / 快捷下载时生效；未指定取 config download-dir）
+        /// 下载目录，未指定取 config download-dir
         #[arg(help_heading = "输出与保存", short = 'o', long, value_name = "目录")]
         output: Option<PathBuf>,
         /// 不显示滚动歌词
         #[arg(help_heading = "播放器", long = "no-lyric")]
         no_lyric: bool,
-        /// 播放漫游：队列将尽时自动接私人FM无限续播（需 mpv；单独 --roam 即纯 FM 开播）
+        /// 播放漫游，队列将尽时自动接私人FM续播
         #[arg(help_heading = "队列", long)]
         roam: bool,
-        /// 透传给播放器的参数（经 `--` 分隔，置于最后同名以用户为准；mpv 需 `=` 形式，如 -- --volume=60 --ao=alsa）
+        /// 透传给播放器的参数，经 -- 分隔置于最后
         #[arg(help_heading = "播放器", last = true, value_name = "ARGS")]
         player_args: Vec<std::ffi::OsString>,
     },
@@ -224,7 +228,7 @@ enum Commands {
 /// ncm info 查询族（noun 子命令，仿 gh 组织方式）
 #[derive(Subcommand)]
 enum InfoAction {
-    /// 歌曲详情（ID / 专辑 / 发行日期 / 音质 / 版权等）
+    /// 查看歌曲详情
     Song {
         /// 歌曲 ID / 链接 / 关键词
         target: String,
@@ -232,37 +236,37 @@ enum InfoAction {
         #[arg(long)]
         json: bool,
     },
-    /// 歌单曲目列表（下载前 N 首: ncm download <歌单ID> -d 1-N）
+    /// 列出歌单曲目
     Playlist {
         /// 歌单 ID / 链接
         target: String,
-        /// 只列出前 N 首（0 = 全部）
+        /// 只列出前 N 首，0 为全部
         #[arg(short = 'n', long, default_value_t = 0)]
         limit: u32,
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 专辑曲目列表（下载: ncm download <专辑ID> -d 1-N）
+    /// 列出专辑曲目
     Album {
         /// 专辑 ID / 链接
         target: String,
-        /// 只列出前 N 首（0 = 全部）
+        /// 只列出前 N 首，0 为全部
         #[arg(short = 'n', long, default_value_t = 0)]
         limit: u32,
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 歌手作品列表（下载: ncm download <歌手ID> -d 1-N）
+    /// 列出歌手作品
     Artist {
         /// 歌手 ID / 链接
         target: String,
-        /// 只列出前 N 首（0 = 全部）
+        /// 只列出前 N 首，0 为全部
         #[arg(short = 'n', long, default_value_t = 0)]
         limit: u32,
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 歌词文本（LRC，打印到标准输出）
+    /// 输出 LRC 歌词
     Lyric {
         /// 歌曲 ID / 链接 / 关键词
         target: String,
@@ -277,7 +281,7 @@ enum InfoAction {
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// MV 详情与播放地址（--play 直接交给 mpv 播放）
+    /// 查看 MV 详情与播放地址
     Mv {
         /// MV ID
         id: u64,
@@ -291,20 +295,20 @@ enum InfoAction {
         #[arg(long)]
         json: bool,
     },
-    /// 云盘歌曲列表（需登录；下载用 ncm download <ID>）
+    /// 列出云盘歌曲
     Cloud {
         /// 最多条数
         #[arg(short = 'n', long, default_value_t = 30)]
         limit: u32,
-        /// 偏移（翻页）
+        /// 翻页偏移
         #[arg(long, default_value_t = 0)]
         offset: u32,
         #[command(flatten)]
         opts: ViewArgs,
     },
-    /// 收藏的专辑 / 歌手列表（需登录）
+    /// 列出收藏的专辑歌手
     Subs {
-        /// 类型，逗号分隔：album 专辑 / artist 歌手（默认两者）
+        /// 类型，逗号分隔：album 专辑 / artist 歌手
         #[arg(
             short = 't',
             long = "type",
@@ -322,9 +326,9 @@ enum InfoAction {
 
 #[derive(Subcommand)]
 enum ConfigAction {
-    /// 写入配置项（如: ncm config set download-dir /sdcard/Music/NCMusic）
+    /// 写入配置项
     Set {
-        /// 配置键（download-dir / quality / download.confirm / play.download-key / profile.<板块>）
+        /// 配置键名
         key: String,
         /// 配置值
         value: String,
@@ -346,9 +350,9 @@ enum ConfigAction {
 /// 歌单管理子命令
 #[derive(Subcommand)]
 enum PlaylistAction {
-    /// 列出我创建/收藏的歌单（下载用 ncm download list.<ID>）
+    /// 列出我的歌单
     List {
-        /// 最多显示数量（0 = 全部）
+        /// 最多显示数量，0 为全部
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: u32,
         #[command(flatten)]
@@ -359,9 +363,9 @@ enum PlaylistAction {
         /// 歌单名
         name: String,
     },
-    /// 删除歌单（含全部歌曲，不可恢复）
+    /// 删除歌单，含全部歌曲不可恢复
     Delete {
-        /// 歌单名或 ID（默认"我喜欢的音乐"）
+        /// 歌单名或 ID，默认我喜欢的音乐
         target: Option<String>,
         /// 跳过确认直接删除
         #[arg(long)]
@@ -369,24 +373,24 @@ enum PlaylistAction {
     },
     /// 歌单改名
     Rename {
-        /// 歌单名或 ID（默认"我喜欢的音乐"）
+        /// 歌单名或 ID，默认我喜欢的音乐
         target: Option<String>,
         /// 新名称
         name: String,
     },
-    /// 添加歌曲到歌单（ID 或链接，可多个）
+    /// 添加歌曲到歌单
     Add {
         /// 歌曲 ID / 链接，可多个
         ids: Vec<String>,
-        /// 目标歌单名或 ID（默认"我喜欢的音乐"）
+        /// 目标歌单名或 ID，默认我喜欢的音乐
         #[arg(short = 'p', long = "playlist", value_name = "名或ID")]
         playlist: Option<String>,
     },
-    /// 从歌单移除歌曲（ID，可多个）
+    /// 从歌单移除歌曲
     Remove {
         /// 歌曲 ID，可多个
         ids: Vec<u64>,
-        /// 目标歌单名或 ID（默认"我喜欢的音乐"）
+        /// 目标歌单名或 ID，默认我喜欢的音乐
         #[arg(short = 'p', long = "playlist", value_name = "名或ID")]
         playlist: Option<String>,
     },
@@ -405,13 +409,13 @@ struct ViewArgs {
 
 #[derive(Args, Clone)]
 struct DownloadArgs {
-    /// 关键词候选取前 N 首（仅 download 关键词时生效；TTY 下可交互选择，非 TTY 无 -d 取 1 首）
+    /// 关键词候选取前 N 首，TTY 可交互选择
     #[arg(help_heading = "选择", short = 'n', long, default_value_t = 10)]
     limit: u32,
-    /// 音频输出目录（未指定时取 config download-dir，再未配置为当前目录）
+    /// 音频输出目录，未指定取 config download-dir
     #[arg(help_heading = "输出", short = 'o', long, value_name = "目录")]
     output: Option<PathBuf>,
-    /// 歌词输出目录（可重复指定多个；默认与音频同目录）
+    /// 歌词输出目录，可重复指定，默认与音频同目录
     #[arg(help_heading = "歌词", long = "lrc-dir", value_name = "目录")]
     lrc_dir: Vec<PathBuf>,
     /// 要下载的歌词类型，逗号分隔
@@ -423,7 +427,7 @@ struct DownloadArgs {
     /// 只下载歌词，不保存音频
     #[arg(help_heading = "歌词", long = "only-lrc", alias = "lyric-only")]
     only_lrc: bool,
-    /// 音质：standard/exhigh/lossless/hires（默认取 config quality，未配置为 lossless）
+    /// 音质，取值 standard、exhigh、lossless、hires
     #[arg(help_heading = "输出", long)]
     quality: Option<String>,
     /// 静默：隐藏进度动画与过程输出，仅保留结果
@@ -447,7 +451,7 @@ struct DownloadArgs {
         visible_alias = "no-overwrites"
     )]
     skip_existing: bool,
-    /// 允许下载 30 秒试听片段（默认跳过）
+    /// 允许下载 30 秒试听片段
     #[arg(help_heading = "输出", long = "allow-trial")]
     allow_trial: bool,
     /// 按歌手维度解析目标
@@ -456,16 +460,16 @@ struct DownloadArgs {
     /// 机器可读的 JSON 输出
     #[arg(long)]
     json: bool,
-    /// 按编号选择要下载的项：1,3 / 5-8 / 1- / all（download 结果统一生效）
+    /// 按编号选择要下载的项：1,3、5-8、1-、all
     #[arg(help_heading = "选择", short = 'd', long)]
     download: Option<String>,
-    /// 并发下载数（>1 时关闭逐曲转圈/行内进度，仅保留结果行；未指定回退 config download.jobs）
+    /// 并发下载数，未指定回退 config download.jobs
     #[arg(help_heading = "执行", short = 'j', long, value_parser = clap::value_parser!(u32).range(1..=16))]
     jobs: Option<u32>,
-    /// 多条目下载时跳过 y/N 确认（config download.confirm=false 可全局关闭确认）
+    /// 多条目下载时跳过 y/N 确认
     #[arg(help_heading = "执行", short = 'y', long)]
     yes: bool,
-    /// 下载完成后导出 M3U 播放列表（含成功曲目，路径相对播放列表所在目录）
+    /// 下载完成后导出 M3U 播放列表
     #[arg(help_heading = "输出", long, value_name = "文件")]
     m3u: Option<PathBuf>,
 }
@@ -1712,7 +1716,14 @@ async fn detect_vip_profile() -> Option<String> {
 
 #[tokio::main]
 async fn main() {
+    // 手写 help 渲染先于 clap：裸调用 / --help / help / <cmd> --help
+    if help::try_help_intercept() {
+        return;
+    }
     let cli = Cli::parse();
+    if cli.verbose {
+        log::set_console(true); // -v：日志 stderr 镜像 + 打印日志产出位置
+    }
     log::init(); // 运行日志尽早打开：后续所有 toast/对账/IPC 事件都入 ncm.run.log
     let code = match run(cli).await {
         Ok(c) => c,
