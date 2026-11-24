@@ -1613,6 +1613,10 @@ fn report(
         format!("{secs}s")
     };
     parts.push(format!("耗时 {dur_str}"));
+    if !opts.dry_run {
+        // 收据带存储目录：大批量下载后可直接定位落盘位置（dry-run 未写入不显示）
+        parts.push(format!("→ {}", output.display()));
+    }
     let done = if opts.only_lrc { lrc } else { audio };
     // 汇总行要固化留屏：先清动态行再退出行内刷新模式
     ui::live_clear();
@@ -4062,7 +4066,51 @@ fn dispatch_quick_reqs(
             }
         }
         let Some(pid) = pid else { return };
+        // ≤3 首逐首提交（每首即时 toast、dup/gone 语义精确）；大批量按 op 分组
+        // 一次提交（API trackIds 本就收数组），整组失败记日志后回退逐首——正确性优先
+        let mut done: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        if like_batch.len() > 3 {
+            for unlike in [false, true] {
+                let grp: Vec<&(u64, String, bool)> =
+                    like_batch.iter().filter(|t| t.2 == unlike).collect();
+                if grp.is_empty() {
+                    continue;
+                }
+                let ids: Vec<u64> = grp.iter().map(|t| t.0).collect();
+                let n = grp.len();
+                let op = if unlike { "del" } else { "add" };
+                match like_ncm.playlist_tracks_op(op, pid, &ids).await {
+                    Ok(()) => {
+                        for (id, label, _) in &grp {
+                            let mut g = liked.write().unwrap_or_else(|e| e.into_inner());
+                            if unlike {
+                                g.ids.remove(id);
+                            } else {
+                                g.ids.insert(*id);
+                            }
+                            drop(g);
+                            like_log(if unlike { "unlike" } else { "like" }, *id, label, "ok");
+                        }
+                        crate::player::toast(&format!(
+                            "{} {n} 首",
+                            if unlike {
+                                "✓ 已取消收藏"
+                            } else {
+                                "✓ 已喜欢"
+                            }
+                        ));
+                        done.extend(grp.iter().map(|t| t.0));
+                    }
+                    Err(e) => {
+                        // 整组失败（网络抖动/服务端拒/含状态漂移项）：回退逐首，
+                        // per-id 的 dup/gone/失败语义由下方逐首循环完整保留
+                        log::warn("like", &format!("批量 {op} {n} 首失败，回退逐首：{e:#}"));
+                    }
+                }
+            }
+        }
         // 顺序逐首 add/del，每首即时 toast；一首失败不中断后续
+        //（批量已成功的 id 由 done 跳过）
         // like/unlike 本地操作日志：服务端可能在 code 200 后置移除（版权/风控），
         // 留痕便于对账；追加 <config>/like.log（epoch秒\t操作\tid\t歌名\t结果），写失败静默
         fn like_log(op: &str, id: u64, label: &str, result: &str) {
@@ -4082,6 +4130,9 @@ fn dispatch_quick_reqs(
             }
         }
         for (id, label, unlike) in like_batch {
+            if done.contains(&id) {
+                continue; // 批量路径已成功提交
+            }
             let op = if unlike { "del" } else { "add" };
             match like_ncm
                 .playlist_tracks_op(op, pid, std::slice::from_ref(&id))
