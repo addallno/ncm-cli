@@ -1042,6 +1042,7 @@ static FEEDBACK: std::sync::Mutex<Option<(String, std::time::Instant, bool)>> =
     std::sync::Mutex::new(None);
 
 /// 切曲反馈兜底超时：hold 反馈等 pos 变化清除，切失败时最多挂 10s
+#[cfg(unix)]
 const FEEDBACK_HOLD_TTL: Duration = Duration::from_secs(10);
 
 /// 写入按键就地反馈并唤醒 overlay 重画；2s 后自动过期（置 dirty 触发重画清除）
