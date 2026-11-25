@@ -190,27 +190,47 @@ pub fn list() -> Vec<(String, String)> {
     v
 }
 
-/// 全部可配置键及默认值（config list 展示未设置项用）
-pub fn all_keys() -> &'static [(&'static str, &'static str)] {
+/// 全部可配置键：(键, 默认值, 说明含可选值)——config list 展示含义/默认用（C16）
+pub fn all_keys() -> &'static [(&'static str, &'static str, &'static str)] {
     &[
-        ("download-dir", "当前目录"),
-        ("quality", "lossless"),
-        ("download.confirm", "true"),
-        ("play.download-key", "d"),
-        ("play.like-key", "l"),
-        ("play.unlike-key", "u"),
-        ("play.trash-key", "t"),
-        ("play.heart-symbol", "♥"),
-        ("play.heat-symbol", "*"),
-        ("play.show-liked", "true"),
-        ("play.show-comments", "false"),
-        ("download.jobs", "1"),
-        ("mirror", "127.0.0.1:3000,3100"),
-        ("play.prefetch", "6"),
-        ("default-profile", ""),
-        ("fm.mode", "DEFAULT"),
-        ("fm.scene", ""),
-        ("fm.limit", "10"),
+        ("download-dir", "当前目录", "下载目录（绝对/相对路径）"),
+        (
+            "quality",
+            "lossless",
+            "默认音质 lossless|high|standard|hires",
+        ),
+        (
+            "download.confirm",
+            "true",
+            "多条目下载前 y/N 确认 true|false",
+        ),
+        ("play.download-key", "d", "播放期快捷下载键（单字符）"),
+        ("play.like-key", "l", "播放期快捷收藏键（单字符）"),
+        ("play.unlike-key", "u", "播放期快捷取消收藏键（单字符）"),
+        (
+            "play.trash-key",
+            "t",
+            "播放期「减少推荐」键（单字符，仅漫游）",
+        ),
+        ("play.heart-symbol", "♥", "红心显示符号"),
+        ("play.heat-symbol", "*", "热度显示符号"),
+        ("play.show-liked", "true", "显示已喜欢标记 true|false"),
+        ("play.show-comments", "false", "显示评论 true|false"),
+        (
+            "download.jobs",
+            "1",
+            "默认并发下载数（≥1，-j 单次指定优先）",
+        ),
+        (
+            "mirror",
+            "127.0.0.1:3000,3100",
+            "API 镜像地址（逗号分隔 host:port）",
+        ),
+        ("play.prefetch", "6", "播放预取曲目数"),
+        ("default-profile", "", "默认账号 profile（空=首个）"),
+        ("fm.mode", "DEFAULT", "私人FM模式 DEFAULT|CLASSIC|FAMILIAR"),
+        ("fm.scene", "", "漫游场景过滤（空=全部）"),
+        ("fm.limit", "10", "漫游/推荐单次拉取条数"),
     ]
 }
 

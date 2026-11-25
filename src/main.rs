@@ -1945,15 +1945,26 @@ fn run_config(action: &ConfigAction) -> Result<i32> {
             None => ui::info(&format!("{key} 未配置（ncm config set {key} <值>）")),
         },
         ConfigAction::List => {
+            // C16：三列表格——键 / 值（默认或已配置）/ 说明含可选值
             let all = config::list();
+            let mut rows: Vec<Vec<String>> = config::all_keys()
+                .iter()
+                .map(|(k, dv, desc)| {
+                    let v = all
+                        .iter()
+                        .find(|(ek, _)| ek == k)
+                        .map(|(_, v)| format!("{v}（已配置）"))
+                        .unwrap_or_else(|| format!("{dv}（默认）"));
+                    vec![k.to_string(), v, desc.to_string()]
+                })
+                .collect();
+            // 用户手写但不在键表的项（历史/未来键）一并展示，防丢信息
             for (k, v) in &all {
-                println!("{k} = {v}");
-            }
-            for (k, dv) in config::all_keys() {
-                if !all.iter().any(|(ek, _)| ek == k) {
-                    println!("{k} = {dv}（默认）");
+                if !config::all_keys().iter().any(|(ek, _, _)| ek == k) {
+                    rows.push(vec![k.clone(), format!("{v}（已配置）"), String::new()]);
                 }
             }
+            ui::table(&["键", "值", "说明"], &rows);
             ui::info(&format!("配置文件: {}", config::config_path().display()));
         }
         ConfigAction::Unset { key } => {
@@ -4258,6 +4269,9 @@ async fn refresh_entry(
     if player::ipc_send(sock, &ins).await.is_err() {
         return RefreshResult::Failed; // socket 断了，mpv 即将退出
     }
+    // mpv 单线程异步执行、ipc_send 不读响应：立即复读可能读到中间态，
+    // 0.41 实测 insert-at 成功却误判 Unsupported/Desync 的根因——等命令落地
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     *req_id += 1;
     let new_count = player::ipc_get(sock, "playlist-count", *req_id)
         .await
@@ -4271,12 +4285,14 @@ async fn refresh_entry(
     let rm = serde_json::json!({"command": ["playlist-remove", (abs + 1)]}).to_string();
     *req_id += 1;
     let _ = player::ipc_send(sock, &rm).await;
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await; // 同上：等 remove 落地
     let after = player::ipc_get(sock, "playlist-count", *req_id)
         .await
         .and_then(|v| v.as_u64());
     if after != Some(count) {
         *req_id += 1; // 一次可能是瞬时 IPC 失败，重试并复验
         let _ = player::ipc_send(sock, &rm).await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await; // 同上
         let after2 = player::ipc_get(sock, "playlist-count", *req_id)
             .await
             .and_then(|v| v.as_u64());
@@ -4482,7 +4498,11 @@ async fn guard_loop(
                         }
                     }
                     if ok {
-                        // 复读验证：新 playlist 与 srcs 全等才算修好（防假修复成功提示）
+                        // 复读验证：新 playlist 与 srcs 全等才算修好（防假修复成功提示）。
+                        // 前面的 remove/insert 全是不读响应的 ipc_send（多条独立连接）：
+                        // 立即复读会读到中间态——0.41 实测「repair ok=true 却 verify fail」
+                        // 与 insert_no_effect 连续误判停修复的根因，先等全部命令落地
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         req_id += 1;
                         let v: Vec<String> = match player::ipc_get(&sock, "playlist", req_id).await
                         {

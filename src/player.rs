@@ -868,17 +868,13 @@ async fn overlay_loop(
                                     && (d * 1000.0 - t.duration_ms as f64).abs() > 5000.0
                                 {
                                     warned_mismatch = Some(cur_idx);
-                                    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-                                        clear_overlay_rows();
-                                        eprintln!(
-                                            "{}",
-                                            crate::ui::warn(&format!(
-                                                "⚠ 曲目信息与实际音频不符（元数据 {}s / 实际 {}s）",
-                                                t.duration_ms / 1000,
-                                                d as u64
-                                            ))
-                                        );
-                                    }
+                                    // 走 toast（FEEDBACK 行 2s 自动消失）而非清底行打滚动区——
+                                    // 打屏会插进歌词块打乱 overlay（m0216 用户实测反馈）
+                                    toast(&format!(
+                                        "⚠ 曲目信息与实际音频不符（元数据 {}s / 实际 {}s）",
+                                        t.duration_ms / 1000,
+                                        d as u64
+                                    ));
                                 }
                             }
                         }
