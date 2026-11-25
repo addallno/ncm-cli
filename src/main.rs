@@ -373,10 +373,12 @@ enum PlaylistAction {
     },
     /// 歌单改名
     Rename {
-        /// 歌单名或 ID，默认我喜欢的音乐
-        target: Option<String>,
         /// 新名称
+        #[arg(value_name = "新名")]
         name: String,
+        /// 歌单名或 ID，默认我喜欢的音乐
+        #[arg(value_name = "名或ID")]
+        target: Option<String>,
     },
     /// 添加歌曲到歌单
     Add {
@@ -779,7 +781,8 @@ async fn download_one(
         }
 
         if opts.dry_run {
-            println!(
+            // TTY 下按屏宽截断防折行打乱表格（管道保持全宽便于机器读取）
+            let line = format!(
                 "[dry-run] {} - {} | 目标: {} | 源: {} | 音质: {}",
                 track.title,
                 track.artists,
@@ -787,6 +790,12 @@ async fn download_one(
                 source,
                 quality
             );
+            let line = if ui::is_tty() {
+                ui::truncate_width(&line, ui::term_width().saturating_sub(1))
+            } else {
+                line
+            };
+            println!("{line}");
             return result;
         }
 

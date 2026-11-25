@@ -9,7 +9,7 @@ pub fn is_tty() -> bool {
 }
 
 /// 终端列宽；取不到（非 TTY/异常）回退 80
-fn term_width() -> usize {
+pub fn term_width() -> usize {
     terminal_size::terminal_size_of(std::io::stdout())
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80)
