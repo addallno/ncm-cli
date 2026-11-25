@@ -75,7 +75,7 @@ enum Commands {
     /// 搜索并列出表格
     Search {
         /// 搜索关键词，可多个自动合并
-        #[arg(required = true)]
+        #[arg(required = true, value_name = "关键词")]
         keyword: Vec<String>,
         /// 搜索类型，逗号分隔，数字或别名
         #[arg(
@@ -97,6 +97,7 @@ enum Commands {
     #[command(name = "download", visible_alias = "dl")]
     Download {
         /// 歌曲ID / 歌单·专辑·歌手链接 / list.123 / 关键词
+        #[arg(value_name = "id|link|kw")]
         targets: Vec<String>,
         /// 下载每日推荐，可与其它目标叠加
         #[arg(long)]
@@ -113,6 +114,7 @@ enum Commands {
     /// 喜欢或取消喜欢歌曲
     Like {
         /// 歌曲 ID / 链接，可多个
+        #[arg(value_name = "id|link")]
         ids: Vec<String>,
         /// 取消喜欢，从红心歌单移除
         #[arg(long)]
@@ -175,6 +177,7 @@ enum Commands {
     /// 播放歌曲队列
     Play {
         /// 歌曲 ID、链接或关键词，可多个按序拼接
+        #[arg(value_name = "id|link|kw")]
         target: Vec<String>,
         /// 播放每日推荐队列，可与其它目标叠加
         #[arg(help_heading = "队列", long)]
@@ -221,6 +224,7 @@ enum InfoAction {
     /// 查看歌曲详情
     Song {
         /// 歌曲 ID / 链接 / 关键词
+        #[arg(value_name = "id|link|kw")]
         target: String,
         /// 机器可读的 JSON 输出
         #[arg(long)]
@@ -229,6 +233,7 @@ enum InfoAction {
     /// 列出歌单曲目
     Playlist {
         /// 歌单 ID / 链接
+        #[arg(value_name = "id|link")]
         target: String,
         /// 只列出前 N 首，0 为全部
         #[arg(short = 'n', long, default_value_t = 0)]
@@ -239,6 +244,7 @@ enum InfoAction {
     /// 列出专辑曲目
     Album {
         /// 专辑 ID / 链接
+        #[arg(value_name = "id|link")]
         target: String,
         /// 只列出前 N 首，0 为全部
         #[arg(short = 'n', long, default_value_t = 0)]
@@ -249,6 +255,7 @@ enum InfoAction {
     /// 列出歌手作品
     Artist {
         /// 歌手 ID / 链接
+        #[arg(value_name = "id|link")]
         target: String,
         /// 只列出前 N 首，0 为全部
         #[arg(short = 'n', long, default_value_t = 0)]
@@ -259,11 +266,13 @@ enum InfoAction {
     /// 输出 LRC 歌词
     Lyric {
         /// 歌曲 ID / 链接 / 关键词
+        #[arg(value_name = "id|link|kw")]
         target: String,
     },
     /// 歌曲热门评论
     Comment {
         /// 歌曲 ID / 链接
+        #[arg(value_name = "id|link")]
         target: String,
         /// 显示前 N 条热门评论
         #[arg(short = 'n', long, default_value_t = 10)]
@@ -274,6 +283,7 @@ enum InfoAction {
     /// 查看 MV 详情与播放地址
     Mv {
         /// MV ID
+        #[arg(value_name = "id")]
         id: u64,
         /// 清晰度：240/480/720/1080
         #[arg(long, default_value_t = 1080, value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(["240", "480", "720", "1080"]), |s: String| s.parse::<u32>().unwrap()))]
@@ -371,6 +381,7 @@ enum PlaylistAction {
     /// 添加歌曲到歌单
     Add {
         /// 歌曲 ID / 链接，可多个
+        #[arg(value_name = "id|link")]
         ids: Vec<String>,
         /// 目标歌单名或 ID，默认我喜欢的音乐
         #[arg(short = 'p', long = "playlist", value_name = "名或ID")]
@@ -379,6 +390,7 @@ enum PlaylistAction {
     /// 从歌单移除歌曲
     Remove {
         /// 歌曲 ID，可多个
+        #[arg(value_name = "id")]
         ids: Vec<u64>,
         /// 目标歌单名或 ID，默认我喜欢的音乐
         #[arg(short = 'p', long = "playlist", value_name = "名或ID")]
