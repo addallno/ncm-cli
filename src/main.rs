@@ -803,6 +803,8 @@ async fn download_one(
                 let text = ui::progress_line(done, total_bytes, started);
                 live.update(&text, force);
             }
+            // 并发共享进度行（C6b）：上报聚合器，非激活时零开销
+            ui::shared_report(index, done, total_bytes);
         };
 
         let download_result = download::download_audio(
@@ -1210,6 +1212,7 @@ async fn download_songs(
     // 结果行打印（两分支共用）：按完成顺序输出，编号取自原下标
     let show = |idx: usize, r: &ItemResult| {
         ui::live_clear();
+        ui::shared_file_done(); // C6b：推进共享进度行首数（未激活为 no-op）
         if json_flag {
             // JSON 模式逐条静默，最后统一输出
         } else if opts.dry_run {
@@ -1260,6 +1263,9 @@ async fn download_songs(
         // 注：future 在 for 循环里直接构造（闭包写法会触发 spawn 的 HRTB 泛型提升失败）
         use futures_util::StreamExt;
         ui::set_concurrent(true);
+        if !opts.dry_run {
+            ui::shared_begin(total); // C6b：聚合各任务字节进度，单行刷新
+        }
         // 预绑定引用：async move 块内直接用会逐次 move 外层拥有的值
         let opts_r = &opts;
         let lrc_kinds_r = &lrc_kinds;
@@ -1291,6 +1297,7 @@ async fn download_songs(
             show(i, &r);
             paired.push((i, r));
         }
+        ui::shared_end();
         ui::set_concurrent(false);
         paired.sort_by_key(|(i, _)| *i);
         items = paired.into_iter().map(|(_, r)| r).collect();
@@ -1555,9 +1562,13 @@ fn report(
         return Ok(if failed.is_empty() { 0 } else { 1 });
     }
 
-    println!();
+    // 播放期（sink 已装）：空行/表格挪共享光标会打乱 overlay 块，跳过；
+    // 收据行走 sink 进常驻第三行（结果在哪，TUI 四问）
+    if !ui::sink_active() {
+        println!();
+    }
     // 结果一览表（dry-run 已有逐首 [dry-run] 行，不重复）
-    if !opts.dry_run && !items.is_empty() {
+    if !opts.dry_run && !items.is_empty() && !ui::sink_active() {
         let rows: Vec<Vec<String>> = items
             .iter()
             .enumerate()
@@ -3888,10 +3899,7 @@ async fn fetch_lyrics(ncm: &Ncm, ids: &[u64]) -> Vec<Option<Vec<(f64, String)>>>
 /// 后复用 download 下载管线；质量同 play 参数，目录取 -o / config download-dir）
 #[cfg(unix)]
 async fn quick_download(ncm: Ncm, id: u64, label: String, out_dir: PathBuf, quality: String) {
-    use std::io::IsTerminal;
-    if std::io::stderr().is_terminal() {
-        player::clear_overlay_rows(); // 下载输出进滚动历史，先清底行避免插行打乱光标
-    }
+    // 不再清 overlay 底行：输出经 ui sink 分流（C4），歌词栏不被打断
     ui::step(&format!("快捷下载 · {label}"));
     let songs = match ncm.song_detail(&[id]).await {
         Ok(s) if !s.is_empty() => s,

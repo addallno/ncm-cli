@@ -653,9 +653,13 @@ async fn overlay_loop(
     impl Drop for AliveGuard {
         fn drop(&mut self) {
             OVERLAY_ALIVE.store(false, std::sync::atomic::Ordering::Relaxed);
+            // 退出即卸汇+清过程行：后续输出回滚动区原路径，底行块不留残影
+            crate::ui::clear_sink();
+            clear_process();
         }
     }
     OVERLAY_ALIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    install_ui_sink();
     let _alive = AliveGuard;
     // mpv 启动后才创建 socket，重试等待（最多 ~5s）
     let stream = {
@@ -988,6 +992,49 @@ static CANVAS_DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// overlay_loop 是否在跑：跑着才走 FEEDBACK 第二行渲染，停了 fallback 滚动区打印
 static OVERLAY_ALIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 播放期常驻过程行内容（C4）：快捷下载等过程输出，overlay 重画时
+/// 渲染为底行块最后一行；无 TTL，被下一条覆盖，overlay 退出清空
+static PROCESS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// overlay 是否在渲染（-v 日志镜像选插入点用）
+pub fn overlay_alive() -> bool {
+    OVERLAY_ALIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// -v 日志镜像插入滚动历史上方：清底行块 → 写日志行 → 标脏重画
+///（防日志行落在块内打乱行深；调用方持 LOG 锁，此处用 try_lock 防死锁）
+pub fn mirror_above_overlay(line: &str) {
+    let Ok(_g) = CANVAS.try_lock() else {
+        return; // 画布正忙：本行只落文件，不冒险插行
+    };
+    clear_overlay_rows_locked();
+    eprintln!("{line}");
+    CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 写入常驻过程行并唤醒重画（ui sink 过程分支调用）
+fn process_line(msg: &str) {
+    *PROCESS.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.to_string());
+    mark_dirty();
+}
+
+/// 清空常驻过程行（overlay 退出时调用）
+fn clear_process() {
+    *PROCESS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// 安装播放期 ui 输出汇（overlay 启动时调用）：
+/// 过程/结果 → 常驻第三行；失败 → 状态栏 toast（2s 反馈，不留痕）
+pub fn install_ui_sink() {
+    crate::ui::set_sink(std::sync::Arc::new(|msg: &str, is_fail: bool| {
+        if is_fail {
+            toast(&format!("× {msg}"));
+        } else {
+            process_line(msg);
+        }
+    }));
+}
+
 /// 持有画布锁（overlay print_row 与 toast 互斥写 stderr）
 pub(crate) fn canvas_lock() -> std::sync::MutexGuard<'static, ()> {
     CANVAS.lock().unwrap_or_else(|e| e.into_inner())
@@ -1050,9 +1097,10 @@ pub fn mark_dirty() {
     CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// 在 stderr 刷新播放底行（2~3 行，按 OVERLAY_ROWS 深度回移重画）：
+/// 在 stderr 刷新播放底行（2~4 行，按 OVERLAY_ROWS 深度回移重画）：
 /// 行1 状态栏 = 前缀+时间进度+♥/*N 收藏热度 + 右侧空一格接 toast（2s 反馈）
 /// 行2 歌词原文（缩进 2 空格），行3 译文（淡蓝，与原文同列缩进，仅在有译文时占行）
+/// 行4 过程行（dim，快捷下载等常驻反馈，仅在有内容时占行）
 #[cfg(unix)]
 fn print_row(
     tracks: &[LyricTrack],
@@ -1163,6 +1211,14 @@ fn print_row(
             crate::ui::soft_blue(&crate::ui::truncate_width(s, budget))
         )
     });
+    // 常驻过程行（C4）：歌词/译文之下，快捷下载等过程输出
+    let proc = PROCESS.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let row4 = proc.filter(|s| !s.is_empty()).map(|s| {
+        format!(
+            "  {}",
+            crate::ui::dim(&crate::ui::truncate_width(&s, budget))
+        )
+    });
     use std::sync::atomic::Ordering::Relaxed;
     let mut out = String::new();
     // 回移到首行（旧行深 >1 时上移 行深-1），逐行清后重画
@@ -1175,6 +1231,10 @@ fn print_row(
     if let Some(r3) = &row3 {
         out.push_str(&format!("\n\r\x1b[2K{r3}"));
         rows = 3;
+    }
+    if let Some(r4) = &row4 {
+        out.push_str(&format!("\n\r\x1b[2K{r4}"));
+        rows += 1;
     }
     // 旧行更深（3→2 译文消失）：下移清残留行再回到当前底行
     if prev > rows {

@@ -109,6 +109,10 @@ pub fn soft_blue(t: &str) -> String {
 /// 清掉当前行（防 spinner 转圈占行时后续输出黏在行尾）；TTY 下才写
 fn clear_cur_line() {
     use std::io::IsTerminal;
+    // 播放期 stdout 光标属于 overlay 底行块，任何 stdout 写都会挪光标打乱块
+    if json_mode() || sink_active() {
+        return;
+    }
     if !std::io::stdout().is_terminal() {
         return;
     }
@@ -117,8 +121,55 @@ fn clear_cur_line() {
     let _ = out.flush();
 }
 
+/// 解绑 stdout 当前的动态行（spinner/Live 单行进度），供 stderr 输出前先擦行
+/// 再写，防日志镜像/消息拼在进度行尾造成双行残留（fqdt 45 号教训）
+pub fn detach_line() {
+    if json_mode() {
+        return;
+    }
+    clear_cur_line();
+}
+
+/// 播放期输出汇（C3/C4/C6c）：overlay 活着时过程/结果/错误不再直写滚动区，
+/// 改经此汇分流——process 行进 overlay 常驻第三行、失败进状态栏 toast。
+/// 未安装（非播放期）时所有输出走原路径，行为不变。
+/// `is_fail`=true 时 msg 不带前缀，由汇方补 `×`
+pub type Sink = std::sync::Arc<dyn Fn(&str, bool) + Send + Sync>;
+static SINK: std::sync::Mutex<Option<Sink>> = std::sync::Mutex::new(None);
+
+/// 安装播放期输出汇（overlay 启动时调用，覆盖旧汇）
+pub fn set_sink(sink: Sink) {
+    *SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+}
+
+/// 卸载输出汇（overlay 退出时调用，恢复直写）
+pub fn clear_sink() {
+    *SINK.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// 命中汇则分发并返回 true（调用方据此跳过原有 stdout/stderr 输出）
+fn via_sink(msg: &str, is_fail: bool) -> bool {
+    let guard = SINK.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(sink) => {
+            sink(msg, is_fail);
+            true
+        }
+        None => false,
+    }
+}
+
+/// 输出汇是否已安装（播放期）：调用方据此跳过 stdout 表格/空行等
+/// 会挪动共享光标、打乱 overlay 块的输出
+pub fn sink_active() -> bool {
+    SINK.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
 pub fn step(msg: &str) {
     if json_mode() || quiet() {
+        return;
+    }
+    if via_sink(msg, false) {
         return;
     }
     if live() {
@@ -143,20 +194,29 @@ pub fn live_clear() {
     }
 }
 pub fn ok(msg: &str) {
-    clear_cur_line();
     if json_mode() {
         return;
     }
+    if via_sink(msg, false) {
+        return;
+    }
+    clear_cur_line();
     println!("  {} {}", good("✓"), msg);
 }
 pub fn skip(msg: &str) {
-    clear_cur_line();
     if json_mode() {
         return;
     }
+    if via_sink(msg, false) {
+        return;
+    }
+    clear_cur_line();
     println!("  {} {}", warn("◌"), msg);
 }
 pub fn fail(msg: &str) {
+    if via_sink(msg, true) {
+        return;
+    }
     clear_cur_line();
     eprintln!("  {} {}", bad("×"), msg);
 }
@@ -189,10 +249,13 @@ pub fn blank() {
 }
 
 pub fn info(msg: &str) {
-    clear_cur_line();
     if json_mode() || quiet() {
         return;
     }
+    if via_sink(msg, false) {
+        return;
+    }
+    clear_cur_line();
     // TTY 下按屏宽截断并右侧留 2 列空白：长行不顶到边缘、不自动换行
     //（println 另加 2 列前缀，故预算再减 2）
     if is_tty() {
@@ -407,6 +470,24 @@ impl Live {
         if json_mode() || quiet() || concurrent() {
             return;
         }
+        if via_sink(text, false) {
+            // 播放期：进度文本进 overlay 常驻行，不写 stdout
+            return;
+        }
+        self.write_inline(text, force);
+    }
+
+    /// 并发共享进度行专用：绕过 concurrent() 禁用（聚合器单点写入，无竞争）
+    pub fn update_shared(&mut self, text: &str, force: bool) {
+        // 播放期不写——共享进度会与第三行过程槽打架，结果行已由 sink 分流
+        if json_mode() || quiet() || sink_active() {
+            return;
+        }
+        self.write_inline(text, force);
+    }
+
+    /// 单行原地刷新本体：tty 下 \r+\x1b[K 覆写（列宽截断防换行），非 tty 仅 force 落行
+    fn write_inline(&mut self, text: &str, force: bool) {
         if self.tty {
             // 按终端列宽截断：整行不换行，\r+\x1b[K 单行刷新才有效（窄屏不刷屏）
             let clipped = truncate_width(text, term_width().saturating_sub(1));
@@ -436,6 +517,73 @@ impl Live {
 impl Drop for Live {
     fn drop(&mut self) {
         self.finish();
+    }
+}
+
+// ===== 并发下载共享进度行（C6b）=====
+// concurrent() 禁用的是各任务自己的 Live/Spinner（防多行互踩）；共享行由聚合器
+// 单点刷新一条 Live，显示 `完成首数 · 聚合字节进度`。仅 TTY 且非 json/quiet 激活；
+// 播放期（sink 激活）不写，避免与第三行过程槽打架。
+
+struct SharedLive {
+    live: Live,
+    /// 各任务最后上报的 (done, total) 字节
+    per: std::collections::HashMap<usize, (u64, u64)>,
+    finished: usize,
+    total_files: usize,
+    started: Instant,
+}
+
+static SHARED: std::sync::Mutex<Option<SharedLive>> = std::sync::Mutex::new(None);
+
+/// 并发分支开始时调用：TTY 下建共享行（json/quiet/非 TTY 为 no-op）
+pub fn shared_begin(total_files: usize) {
+    if !is_tty() || json_mode() || quiet() {
+        return;
+    }
+    let mut g = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    *g = Some(SharedLive {
+        live: Live::new(),
+        per: std::collections::HashMap::new(),
+        finished: 0,
+        total_files,
+        started: Instant::now(),
+    });
+}
+
+/// 任务进度上报（download_one 回调）；未激活时零开销返回
+pub fn shared_report(index: usize, done: u64, total: u64) {
+    let mut g = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = g.as_mut() else { return };
+    s.per.insert(index, (done, total));
+    s.render();
+}
+
+/// 任务完成（成功或失败都推进首数计数）
+pub fn shared_file_done() {
+    let mut g = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = g.as_mut() else { return };
+    s.finished += 1;
+    s.render();
+}
+
+/// 并发分支结束时调用：收掉共享行（无激活为 no-op）
+pub fn shared_end() {
+    let mut g = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    // take 出的 SharedLive 在此 drop → Live::finish 清行
+    *g = None;
+}
+
+impl SharedLive {
+    fn render(&mut self) {
+        let (mut done, mut total) = (0u64, 0u64);
+        for &(d, t) in self.per.values() {
+            done += d;
+            total += t;
+        }
+        let bar = progress_line(done, total, self.started);
+        let text = format!("{}/{} 首 ·{}", self.finished, self.total_files, bar);
+        self.live.update_shared(&text, false);
     }
 }
 
@@ -485,6 +633,10 @@ impl Spinner {
             tty: is_tty() && !json_mode() && !quiet() && !concurrent(),
         };
         if json_mode() || quiet() || concurrent() {
+            return s;
+        }
+        if via_sink(&s.label, false) {
+            // 播放期：取址标签进 overlay 常驻行，不启 stdout 转圈线程
             return s;
         }
         if s.tty {

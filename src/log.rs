@@ -103,7 +103,20 @@ fn write_line(level: &str, tag: &str, msg: &str) {
     let line = fmt_line(ms, level, tag, msg);
     let _ = writeln!(f, "{line}");
     if console() {
-        eprintln!("{line}"); // -v：stderr 镜像（fqdt core_log::set_console 先例）
+        // -v：stderr 镜像（fqdt core_log::set_console 先例）。
+        // 播放 overlay 活着时插入滚动历史上方（防打乱底行块），
+        // 否则先解绑 stdout 动态行再写（防拼在 spinner/Live 行尾，C15）
+        #[cfg(unix)]
+        {
+            if crate::player::overlay_alive() {
+                crate::player::mirror_above_overlay(&line);
+            } else {
+                crate::ui::detach_line();
+                eprintln!("{line}");
+            }
+        }
+        #[cfg(not(unix))]
+        eprintln!("{line}");
     }
 }
 
