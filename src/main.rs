@@ -4421,6 +4421,8 @@ async fn guard_loop(
         if pos as i64 != last_logged_pos {
             last_logged_pos = pos as i64;
             log::info("guard", &format!("pos → {pos}（count={count}）"));
+            // 歌真正切过去：切曲反馈（◀ 回退/▶ 下一曲）此刻淡出（m0133）
+            player::feedback_clear_hold();
         }
         let srcs_len = srcs.read().unwrap_or_else(|e| e.into_inner()).len() as u64;
         // 对账 v2：count 守门——guard 是唯一结构写者（insert/remove/add 必然改 count，
@@ -4676,6 +4678,10 @@ async fn guard_loop(
             let cmd = serde_json::json!({"command": ["playlist-play-index", abs]}).to_string();
             if player::ipc_send(&sock, &cmd).await.is_err() {
                 log::warn("nav", &format!("playlist-play-index {abs} 发送失败"));
+            } else {
+                // 切换指令已送达、mpv 立即切曲：切曲反馈（◀ 回退/▶ 下一曲）此刻淡出
+                //（m0133——不等下轮 2s 轮询；pos 变化处的同名调用作兜底）
+                player::feedback_clear_hold();
             }
         }
         // 双向保鲜：播放中每 60s 刷当前曲前/后各 5 首的直链（跳过当前曲——

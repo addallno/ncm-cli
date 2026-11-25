@@ -216,7 +216,7 @@ pub fn spawn_key_reader(
                                 .push_back((p - 1) as usize);
                             NAV_NOTIFY.notify_one();
                             crate::log::info("key", &format!("◀ 回退 {p}→{}", p - 1));
-                            feedback("◀ 回退");
+                            feedback_hold("◀ 回退"); // hold：歌切过去才淡出（m0133）
                         }
                         // 队首/位置未知：交回 mpv 默认行为
                         _ => {
@@ -241,7 +241,7 @@ pub fn spawn_key_reader(
                                 .push_back((p + 1) as usize);
                             NAV_NOTIFY.notify_one();
                             crate::log::info("key", &format!("▶ 下一曲 {p}→{}", p + 1));
-                            feedback("▶ 下一曲");
+                            feedback_hold("▶ 下一曲"); // hold：歌切过去才淡出（m0133）
                         }
                         // 队尾/位置未知：交回 mpv 默认行为（不回卷）
                         _ => {
@@ -1038,14 +1038,17 @@ pub(crate) fn canvas_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// 按键就地反馈槽（非 toast）：overlay 渲染时拼在歌词行末尾，2s TTL
 #[cfg(unix)]
-static FEEDBACK: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+static FEEDBACK: std::sync::Mutex<Option<(String, std::time::Instant, bool)>> =
     std::sync::Mutex::new(None);
+
+/// 切曲反馈兜底超时：hold 反馈等 pos 变化清除，切失败时最多挂 10s
+const FEEDBACK_HOLD_TTL: Duration = Duration::from_secs(10);
 
 /// 写入按键就地反馈并唤醒 overlay 重画；2s 后自动过期（置 dirty 触发重画清除）
 #[cfg(unix)]
 fn feedback(msg: impl Into<String>) {
     *FEEDBACK.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some((msg.into(), std::time::Instant::now()));
+        Some((msg.into(), std::time::Instant::now(), false));
     CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1053,13 +1056,43 @@ fn feedback(msg: impl Into<String>) {
     });
 }
 
-/// 读取未过期的就地反馈（print_row 渲染拼接用）
+/// 切曲反馈（hold）：持续显示直到歌真正切过去——guard 检测 pos 变化后
+/// 调 `feedback_clear_hold()` 淡出；切失败由 10s 兜底超时清除（m0133）
+#[cfg(unix)]
+fn feedback_hold(msg: impl Into<String>) {
+    *FEEDBACK.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((msg.into(), std::time::Instant::now(), true));
+    CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    tokio::spawn(async {
+        tokio::time::sleep(FEEDBACK_HOLD_TTL).await;
+        CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
+/// 歌真正切换完成（guard 观测 pos 变化）：清掉 hold 反馈使其淡出；
+/// 非 hold 反馈按自身 2s TTL 走，不受影响
+#[cfg(unix)]
+pub fn feedback_clear_hold() {
+    let mut g = FEEDBACK.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(g.as_ref(), Some((_, _, true))) {
+        *g = None;
+        CANVAS_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// 读取未过期的就地反馈（print_row 渲染拼接用）：
+/// 普通反馈 2s；hold 反馈持续到 pos 变化清除或 10s 兜底
 #[cfg(unix)]
 fn feedback_now() -> Option<String> {
     let g = FEEDBACK.lock().unwrap_or_else(|e| e.into_inner());
-    g.as_ref()
-        .filter(|(_, at)| at.elapsed() < Duration::from_secs(2))
-        .map(|(m, _)| m.clone())
+    g.as_ref().and_then(|(m, at, hold)| {
+        let ttl = if *hold {
+            FEEDBACK_HOLD_TTL
+        } else {
+            Duration::from_secs(2)
+        };
+        (at.elapsed() < ttl).then(|| m.clone())
+    })
 }
 
 /// 清掉全部底行（状态栏+歌词[+译文]），光标回到首行行首
